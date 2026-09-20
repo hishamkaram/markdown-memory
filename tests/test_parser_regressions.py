@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeEmbedder, vectors_for
 from helpers import parse, paths
 
 from markdown_memory.db import Database
@@ -18,7 +18,13 @@ from markdown_memory.models import (
     ParsedDocument,
     SectionDraft,
 )
-from markdown_memory.parser import DEFAULT_MAX_SECTION_CHARS, MarkdownParser, join_parts
+from markdown_memory.parser import (
+    DEFAULT_MAX_SECTION_CHARS,
+    MAX_UNIT_CHARS,
+    MarkdownParser,
+    _windows,
+    join_parts,
+)
 from markdown_memory.search import HybridSearcher
 
 
@@ -433,7 +439,10 @@ class TestFencesInsideOversizedBlocks:
         assert join_parts(document.sections) == text.rstrip("\n")
         holder = next(s for s in document.sections if fence in s.content)
         assert holder.content == fence
-        assert len(holder.units) == 1 and holder.units[0].startswith('{ "option_000"')
+        # The fence is one block, windowed into passages that reassemble exactly; what
+        # matters here is that the part boundary did not cut it.
+        assert holder.units[0].startswith('{ "option_000"')
+        assert "option_044" in " ".join(holder.units)
 
     def test_fences_inside_a_tight_list_are_not_cut(self) -> None:
         def fenced(item: int) -> str:
@@ -497,3 +506,85 @@ class TestFrontMatterKeysInAnyScript:
 
     def test_a_key_still_cannot_start_with_a_digit(self) -> None:
         assert paths(parse("---\n2024: review\n---\n\n# T\n")) != ["T"]
+
+
+class TestLongBlocksKeepTheirTail:
+    """A passage cut at the character limit left its tail with no vector at all.
+
+    Found by using the server: this project's own CLAUDE.md lists its commands in one
+    fenced block, which was cut mid-word at `reindex_docs.py D`, so `mutation_check.py`
+    and `check.sh` were unreachable by passage search while sitting in the index. Asking
+    "how do I run the mutation harness" returned the wrong section. Across the vendored
+    corpus the same cut discarded 73,598 characters.
+    """
+
+    COMMANDS = "\n".join(
+        f"uv run marker-{n} --flag value   # step {n} of the documented workflow" for n in range(24)
+    )
+
+    def section(self) -> str:
+        return f"## Commands\n\n```bash\n{self.COMMANDS}\n```\n"
+
+    def test_no_line_of_a_long_block_is_dropped(self) -> None:
+        units = MarkdownParser().extract_units(self.section(), skip_heading=True)
+        covered = " ".join(units)
+        assert [n for n in range(24) if f"marker-{n}" not in covered] == []
+
+    def test_every_window_still_respects_the_limit(self) -> None:
+        """The limit is a window size now; it must not become a licence to exceed it."""
+        units = MarkdownParser().extract_units(self.section(), skip_heading=True)
+        assert units and all(0 < len(unit) <= MAX_UNIT_CHARS for unit in units)
+
+    def test_the_windows_reassemble_into_exactly_what_arrived(self) -> None:
+        """The property that makes this a fix rather than a different cut.
+
+        Joining the windows returns the input character for character: nothing dropped,
+        nothing duplicated, nothing reordered.
+        """
+        text = self.COMMANDS
+        pieces = _windows(text)
+        assert "".join(pieces) == text
+        assert all(0 < len(piece) <= MAX_UNIT_CHARS for piece in pieces)
+
+    def test_a_window_does_not_end_mid_word(self) -> None:
+        pieces = _windows(self.COMMANDS)
+        for piece, following in zip(pieces, pieces[1:], strict=False):
+            assert piece[-1].isspace() or following[0].isspace(), (
+                f"cut mid-word: ...{piece[-20:]!r} | {following[:20]!r}..."
+            )
+
+    def test_a_run_with_no_boundary_is_still_split_rather_than_lost(self) -> None:
+        """An unbroken 2,000-character token has nowhere to break; it must not vanish."""
+        pieces = _windows("x" * 2000)
+        assert "".join(pieces) == "x" * 2000
+        assert all(len(piece) <= MAX_UNIT_CHARS for piece in pieces)
+
+    def test_prose_too_not_only_code(self) -> None:
+        """The cap was chosen for prose and applied to code; both were losing their tail."""
+        sentences = " ".join(f"Sentence number {n} explains a distinct rule." for n in range(40))
+        units = MarkdownParser().extract_units(f"## Notes\n\n{sentences}\n", skip_heading=True)
+        covered = " ".join(units)
+        assert [n for n in range(40) if f"number {n} " not in covered + " "] == []
+
+    def test_a_section_that_fits_is_left_exactly_as_it_was(self) -> None:
+        """Windowing must not disturb the 98% of passages that were never truncated."""
+        units = MarkdownParser().extract_units(
+            "## Short\n\nOne small paragraph.\n", skip_heading=True
+        )
+        assert units == ("One small paragraph.",)
+
+    def test_the_tail_reaches_the_embedder(self, db: Database, fake_embedder: FakeEmbedder) -> None:
+        """The assertion that cannot pass by coincidence.
+
+        FTS5 indexes the whole section either way, and search fuses both rankings, so a
+        ranking test could pass while the vector never existed. `document_calls` records
+        the exact texts handed to the embedder.
+        """
+        parsed = MarkdownParser().parse(self.section(), fallback_title="Doc")
+        sections = list(parsed.sections)
+        db.replace_document(
+            file_path="/d/commands.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        embedded = [text for batch in fake_embedder.document_calls for text in batch]
+        assert any("marker-23" in text for text in embedded), "the tail never reached the embedder"

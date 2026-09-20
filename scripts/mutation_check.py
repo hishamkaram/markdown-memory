@@ -357,6 +357,34 @@ MUTATIONS = (
         new="        except ValueError:\n            return []",
         tests="test_a_half_written_line_does_not_lose_the_session",
     ),
+    Mutation(
+        name="units: throw away everything past the character limit again",
+        module="parser.py",
+        old="            for window in _windows(unit):",
+        new="            for window in [unit[:MAX_UNIT_CHARS]]:",
+        tests="test_no_line_of_a_long_block_is_dropped or test_the_tail_reaches_the_embedder",
+    ),
+    Mutation(
+        name="units: let a window run past the limit instead of splitting",
+        module="parser.py",
+        old="    if len(text) <= MAX_UNIT_CHARS:\n        return [text]",
+        new="    if True:\n        return [text]",
+        tests="test_every_window_still_respects_the_limit",
+    ),
+    Mutation(
+        name="units: drop the remainder after the last full window",
+        module="parser.py",
+        old="    if remaining:\n        pieces.append(remaining)",
+        new="    if False:\n        pieces.append(remaining)",
+        tests="test_the_windows_reassemble_into_exactly_what_arrived",
+    ),
+    Mutation(
+        name="units: cut a window mid-word instead of at a boundary",
+        module="parser.py",
+        old='        cut = max(head.rfind("\\n"), head.rfind(". "), head.rfind(" "))',
+        new="        cut = MAX_UNIT_CHARS",
+        tests="test_a_window_does_not_end_mid_word",
+    ),
 )
 
 

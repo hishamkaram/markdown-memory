@@ -40,7 +40,7 @@ The first run downloads the embedding model (~330 MB) into
 | --- | --- |
 | `src/markdown_memory/models.py` | Frozen dataclasses: `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `OutlineNode`, `SearchResult`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
-| `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` |
+| `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v2), repository methods, `integrity_problems()` |
 | `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, incremental `Indexer` |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |

@@ -154,10 +154,12 @@ times faster at a real cost in accuracy - see the table above. EmbeddingGemma is
    vector index.
 2. **Vectors.** Every paragraph, list item, table row (rendered as `Header: cell; ...`) and
    code block - also inside block quotes and list items - is embedded separately, alongside
-   one vector for the section. A table split across `(Part n)` sections keeps its header
-   for every part. A section is
-   ranked by its closest vector, so one relevant table row is enough. Heading-only
-   sections have no vectors and are never returned ahead of their children.
+   one vector for the section. A passage longer than 600 characters is split into
+   consecutive windows at line, sentence or word boundaries, so a long command list or
+   configuration block keeps a vector for all of itself rather than for its first 600
+   characters. A table split across `(Part n)` sections keeps its header for every part. A
+   section is ranked by its closest vector, so one relevant table row is enough.
+   Heading-only sections have no vectors and are never returned ahead of their children.
 3. **Reciprocal Rank Fusion** of the two rankings.
 
 Cross-encoder rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and

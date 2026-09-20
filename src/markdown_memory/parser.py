@@ -341,11 +341,49 @@ class MarkdownParser:
             else:
                 units.append(" ".join(_leaf_texts(block)))
             index = end + 1
-        cleaned = (_WHITESPACE.sub(" ", unit.replace("|", " ")).strip() for unit in units)
-        return tuple(unit[:MAX_UNIT_CHARS] for unit in cleaned if unit)[:MAX_UNITS_PER_SECTION]
+        passages: list[str] = []
+        for unit in units:
+            if len(passages) >= MAX_UNITS_PER_SECTION:
+                break
+            for window in _windows(unit):
+                cleaned = _WHITESPACE.sub(" ", window.replace("|", " ")).strip()
+                if cleaned:
+                    passages.append(cleaned)
+        return tuple(passages)
 
 
 # ---------------------------------------------------------------------- helpers
+
+
+def _windows(text: str) -> list[str]:
+    """``text`` as consecutive pieces of at most ``MAX_UNIT_CHARS``, nothing discarded.
+
+    A fenced block arrives here as one unit. Slicing it to the limit - which is what this
+    used to do - gave the tail no vector at all: in this project's own CLAUDE.md the
+    command list was cut mid-word at ``reindex_docs.py D``, and every command after that
+    point was unreachable by passage search while sitting in the index in plain sight.
+    Across the vendored corpus that was 73,598 characters with no passage vector.
+
+    Pieces break at a newline where possible, then at a sentence end, then at a space, so
+    a window is a run of whole lines or whole words rather than an arbitrary cut. The
+    limit is a window size now, not a truncation point.
+    """
+    if len(text) <= MAX_UNIT_CHARS:
+        return [text]
+    pieces: list[str] = []
+    remaining = text
+    while len(remaining) > MAX_UNIT_CHARS:
+        head = remaining[:MAX_UNIT_CHARS]
+        cut = max(head.rfind("\n"), head.rfind(". "), head.rfind(" "))
+        # A cut in the first half would make a window mostly empty; a hard cut keeps the
+        # windows even, and no character is lost either way.
+        if cut < MAX_UNIT_CHARS // 2:
+            cut = MAX_UNIT_CHARS
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        pieces.append(remaining)
+    return pieces
 
 
 _TABLE_DELIMITER = re.compile(
