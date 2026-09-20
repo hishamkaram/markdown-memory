@@ -9,6 +9,19 @@
 # use `git push --no-verify`.
 set -euo pipefail
 
+# main is merged through pull requests only. A direct push is refused here as well as
+# on the remote: the remote rule can be relaxed or missing on a fresh clone, and by the
+# time it answers, the gate has already spent two minutes running.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master)
+            echo "pre-push: main is protected; open a pull request from a branch." >&2
+            echo "pre-push: (git switch -c <branch> && git push -u origin <branch>)" >&2
+            exit 1
+            ;;
+    esac
+done
+
 root="$(git rev-parse --show-toplevel)"
 if [ ! -x "$root/scripts/check.sh" ]; then
     echo "pre-push: scripts/check.sh is missing or not executable" >&2
