@@ -80,15 +80,22 @@ indexed again.
 
 | Preset | Download | Peak RAM | Query (median) | Indexing | Held-out Top-1 / Top-3 / Top-5 |
 | --- | --- | --- | --- | --- | --- |
-| `embeddinggemma` (default) | ~330 MB | ~1.6 GB | ~370 ms | ~5 vectors/s | 88% / 97% / 97% |
+| `embeddinggemma` (default) | ~330 MB | ~1.6 GB | ~370 ms | 2.4-3.8 vectors/s | 88% / 97% / 97% |
 | `bge-small` | ~65 MB | ~1.1 GB | ~26 ms | ~12 vectors/s | 68% / 82% / 88% |
 
 Measured by `scripts/eval_retrieval.py` on a laptop CPU: a frozen 54-section corpus and 34
 held-out paraphrase queries written before any tuning (a second, deliberately adversarial
 set scores 71% / 88% / 91% with EmbeddingGemma and 53% / 68% / 79% with bge-small). Exact
 identifiers - flags, environment variables, error strings - are 100% Top-1 with either
-preset, because they are answered by FTS5. Indexing is incremental, so the slow first
-pass is paid once per file version. EmbeddingGemma is distributed under the
+preset, because they are answered by FTS5.
+
+**The first index of a large documentation set is slow.** EmbeddingGemma embeds 2.4-3.8
+vectors per second on a CPU, and every section costs one vector plus one per paragraph,
+list item, table row and code block - so a 1,700-section set is roughly 10,000 vectors and
+takes **25-60 minutes**. Budget for it, and run it once: indexing is incremental by
+SHA-256, so a re-index that finds nothing changed takes milliseconds (8 ms for 36
+sections), and only edited files are re-embedded afterwards. `bge-small` indexes several
+times faster at a real cost in accuracy - see the table above. EmbeddingGemma is distributed under the
 [Gemma Terms of Use](https://ai.google.dev/gemma/terms); the revision is pinned.
 
 ## How search ranks

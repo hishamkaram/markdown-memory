@@ -29,7 +29,7 @@ uv run python scripts/reindex_docs.py <directory> --force
 - Without `--force` it is a normal incremental run followed by the same checks.
 
 Only documents under `<directory>` are dropped; other indexed directories are untouched.
-Expect roughly 5 vectors per second with EmbeddingGemma on CPU (each section costs one
+Expect 2.4-3.8 vectors per second with EmbeddingGemma on CPU (each section costs one
 vector plus one per paragraph, list item, table row and code block).
 
 ## What is verified
