@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
@@ -516,3 +516,63 @@ class TestSectionIdsAreNeverReused:
                 assert not seen & ids
                 seen |= ids
                 database.delete_documents([f"/d/{round_number}.md"])
+
+
+class TestSectionIdsOnAnUpgradedDatabase:
+    """A database written before the high-water mark existed must not reuse ids either."""
+
+    @staticmethod
+    def section_ids(db: Database) -> list[int]:
+        return [int(row[0]) for row in db.connection().execute("SELECT id FROM sections")]
+
+    @staticmethod
+    def downgrade(db: Database) -> None:
+        """What the previous release left behind: rows, but no high-water mark in meta."""
+        with db.transaction() as conn:
+            conn.execute("DELETE FROM meta WHERE key = 'next_section_id'")
+
+    def test_reindexing_does_not_hand_back_the_ids_it_just_deleted(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        first = [draft(f"S{n}", f"## S{n}\n\nbody {n}") for n in range(3)]
+        db.replace_document(
+            file_path="/d/a.md", title="D", content_hash="h1", last_modified=1,
+            sections=first, vectors=vectors_for(fake_embedder, first),
+        )  # fmt: skip
+        before = self.section_ids(db)
+        self.downgrade(db)
+        second = [draft(f"T{n}", f"## T{n}\n\nother {n}") for n in range(3)]
+        db.replace_document(
+            file_path="/d/a.md", title="D", content_hash="h2", last_modified=2,
+            sections=second, vectors=vectors_for(fake_embedder, second),
+        )  # fmt: skip
+        # The mark is sampled before the document's old sections are deleted.
+        assert not set(before) & set(self.section_ids(db))
+
+    def test_opening_an_older_database_records_the_mark_before_any_write(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        path = tmp_path / "upgrade.db"
+        with Database(path) as database:
+            store(database, fake_embedder, "/d/a.md", count=3)
+            highest = max(self.section_ids(database))
+            self.downgrade(database)
+        with Database(path) as upgraded:
+            assert upgraded.get_meta("next_section_id") == str(highest + 1)
+            upgraded.delete_documents(["/d/a.md"])  # purge, then index something else
+            store(upgraded, fake_embedder, "/d/b.md", count=3)
+            assert min(self.section_ids(upgraded)) > highest
+
+
+class TestNoticeNumberingBeyondFourDigits:
+    def test_the_ten_thousandth_notice_does_not_collide(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        with db.transaction() as conn:  # as if 10_000 notices had been raised over time
+            conn.execute("INSERT INTO meta(key, value) VALUES ('notice:9999', 'older')")
+            conn.execute("INSERT INTO meta(key, value) VALUES ('notice:10000', 'newer')")
+        store(db, fake_embedder, "/d/a.md", count=1)
+        assert db.clear(notice=lambda count: f"newest: dropped {count}") == 1
+        # 'notice:10000' sorts below 'notice:9999' as text: both the successor key and the
+        # delivery order have to be computed numerically.
+        assert list(db.pending_notices().values()) == ["older", "newer", "newest: dropped 1"]

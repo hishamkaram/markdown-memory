@@ -385,9 +385,30 @@ class Database:
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
+        self._seed_section_ids()
         stored_dim = self.get_meta("embedding_dim")
         if stored_dim is not None and int(stored_dim) != self._embedding_dim:
             self._rebuild_for_dimension(int(stored_dim))
+
+    def _seed_section_ids(self) -> None:
+        """Give a database from an earlier release its section-id high-water mark.
+
+        Without it the mark would be derived from ``MAX(id)`` after rows had already been
+        deleted, so a re-index - or a purge followed by one - would hand the freed ids
+        straight back out, which is exactly what ``_next_section_id`` exists to prevent.
+        """
+        if self.get_meta(_SECTION_ID_META_KEY) is not None:
+            return
+        with self.transaction() as tx:
+            if tx.execute(
+                "SELECT 1 FROM meta WHERE key = ?", (_SECTION_ID_META_KEY,)
+            ).fetchone():
+                return  # another process seeded it while this one waited for the lock
+            tx.execute(
+                "INSERT INTO meta(key, value) "
+                "SELECT ?, CAST(COALESCE(MAX(id), 0) + 1 AS TEXT) FROM sections",
+                (_SECTION_ID_META_KEY,),
+            )
 
     def _rebuild_for_dimension(self, stored_dim: int) -> None:
         """Re-create the vector tables for a model with a different output size.
@@ -444,7 +465,8 @@ class Database:
         """
         with self._reading() as conn:
             rows = conn.execute(
-                "SELECT key, value FROM meta WHERE key LIKE 'notice:%' ORDER BY key"
+                "SELECT key, value FROM meta WHERE key LIKE 'notice:%' "
+                "ORDER BY CAST(substr(key, 8) AS INTEGER)"
             ).fetchall()
         return {str(key): str(value) for key, value in rows}
 
@@ -548,6 +570,10 @@ class Database:
             for embedding in (*present, *vector.units):
                 self._check_vector(embedding, f"Embedding for {file_path}")
         with self.transaction() as conn:
+            # Sampled before the delete below: on a database from an earlier release the
+            # high-water mark is missing, and MAX(id) taken afterwards would hand the ids
+            # of the rows just deleted straight back out.
+            section_id = _next_section_id(conn) - 1
             row = conn.execute(
                 "SELECT id FROM documents WHERE file_path = ?", (file_path,)
             ).fetchone()
@@ -568,7 +594,6 @@ class Database:
                     (title, content_hash, last_modified, doc_id),
                 )
                 conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
-            section_id = _next_section_id(conn) - 1
             for section, vector in zip(sections, vectors, strict=True):
                 section_id += 1
                 conn.execute(
@@ -873,9 +898,12 @@ def _next_section_id(conn: sqlite3.Connection) -> int:
 
 def _add_notice(conn: sqlite3.Connection, message: str) -> None:
     logger.warning(message)
-    # Numbered after the newest, not by count: notices are dismissed one by one.
-    newest = conn.execute("SELECT MAX(key) FROM meta WHERE key LIKE 'notice:%'").fetchone()[0]
-    number = 0 if newest is None else int(str(newest).removeprefix("notice:")) + 1
+    # Numbered after the newest, not by count: notices are dismissed one by one. The key is
+    # TEXT, so the successor is taken numerically - 'notice:10000' sorts below 'notice:9999'.
+    newest = conn.execute(
+        "SELECT MAX(CAST(substr(key, 8) AS INTEGER)) FROM meta WHERE key LIKE 'notice:%'"
+    ).fetchone()[0]
+    number = 0 if newest is None else int(newest) + 1
     conn.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (f"notice:{number:04d}", message))
 
 
