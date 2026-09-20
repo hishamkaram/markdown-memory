@@ -22,6 +22,7 @@ uv run python scripts/eval_retrieval.py        # retrieval accuracy gate (see po
 uv run python scripts/live_test.py             # end-to-end: spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/reindex_docs.py DIR --force   # forced re-index + integrity verification
 scripts/check.sh                               # ruff + format + mypy + pytest + live test, fail-fast
+uv run python scripts/mutation_check.py        # delete guarded behaviours; a test must notice
 git config core.hooksPath .githooks             # once per clone: run that gate on every push
 ```
 
@@ -75,7 +76,10 @@ vec tables inside `Database.replace_document`.
   "Error executing tool".
 - **Ruff**: line length 100, rules `E,F,I,N,UP,B,A,C4,SIM,TID`. Match the surrounding
   comment density; comments explain why, not what.
-- **Every bug fix gets a regression test** that fails when the fix is reverted.
+- **Every bug fix gets a regression test** that fails when the fix is reverted. Prove
+  it: `scripts/mutation_check.py` deletes each guarded behaviour in a throwaway copy of
+  the package and fails if the suite stays green. Add an entry when a fix protects
+  something a test could pass without.
 
 ## Retrieval regression policy
 
