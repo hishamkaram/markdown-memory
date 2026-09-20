@@ -98,7 +98,9 @@ pass is paid once per file version. EmbeddingGemma is distributed under the
    identifier-like term - a stray match on "data" or "deploy" no longer outvotes the
    vector index.
 2. **Vectors.** Every paragraph, list item, table row (rendered as `Header: cell; ...`) and
-   code block is embedded separately, alongside one vector for the section. A section is
+   code block - also inside block quotes and list items - is embedded separately, alongside
+   one vector for the section. A table split across `(Part n)` sections keeps its header
+   for every part. A section is
    ranked by its closest vector, so one relevant table row is enough. Heading-only
    sections have no vectors and are never returned ahead of their children.
 3. **Reciprocal Rank Fusion** of the two rankings.
@@ -115,14 +117,18 @@ All logging goes to **stderr**. stdout carries JSON-RPC frames only.
 - **Preamble**: badges/summary before the first heading become `[Overview / Preamble]`.
 - **YAML front matter**: kept out of the AST (CommonMark would read it as a setext
   heading) and used as a title fallback. A leading `---` rule followed by prose is not
-  mistaken for it.
+  mistaken for it. One case is inherently ambiguous - a single `key: value` line between
+  two `---` lines - and is read as front matter, as static-site generators do, unless the
+  key is an admonition word (`Note:`, `Warning:`, `TODO:` ...).
 - **Unclosed code fences**: CommonMark runs them to EOF - or to the closing marker of a
   *later* fence - swallowing the sections in between. The fence is closed before the next
   blank-line-preceded ATX heading instead. A level-1 `# ...` line is treated as a comment
   unless the fence language cannot have `#` comments (JSON, Go, ...). This is a heuristic:
   a fence that merely *looks* closed is only cut on strong evidence (it contains another
   opening fence with an info string, or the document ends inside a bare fence and the cut
-  makes the rest well formed).
+  makes the rest well formed), and never when the repair would lose a heading that was
+  already found. Repair work is capped per document, so a pathological file costs a
+  bounded number of extra parses rather than one per fence.
 - **No headings / walls of text**: split on paragraph boundaries, then on lines, then on
   whitespace. A fenced block is only cut when it exceeds the limit by itself.
 - **Colliding breadcrumbs** get a ` [2]`, ` [3]` suffix (also against generated

@@ -20,9 +20,12 @@ uv run python scripts/reindex_docs.py <directory> --force
 - `--db PATH` targets a specific database (default `MARKDOWN_MEMORY_DB`, else
   `$XDG_DATA_HOME/markdown-memory/index.db`). **Use the same database the MCP server uses**,
   or you will verify a different index than the one being searched.
-- `--embedder {embeddinggemma,bge-small}` must match the server's. A different embedder has
-  a different vector size: the whole index (every directory) is discarded and must be
-  rebuilt - the script prints a `NOTE` when that happens.
+- `--embedder {embeddinggemma,bge-small}` must match the server's. **Opening a database
+  with the other embedder is destructive**: the vector size differs, so the whole index -
+  every directory, not just this one - is discarded on open and must be rebuilt. The
+  summary then carries a `NOTE ... discarded all N previously indexed documents`; repeat
+  that to the user and re-index the other roots. Confirm the embedder before running
+  against a database you did not create.
 - Without `--force` it is a normal incremental run followed by the same checks.
 
 Only documents under `<directory>` are dropped; other indexed directories are untouched.
@@ -51,7 +54,10 @@ The script calls `Database.integrity_problems()` and exits non-zero if it return
 
 - `ERROR` lines for individual files: fix or exclude the file, then re-run. A model that
   cannot load aborts the whole run instead (one error, not one per file).
-- Integrity problems after a forced re-index mean the database file itself is damaged:
+- `could not verify the FTS5 index: the database is locked` is **not damage**: another
+  process (usually the MCP server, mid-index) holds the write lock. Wait and re-run. Never
+  delete a database because of this message.
+- Any other integrity problem after a forced re-index means the database file itself is damaged:
   stop the MCP server, delete the database file (it is only a cache of the Markdown
   files) plus its `-wal` and `-shm` companions, and run the script again. Ask before
   deleting if the path is not the default one.

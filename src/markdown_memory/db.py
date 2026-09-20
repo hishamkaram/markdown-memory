@@ -369,6 +369,17 @@ class Database:
                     ).fetchone()
                     for statement in _schema_v2(int(stored[0])):
                         tx.execute(statement)
+                    # Sections indexed before v2 have no passages, and their unchanged
+                    # SHA-256 would make every later run skip them. The index is a cache
+                    # of the files: drop it so the next index_directory rebuilds it whole.
+                    dropped = tx.execute("DELETE FROM documents").rowcount
+                    if dropped:
+                        _add_notice(
+                            tx,
+                            f"The index format changed (passage-level vectors): discarded all "
+                            f"{dropped} previously indexed documents from every directory. "
+                            "Re-run index_directory for each documentation root.",
+                        )
                     applied.append(2)
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
@@ -391,7 +402,14 @@ class Database:
             self._path,
         )
         with self.transaction() as tx:
-            tx.execute("DELETE FROM documents")
+            dropped = tx.execute("DELETE FROM documents").rowcount
+            if dropped:
+                _add_notice(
+                    tx,
+                    f"The embedding size changed ({stored_dim} -> {self._embedding_dim} "
+                    f"dimensions): discarded all {dropped} previously indexed documents from "
+                    "every directory. Re-run index_directory for each documentation root.",
+                )
             tx.execute("DROP TABLE sections_vec")
             tx.execute("DROP TABLE units_vec")
             for statement in _vector_tables(self._embedding_dim):
@@ -415,6 +433,19 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def take_notices(self) -> list[str]:
+        """Return and clear the messages left by migrations that discarded the index.
+
+        They are persisted, not logged only, so that whoever next runs ``index_directory``
+        - possibly another process, much later - is told why the index was empty.
+        """
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'notice:%' ORDER BY key"
+            ).fetchall()
+            conn.execute("DELETE FROM meta WHERE key LIKE 'notice:%'")
+        return [str(value) for _, value in rows]
 
     def pragma(self, name: str) -> str:
         """Return a PRAGMA's current value on this thread's connection."""
@@ -717,36 +748,63 @@ class Database:
         """
         problems: list[str] = []
         blob_bytes = self._embedding_dim * 4
-        with self._reading() as conn:
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version != SCHEMA_VERSION:
-                problems.append(f"schema version is {version}, expected {SCHEMA_VERSION}")
-            pages = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
-            if pages != ["ok"]:
-                problems.append("PRAGMA integrity_check: " + "; ".join(pages[:5]))
-            orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
-            if orphans:
-                problems.append(f"PRAGMA foreign_key_check: {len(orphans)} orphaned row(s)")
-            try:
-                # rank = 1 makes FTS5 compare the index with the external content table;
-                # the plain form only checks the index's internal consistency.
-                conn.execute(
-                    "INSERT INTO sections_fts(sections_fts, rank) VALUES ('integrity-check', 1)"
-                )
-            except sqlite3.Error as exc:
-                problems.append(f"FTS5 index does not match the sections table: {exc}")
-            with_passages = int(
-                conn.execute("SELECT COUNT(DISTINCT section_id) FROM units").fetchone()[0]
+        conn = self.connection()
+        try:
+            # rank = 1 makes FTS5 compare the index with the external content table; the
+            # plain form only checks the index's internal consistency. The command is an
+            # INSERT, so it needs the write lock - failing to get it proves nothing.
+            conn.execute(
+                "INSERT INTO sections_fts(sections_fts, rank) VALUES ('integrity-check', 1)"
             )
-            wrong_size = sum(
-                int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE length(embedding) != ?",
-                                 (blob_bytes,)).fetchone()[0])
-                for table in ("sections_vec", "units_vec")
-            )  # fmt: skip
-        counts = {
-            table: self.count_rows(table)
-            for table in ("sections", "sections_fts", "sections_vec", "units", "units_vec")
-        }
+        except sqlite3.Error as exc:
+            if _is_lock_error(exc):
+                problems.append(
+                    "could not verify the FTS5 index: the database is locked by another "
+                    "writer (not a sign of damage - retry when indexing has finished)"
+                )
+            else:
+                problems.append(f"FTS5 index does not match the sections table: {exc}")
+        try:
+            conn.execute("BEGIN")  # one read snapshot: counts taken mid-write would disagree
+            try:
+                version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                pages = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+                orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
+                counts = {
+                    table: int(conn.execute(f"SELECT COUNT(*) FROM {source}").fetchone()[0])
+                    for table, source in (
+                        ("sections", "sections"),
+                        ("sections_fts", "sections_fts_docsize"),
+                        ("sections_vec", "sections_vec"),
+                        ("units", "units"),
+                        ("units_vec", "units_vec"),
+                    )
+                }
+                with_passages = int(
+                    conn.execute("SELECT COUNT(DISTINCT section_id) FROM units").fetchone()[0]
+                )
+                wrong_size = sum(
+                    int(
+                        conn.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE length(embedding) != ?",
+                            (blob_bytes,),
+                        ).fetchone()[0]
+                    )
+                    for table in ("sections_vec", "units_vec")
+                )
+                row = conn.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()
+                stored_dim = None if row is None else str(row[0])
+            finally:
+                conn.execute("ROLLBACK")
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Integrity check could not read the database: {exc}") from exc
+
+        if version != SCHEMA_VERSION:
+            problems.append(f"schema version is {version}, expected {SCHEMA_VERSION}")
+        if pages != ["ok"]:
+            problems.append("PRAGMA integrity_check: " + "; ".join(pages[:5]))
+        if orphans:
+            problems.append(f"PRAGMA foreign_key_check: {len(orphans)} orphaned row(s)")
         if counts["sections"] != counts["sections_fts"]:
             problems.append(f"{counts['sections']} sections but {counts['sections_fts']} FTS rows")
         if counts["units"] != counts["units_vec"]:
@@ -760,7 +818,6 @@ class Database:
             problems.append(
                 f"{wrong_size} stored vector(s) are not {self._embedding_dim}-dimensional"
             )
-        stored_dim = self.get_meta("embedding_dim")
         if stored_dim != str(self._embedding_dim):
             problems.append(f"meta embedding_dim is {stored_dim}, expected {self._embedding_dim}")
         return problems
@@ -779,11 +836,22 @@ class Database:
         return int(row[0])
 
 
+def _add_notice(conn: sqlite3.Connection, message: str) -> None:
+    logger.warning(message)
+    count = int(conn.execute("SELECT COUNT(*) FROM meta WHERE key LIKE 'notice:%'").fetchone()[0])
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (f"notice:{count:04d}", message))
+
+
 def _close_quietly(conn: sqlite3.Connection) -> None:
     try:
         conn.close()
     except sqlite3.Error:  # pragma: no cover - best effort
         logger.warning("Failed to close a SQLite connection", exc_info=True)
+
+
+def _is_lock_error(exc: sqlite3.Error) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
 
 
 def _enable_wal(conn: sqlite3.Connection) -> None:
@@ -797,8 +865,7 @@ def _enable_wal(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA journal_mode = WAL")
             return
         except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            if attempt == _WAL_ATTEMPTS - 1 or not ("locked" in message or "busy" in message):
+            if attempt == _WAL_ATTEMPTS - 1 or not _is_lock_error(exc):
                 raise
             time.sleep(_WAL_RETRY_SECONDS * (attempt + 1))
 

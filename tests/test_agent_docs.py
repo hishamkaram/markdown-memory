@@ -14,6 +14,7 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 
 from markdown_memory.db import Database
+from markdown_memory.indexer import Embedder
 from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
 
@@ -212,6 +213,7 @@ class TestIntegrityProblems:
         assert "1 section vectors but 2 sections with passages" in problems
         assert "2 sections but 0 FTS rows" in problems
         assert "FTS5 index does not match the sections table" in problems
+        assert "could not verify" not in problems
         assert "meta embedding_dim is 999, expected 384" in problems
 
     def test_outdated_schema_version_is_reported(self, db: Database) -> None:
@@ -223,12 +225,17 @@ class TestReindexScript:
     def run(self, *arguments: str, db: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts/reindex_docs.py"), *arguments,
-             "--db", str(db), "--embedder", "bge-small"],
-            capture_output=True, text=True, timeout=600,
+             "--db", str(db), "--embedder", "embeddinggemma"],
+            capture_output=True, text=True, timeout=900,
         )  # fmt: skip
 
     @pytest.mark.embedding
-    def test_forced_reindex_re_embeds_unchanged_files_and_verifies(self, tmp_path: Path) -> None:
+    def test_forced_reindex_re_embeds_unchanged_files_and_verifies(
+        self, tmp_path: Path, real_embedder: Embedder
+    ) -> None:
+        # real_embedder skips this test when the model cannot be loaded (offline, no cache);
+        # the subprocess below loads the same, already cached, default model.
+        assert real_embedder.dimension == 768
         docs = tmp_path / "docs"
         docs.mkdir()
         (docs / "a.md").write_text("# A\n\nalpha body\n\n## Child\n\n- one\n- two\n")
@@ -242,6 +249,6 @@ class TestReindexScript:
         assert forced.returncode == 0, forced.stdout + forced.stderr
         assert "--force  : dropped 1 indexed document(s)" in forced.stdout
         assert "1 (re)indexed, 0 unchanged" in forced.stdout
-        assert "384 dimensions (meta: 384" in forced.stdout
+        assert "768 dimensions (meta: 768" in forced.stdout
         assert "integrity: ok" in forced.stdout
         assert "INTEGRITY PROBLEM" not in forced.stdout

@@ -1015,3 +1015,218 @@ class TestServerLifecycleRound2:
             # the inner session ended, the outer one must still work
             assert not (await first.call_tool("list_documents", {})).is_error
         assert len(created) == 1
+
+
+# ====================================================================== review round 3
+
+
+class TestRepairCostIsBounded:
+    @staticmethod
+    def style_guide(rules: int, language: str) -> str:
+        rule = (
+            "## Rule {n}\n\nProse line.\n\n```{lang}\n\n## Example heading\n\nBody text.\n```\n\n"
+        )
+        body = "".join(rule.format(n=n, lang=language) for n in range(rules))
+        return "# Style Guide\n\n" + body + "```\n"  # one stray, never-closed fence at the end
+
+    @pytest.mark.parametrize("language", ["markdown", "bash"])
+    def test_tokenisations_do_not_grow_with_the_number_of_fences(
+        self, language: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+        real = MarkdownParser._tokenize
+
+        def counting(self: MarkdownParser, source: str) -> list[object]:
+            nonlocal calls
+            calls += 1
+            return real(self, source)  # type: ignore[return-value]
+
+        monkeypatch.setattr(MarkdownParser, "_tokenize", counting)
+        document = MarkdownParser().parse(self.style_guide(300, language))
+        headings = [s.heading_path for s in document.sections]
+        assert headings[:2] == ["Style Guide", "Style Guide > Rule 0"]
+        assert "Style Guide > Rule 299" in headings  # nothing lost, nothing invented
+        assert not any("Example heading" in heading for heading in headings)
+        # section building tokenises each section once for its units; repair adds a constant
+        assert calls <= len(document.sections) + 40  # a literal: must not track the constant
+        # it was 2N+4 *whole-document* tokenisations (604 here) on top of that
+
+
+class TestUnitsInsideContainers:
+    def test_code_inside_a_blockquote_is_a_unit_and_the_section_is_searchable(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        text = (
+            "# Runbook\n\n## Rollback A Release\n\n"
+            "> ```bash\n> orbitctl rollback frobnicate\n> ```\n\n"
+            "## Release Notes\n\nNotes that mention frobnicate and rollback in passing.\n"
+        )
+        section = next(s for s in parse(text).sections if s.heading_title == "Rollback A Release")
+        assert section.units == ("orbitctl rollback frobnicate",)
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "runbook.md").write_text(text)
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            found = [r.heading_title for r in searcher.search("frobnicate rollback")]
+        finally:
+            searcher.close()
+        assert "Rollback A Release" in found
+
+    def test_each_quoted_paragraph_is_its_own_unit(self) -> None:
+        units = parse("# T\n\n> first quoted para\n>\n> second quoted para\n").sections[0].units
+        assert units == ("first quoted para", "second quoted para")
+
+    def test_indented_code_and_html_inside_containers(self) -> None:
+        text = "# T\n\n>     indented code\n\n- item\n\n  <div>html in item</div>\n"
+        assert parse(text).sections[0].units == ("indented code", "item html in item")
+
+    def test_br_separates_words_in_table_cells_and_headings(self) -> None:
+        text = "# First<br>Second\n\n| Flag | Desc |\n| --- | --- |\n| `-a` | one<br/>two |\n"
+        section = parse(text).sections[0]
+        assert section.heading_title == "First Second"
+        assert section.units == ("Flag: -a; Desc: one two",)
+
+
+def test_every_row_of_a_split_table_becomes_a_unit() -> None:
+    rows = "\n".join(
+        f"| `--option-{n:03}` | A reasonably long description of option number {n} | `{n}` |"
+        for n in range(60)
+    )
+    text = f"## All Options\n\n| Flag | Description | Default |\n| --- | --- | --- |\n{rows}\n"
+    parts = parse(text).sections
+    assert len(parts) >= 2
+    units = [unit for part in parts for unit in part.units]
+    assert len(units) == 60
+    assert units[-1].startswith("Flag: --option-059; Description: A reasonably long")
+    assert all(len(part.units) > 1 for part in parts)  # no part collapsed into one paragraph
+    assert join_parts(parts) == text.rstrip("\n")  # stored content is still verbatim
+    assert "| Flag |" not in parts[1].content  # the header is restored for units only
+
+
+class TestFrontMatterAdmonitions:
+    def test_admonition_line_between_rules_is_a_heading_not_metadata(self) -> None:
+        document = parse("---\nNote: this is prose, not YAML\n---\n\n# Heading\n\nBody\n")
+        assert "Note: this is prose, not YAML" in paths(document)
+        assert document.title == "Heading"
+
+    def test_single_real_key_is_still_front_matter(self) -> None:
+        document = parse("---\ntitle: Real\n---\n\n## Body\n\ntext\n")
+        assert (document.title, paths(document)) == ("Real", [PREAMBLE_TITLE, "Body"])
+
+
+class TestMigrationInvalidatesTheIndex:
+    @staticmethod
+    def rewind_to_v1(path: Path) -> None:
+        """Turn a populated v2 database into what the previous release left behind."""
+        with Database(path) as database:
+            conn = database.connection()
+            conn.execute("DROP TRIGGER units_after_delete")
+            conn.execute("DROP TABLE units_vec")
+            conn.execute("DROP TABLE units")
+            conn.execute("PRAGMA user_version = 1")
+
+    def test_v1_documents_are_dropped_so_reindexing_rebuilds_them_with_passages(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n")
+        path = tmp_path / "old.db"
+        with Database(path) as database:
+            Indexer(database, fake_embedder).index_directory(docs)
+        self.rewind_to_v1(path)
+        with Database(path) as migrated:
+            assert migrated.count_rows("documents") == 0
+            assert migrated.integrity_problems() == []
+            report = Indexer(migrated, fake_embedder).index_directory(docs)
+            assert (report.files_indexed, report.files_unchanged) == (1, 0)  # not skipped by hash
+            assert report.passages_indexed == 1
+            assert len(report.notes) == 1
+            assert "discarded all 1 previously indexed documents" in report.notes[0]
+            assert "passage-level vectors" in report.notes[0]
+            assert migrated.integrity_problems() == []
+            assert Indexer(migrated, fake_embedder).index_directory(docs).notes == ()  # told once
+
+    def test_dimension_change_reports_how_many_documents_it_really_discarded(
+        self, tmp_path: Path
+    ) -> None:
+        first, second = tmp_path / "one", tmp_path / "two"
+        for root in (first, second):
+            root.mkdir()
+            (root / "doc.md").write_text(f"# {root.name}\n\nbody\n")
+        path = tmp_path / "switch.db"
+        small = FakeEmbedder(dimension=384, model_name="small")
+        with Database(path, embedding_dim=384) as database:
+            indexer = Indexer(database, small)
+            indexer.index_directory(first)
+            indexer.index_directory(second)
+        wide = FakeEmbedder(dimension=768, model_name="wide")
+        with Database(path, embedding_dim=768) as database:
+            report = Indexer(database, wide).index_directory(first)
+        assert len(report.notes) == 1
+        assert "384 -> 768 dimensions" in report.notes[0]
+        assert "discarded all 2 previously indexed documents" in report.notes[0]
+        assert "discarded all 0" not in report.summary()
+
+
+class TestIntegrityCheckUnderContention:
+    def test_a_locked_database_is_unverified_not_corrupt(
+        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store(db, fake_embedder, "/d/a.md")
+        monkeypatch.setattr("markdown_memory.db._BUSY_TIMEOUT_MS", 200)
+        other = sqlite3.connect(db.path, isolation_level=None, timeout=0.2)
+        db.connection().execute("PRAGMA busy_timeout = 200")
+        other.execute("BEGIN IMMEDIATE")  # another process is in the middle of indexing
+        try:
+            problems = db.integrity_problems()
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        assert len(problems) == 1
+        assert "could not verify the FTS5 index" in problems[0]
+        assert "not a sign of damage" in problems[0]
+        assert db.integrity_problems() == []  # and once the writer is done, all is well
+
+
+class TestEvalScript:
+    @pytest.fixture
+    def evaluation(self) -> object:
+        import importlib.util
+
+        path = Path(__file__).parent.parent / "scripts" / "eval_retrieval.py"
+        spec = importlib.util.spec_from_file_location("eval_retrieval_under_test", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_ndcg_is_bounded_when_parts_share_a_label(
+        self, evaluation: object, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        body = "\n\n".join(
+            f"capacity planning paragraph {n} " + "sizing words " * 30 for n in range(12)
+        )
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text(f"# Guide\n\n## Capacity Planning\n\n{body}\n")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "e.db", docs_dir=root), embedder=fake_embedder
+        )
+        try:
+            service.index_directory()
+            cases = [{"query": "capacity planning sizing", "expected": "Guide > Capacity Planning"}]
+            scores = evaluation.evaluate(service, cases)  # type: ignore[attr-defined]
+        finally:
+            service.close()
+        assert scores.top1 == 1.0
+        assert 0.0 < scores.ndcg5 <= 1.0  # three "(Part n)" hits used to score 2.13
+
+    def test_exported_embedder_cannot_switch_the_gate_off(self, evaluation: object) -> None:
+        source = Path(evaluation.__file__).read_text(encoding="utf-8")  # type: ignore[attr-defined]
+        assert "default=DEFAULT_EMBEDDER" in source
+        assert "base.embedder" not in source  # the environment must not pick the scored model
+        assert "GATES NOT CHECKED" in source

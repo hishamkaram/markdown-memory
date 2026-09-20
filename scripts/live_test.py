@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import statistics
 import sys
 import tempfile
@@ -27,7 +28,7 @@ from mcp import Client, StdioServerParameters, stdio_client
 from mcp.types import CallToolResult, TextContent
 
 from markdown_memory.db import SCHEMA_VERSION, Database
-from markdown_memory.indexer import GEMMA_DIMENSION
+from markdown_memory.indexer import DEFAULT_EMBEDDER, GEMMA_DIMENSION
 from markdown_memory.server import ServerConfig
 
 CONFIGURATION_MD = """\
@@ -278,6 +279,17 @@ def server_memory_mb() -> tuple[float, float] | None:
 
 def check_schema_integrity(test: LiveTest, db_path: Path) -> None:
     """Open the database the server just closed and verify every index agrees."""
+    # Read the stored size with plain sqlite3 first: opening a Database with a different
+    # embedding size REBUILDS it, and an inspection must never be able to do that.
+    plain = sqlite3.connect(db_path)
+    try:
+        stored = plain.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()
+    finally:
+        plain.close()
+    test.check(
+        stored is not None and int(stored[0]) == GEMMA_DIMENSION,
+        f"index was built with {GEMMA_DIMENSION}-dimensional vectors (meta says {stored})",
+    )
     with Database(db_path, embedding_dim=GEMMA_DIMENSION) as database:
         conn = database.connection()
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -305,6 +317,10 @@ def check_schema_integrity(test: LiveTest, db_path: Path) -> None:
             )
         }
         print(f"        rows: {counts}")
+        test.check(
+            counts["documents"] > 0 and counts["sections"] > 0 and counts["units"] > 0,
+            "the re-opened index still holds the documents (an empty one proves nothing)",
+        )
         test.check(
             counts["sections"] == counts["sections_fts"], "every section is in the FTS index"
         )
@@ -703,6 +719,8 @@ async def main() -> int:
                 "MARKDOWN_MEMORY_DOCS_DIR": str(docs),
                 "MARKDOWN_MEMORY_MODEL_CACHE": model_cache,
                 "MARKDOWN_MEMORY_LOG_LEVEL": "INFO",
+                # Pinned: an exported MARKDOWN_MEMORY_EMBEDDER must not change what is tested.
+                "MARKDOWN_MEMORY_EMBEDDER": DEFAULT_EMBEDDER,
             },
         )
         print(f"workspace : {root}")

@@ -361,18 +361,21 @@ class Indexer:
 
         with self._run_lock:
             started = time.perf_counter()
-            notes: list[str] = []
+            # Migrations that emptied the index (new format, new vector size) left a notice.
+            notes: list[str] = self._db.take_notices()
             previous_model = self._db.get_meta(_MODEL_META_KEY)
             if previous_model not in {None, self._embedder.model_name}:
                 # Vectors from different models are not comparable, and they share one
                 # vector table: every document has to go, not only those under `root`.
                 discarded = self._db.clear()
-                notes.append(
-                    f"Embedding model changed ({previous_model} -> {self._embedder.model_name}): "
-                    f"discarded all {discarded} previously indexed documents from every "
-                    "directory. Re-run index_directory for any other documentation root."
-                )
-                logger.warning(notes[-1])
+                if discarded:  # 0 when a size change already emptied (and announced) it
+                    notes.append(
+                        f"Embedding model changed ({previous_model} -> "
+                        f"{self._embedder.model_name}): discarded all {discarded} previously "
+                        "indexed documents from every directory. Re-run index_directory for "
+                        "any other documentation root."
+                    )
+                    logger.warning(notes[-1])
             self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
             known_hashes = self._db.document_hashes(str(root))
 

@@ -30,6 +30,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from markdown_memory.indexer import DEFAULT_EMBEDDER
 from markdown_memory.models import SearchResult
 from markdown_memory.server import MarkdownMemoryService, ServerConfig
 
@@ -76,7 +77,14 @@ def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> 
         started = time.perf_counter()
         results = service.search_docs(query, 20)
         latencies.append((time.perf_counter() - started) * 1000)
-        relevance = [max((grades.get(k, 0) for k in _labels(r)), default=0) for r in results]
+        # A label is credited once: the parts of one oversized section share a label, and
+        # counting each would push nDCG above 1.
+        credited: set[str] = set()
+        relevance: list[int] = []
+        for result in results:
+            fresh = _labels(result) - credited
+            relevance.append(max((grades.get(label, 0) for label in fresh), default=0))
+            credited |= _labels(result)
         ranks.append(next((i for i, r in enumerate(results, 1) if expected in _labels(r)), None))
         valid_first += bool(relevance and relevance[0] > 0)
         ideal = sorted(grades.values(), reverse=True)[:5]
@@ -133,7 +141,13 @@ def update_baseline(preset: str, scores: dict[str, Scores]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--embedder", default=None, help="embeddinggemma (default) or bge-small")
+    parser.add_argument(
+        "--embedder",
+        default=DEFAULT_EMBEDDER,
+        choices=("embeddinggemma", "bge-small"),
+        help="model to score; MARKDOWN_MEMORY_EMBEDDER is deliberately ignored so that the "
+        "gate always judges the default model unless this flag says otherwise",
+    )
     parser.add_argument("--show-misses", action="store_true", help="list queries missed at Top-1")
     parser.add_argument(
         "--update-baseline",
@@ -150,7 +164,7 @@ def main() -> int:
             ServerConfig(
                 db_path=Path(workspace) / "eval.db",
                 docs_dir=DATA / "corpus",
-                embedder=arguments.embedder or base.embedder,
+                embedder=arguments.embedder,
                 model_cache_dir=base.model_cache_dir,
             )
         )
@@ -177,12 +191,15 @@ def main() -> int:
         finally:
             service.close()
 
-    preset = arguments.embedder or base.embedder
+    preset = arguments.embedder
     print_deltas(preset, scores)
     if arguments.update_baseline:
         update_baseline(preset, scores)
-    if preset != "embeddinggemma":
-        return 0  # the floors below are calibrated for the default embedder only
+    if preset != DEFAULT_EMBEDDER:
+        # The floors are calibrated for the default embedder. Say so: a silent exit 0
+        # would read as "gates passed".
+        print(f"\nGATES NOT CHECKED: floors apply to {DEFAULT_EMBEDDER!r} only, not {preset!r}")
+        return 0
     held_out, identifiers = scores["held_out/paraphrase"], scores["held_out/identifier"]
     failures = [
         message

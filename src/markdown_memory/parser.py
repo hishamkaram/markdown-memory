@@ -48,6 +48,9 @@ from markdown_memory.models import (
 
 DEFAULT_MAX_SECTION_CHARS = 3200  # ~800 tokens
 MAX_UNITS_PER_SECTION = 64
+# Every fence repair re-tokenises the rest of the document. A budget keeps the worst case
+# linear: once it is spent, the remaining fences are left as markdown-it paired them.
+MAX_REPAIR_SCANS = 16
 MAX_UNIT_CHARS = 600
 UNTITLED_HEADING = "(untitled)"
 
@@ -123,6 +126,19 @@ class _Scan:
         if self.fences and not self.fences[-1].closed:
             return self.fences[-1]
         return None
+
+
+@dataclass(slots=True)
+class _ScanBudget:
+    """How many more whole-document tokenisations fence repair may spend."""
+
+    remaining: int
+
+    def spend(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
 
 
 @dataclass(slots=True, frozen=True)
@@ -226,9 +242,10 @@ class MarkdownParser:
         """Collect top-level headings, re-scanning from wherever a broken fence is repaired."""
         headings: list[_Heading] = []
         offset = body_start
+        budget = _ScanBudget(MAX_REPAIR_SCANS)
         while offset < len(lines):
             scan = self._scan(lines, offset)
-            resume_at = self._resume_point(lines, scan)
+            resume_at = self._resume_point(lines, scan, budget) if budget.spend() else None
             headings.extend(
                 heading
                 for heading in scan.headings
@@ -272,7 +289,7 @@ class MarkdownParser:
                 )
         return _Scan(headings=tuple(headings), fences=tuple(fences))
 
-    def _resume_point(self, lines: Sequence[str], scan: _Scan) -> int | None:
+    def _resume_point(self, lines: Sequence[str], scan: _Scan, budget: _ScanBudget) -> int | None:
         """Line at which a mis-paired fence should be cut and scanning restarted.
 
         Two symptoms give an unclosed fence away:
@@ -300,24 +317,38 @@ class MarkdownParser:
             nested = _nested_opener(lines, fence)
             if nested is not None:
                 resume_at = _recovery_line(lines, fence, nested)
-                if resume_at is not None and self._keeps_headings(lines, scan, resume_at):
+                if resume_at is not None and self._keeps_headings(lines, scan, resume_at, budget):
                     return resume_at
         last = scan.trailing_open_fence
         if last is None:
             return None
         if not last.has_info:
             for fence in scan.fences[:-1]:
+                if fence.language in _MARKUP_SAMPLE_LANGUAGES:
+                    continue  # a heading inside a Markdown sample is the sample, not a symptom
                 resume_at = _recovery_line(lines, fence, fence.stop - 1, strict=True)
                 if resume_at is not None and self._keeps_headings(
-                    lines, scan, resume_at, must_end_closed=True
+                    lines, scan, resume_at, budget, must_end_closed=True
                 ):
                     return resume_at
         return _recovery_line(lines, last, len(lines))
 
     def _keeps_headings(
-        self, lines: Sequence[str], scan: _Scan, resume_at: int, *, must_end_closed: bool = False
+        self,
+        lines: Sequence[str],
+        scan: _Scan,
+        resume_at: int,
+        budget: _ScanBudget,
+        *,
+        must_end_closed: bool = False,
     ) -> bool:
-        """True when re-scanning from ``resume_at`` loses no heading ``scan`` reported."""
+        """True when re-scanning from ``resume_at`` loses no heading ``scan`` reported.
+
+        Each call tokenises the rest of the document, so it draws on ``budget``; with the
+        budget spent the candidate is rejected unchecked (no repair beats a wrong one).
+        """
+        if not budget.spend():
+            return False
         repaired = self._scan(lines, resume_at)
         if must_end_closed and repaired.trailing_open_fence is not None:
             return False
@@ -362,10 +393,20 @@ class MarkdownParser:
         # Only trailing newlines are dropped from a part, and they are recoverable from
         # the line numbers, so join_parts() can rebuild the section byte-for-byte.
         spans = split_into_spans(content, self._max_chars, glue_first=has_heading_line)
+        table_headers = _table_headers(lines[start:stop])
         drafts: list[SectionDraft] = []
         for number, (begin, end) in enumerate(spans, start=1):
             part = content[begin:end].rstrip("\n")
-            part_start = first_line + content.count("\n", 0, begin)
+            first_part_line = content.count("\n", 0, begin)
+            part_start = first_line + first_part_line
+            # A part that starts in the middle of a table has lost the header row, and
+            # without it the rows are just a paragraph. Units are extracted from the part
+            # with its header restored; the stored content stays verbatim.
+            header = (
+                table_headers.get(first_part_line)
+                if content[begin - 1 : begin] in {"", "\n"}
+                else None
+            )
             drafts.append(
                 SectionDraft(
                     heading_title=title,
@@ -376,7 +417,10 @@ class MarkdownParser:
                     start_line=part_start,
                     end_line=part_start + part.count("\n"),
                     part_index=number,
-                    units=self.extract_units(part, skip_heading=has_heading_line and number == 1),
+                    units=self.extract_units(
+                        f"{header}\n{part}" if header else part,
+                        skip_heading=has_heading_line and number == 1,
+                    ),
                 )
             )
         return drafts
@@ -407,18 +451,38 @@ class MarkdownParser:
                 units.extend(_table_rows(block))
             elif token.type in {"bullet_list_open", "ordered_list_open"}:
                 units.extend(_list_items(block))
-            elif token.type in {"fence", "code_block"}:
-                units.append(token.content)
-            elif token.type == "html_block":
-                units.append(_HTML_TAG.sub(" ", token.content))
+            elif token.type == "blockquote_open":
+                units.extend(_leaf_texts(block))  # one unit per quoted paragraph / code block
             else:
-                units.append(" ".join(_plain_inline(t) for t in block if t.type == "inline"))
+                units.append(" ".join(_leaf_texts(block)))
             index = end + 1
         cleaned = (_WHITESPACE.sub(" ", unit.replace("|", " ")).strip() for unit in units)
         return tuple(unit[:MAX_UNIT_CHARS] for unit in cleaned if unit)[:MAX_UNITS_PER_SECTION]
 
 
 # ---------------------------------------------------------------------- helpers
+
+
+_TABLE_DELIMITER = re.compile(
+    r"^ {0,3}\|?[ \t]*:?-{1,}:?[ \t]*(\|[ \t]*:?-{1,}:?[ \t]*)*\|?[ \t]*$"
+)
+
+
+def _table_headers(lines: Sequence[str]) -> dict[int, str]:
+    """Map each table *body* row (by line index) to its table's header + delimiter rows."""
+    headers: dict[int, str] = {}
+    index = 0
+    while index + 1 < len(lines):
+        is_header = "|" in lines[index] and "|" in lines[index + 1]
+        if is_header and _TABLE_DELIMITER.match(lines[index + 1]) and lines[index].strip():
+            header = f"{lines[index]}\n{lines[index + 1]}"
+            index += 2
+            while index < len(lines) and lines[index].strip() and "|" in lines[index]:
+                headers[index] = header
+                index += 1
+        else:
+            index += 1
+    return headers
 
 
 def _split_lines(text: str) -> list[str]:
@@ -448,6 +512,13 @@ def _scan_front_matter(lines: Sequence[str]) -> tuple[int, str | None]:
     return 0, None
 
 
+# "Note: read this first" between two rules is a setext heading, not metadata. A lone
+# `key: value` line is otherwise taken for front matter, as every site generator does.
+_ADMONITION_KEYS = frozenset(
+    {"note", "warning", "tip", "todo", "important", "caution", "hint", "see also", "example"}
+)
+
+
 def _looks_like_yaml(block: Sequence[str]) -> bool:
     """Distinguish front matter from a document that merely opens with a ``---`` rule.
 
@@ -456,6 +527,11 @@ def _looks_like_yaml(block: Sequence[str]) -> bool:
     line followed by a blank line is taken for a Markdown heading, not a YAML comment.
     """
     has_key = False
+    content_lines = [line for line in block if line.strip()]
+    if len(content_lines) == 1:
+        key = content_lines[0].split(":", 1)[0].strip().strip("\"'").lower()
+        if key in _ADMONITION_KEYS:
+            return False
     for index, line in enumerate(block):
         stripped = line.strip()
         if not stripped:
@@ -486,12 +562,27 @@ def _plain_inline(inline: Token | None) -> str:
             # Case-sensitive on purpose: `<u>` is underline, `<U>` is a type parameter.
             if tag is not None and tag.group(1) not in _FORMATTING_TAGS:
                 fragments.append(child.content)  # `Option<T>`: a type parameter, not markup
+            elif tag is not None and tag.group(1) == "br":
+                fragments.append(" ")  # the only line break a table cell can hold
     return _WHITESPACE.sub(" ", "".join(fragments)).strip()
 
 
 def _inline_text(inline: Token | None) -> str:
     """Plain text of a heading's inline token, never empty."""
     return _plain_inline(inline) or UNTITLED_HEADING
+
+
+def _leaf_texts(block: Sequence[Token]) -> list[str]:
+    """Text of every leaf in ``block``, at any depth: inline runs, code and raw HTML."""
+    texts: list[str] = []
+    for token in block:
+        if token.type == "inline":
+            texts.append(_plain_inline(token))
+        elif token.type in {"fence", "code_block"}:
+            texts.append(token.content)
+        elif token.type == "html_block":
+            texts.append(_HTML_TAG.sub(" ", token.content))
+    return [text for text in texts if text.strip()]
 
 
 def _block_end(tokens: Sequence[Token], start: int) -> int:
@@ -537,10 +628,8 @@ def _list_items(block: Sequence[Token]) -> list[str]:
     for token in block:
         if token.type == "list_item_open" and token.level == 1:
             fragments = []
-        elif token.type == "inline":
-            fragments.append(_plain_inline(token))
-        elif token.type in {"fence", "code_block"}:
-            fragments.append(token.content)
+        elif token.type in {"inline", "fence", "code_block", "html_block"}:
+            fragments.extend(_leaf_texts([token]))
         elif token.type == "list_item_close" and token.level == 1:
             items.append(" ".join(fragments))
     return items

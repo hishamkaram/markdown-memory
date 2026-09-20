@@ -16,14 +16,17 @@ uv run python scripts/eval_retrieval.py --show-misses
 ```
 
 Takes about a minute with the default embedder (EmbeddingGemma-300m; the first run also
-downloads ~330 MB). Add `--embedder bge-small` to score the light preset (informational
-only - the gates are calibrated for the default embedder).
+downloads ~330 MB). The script always scores the default embedder, whatever
+`MARKDOWN_MEMORY_EMBEDDER` is set to, so the gate cannot be switched off by the
+environment. `--embedder bge-small` scores the light preset instead: that run is
+informational, prints `GATES NOT CHECKED`, and must never be reported as "gates passed".
 
 ## Read the result
 
 The script prints one row per query set, then the delta against
-`scripts/eval_data/baseline.json`, then `OK` or `REGRESSION`. **Its exit code is the
-verdict**: non-zero means a gate failed.
+`scripts/eval_data/baseline.json`, then exactly one verdict line: `OK: ...`,
+`REGRESSION: ...` (exit code non-zero) or `GATES NOT CHECKED: ...`. Only an `OK` line
+means the gates passed - an exit code of 0 alone does not.
 
 | Gate (held-out set) | Floor | Frozen baseline |
 | --- | --- | --- |
