@@ -691,6 +691,25 @@ class TestExcludedPaths:
         Indexer(db, embedder, exclude=exclude).index_directory(root)
         return {str(Path(document.file_path).relative_to(root)) for document in db.list_documents()}
 
+    def test_adding_an_exclusion_purges_what_was_already_indexed(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Excluding a tree has to clean up, not just stop adding.
+
+        A repository that indexed its fixtures before the exclusion was configured would
+        otherwise keep serving them from the database forever, and no amount of
+        re-indexing would remove them.
+        """
+        self.tree(tmp_path)
+        assert "fixtures/sample.md" in self.indexed(db, fake_embedder, tmp_path)
+        report = Indexer(db, fake_embedder, exclude=("fixtures",)).index_directory(tmp_path)
+        assert report.files_purged == 1
+        remaining = {
+            str(Path(document.file_path).relative_to(tmp_path)) for document in db.list_documents()
+        }
+        assert "fixtures/sample.md" not in remaining
+        assert "guide.md" in remaining
+
     def test_nothing_is_excluded_by_default(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
@@ -739,6 +758,58 @@ class TestExcludedPaths:
     def test_configuration_is_read_from_the_environment(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", " fixtures , vendor/** :notes ")
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", " fixtures , ./vendor/** , notes/ ")
         monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(tmp_path))
         assert ServerConfig.from_env().exclude == ("fixtures", "vendor/**", "notes")
+
+    def test_a_pattern_containing_a_colon_is_one_pattern(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A colon separator would silently exclude two things nobody asked for."""
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", "reports:old")
+        monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(tmp_path))
+        assert ServerConfig.from_env().exclude == ("reports:old",)
+
+    def test_a_dot_prefixed_name_is_not_mistaken_for_a_relative_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Stripping every leading "." and "/" turned `.hidden` into `hidden`.
+
+        That left the directory the user named indexed, and excluded a different one.
+        """
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", ".hidden, ./docs/build")
+        monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(tmp_path))
+        assert ServerConfig.from_env().exclude == (".hidden", "docs/build")
+
+    def test_a_bare_name_excludes_that_directory_at_any_depth(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """`eval_data` has to mean what it looks like it means.
+
+        Anchoring every pattern at the root made a bare name match nothing below the top
+        level: the pattern looked correct, excluded nothing, and the files were indexed.
+        """
+        self.tree(tmp_path)
+        assert self.indexed(db, fake_embedder, tmp_path, "upstream") == {
+            "guide.md",
+            "fixtures/sample.md",
+            "notes/keep.md",
+        }
+
+    def test_an_anchored_pattern_stays_anchored(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """A pattern with a separator is still relative to the docs root only."""
+        (tmp_path / "deep" / "fixtures").mkdir(parents=True)
+        (tmp_path / "deep" / "fixtures" / "nested.md").write_text("# Nested\n\nbody\n")
+        self.tree(tmp_path)
+        indexed = self.indexed(db, fake_embedder, tmp_path, "fixtures/*")
+        assert "fixtures/sample.md" not in indexed
+        assert "deep/fixtures/nested.md" in indexed
+
+    def test_matching_does_not_depend_on_the_platform_case_rules(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """`fnmatch` folds case on some platforms; the docs tree must not."""
+        self.tree(tmp_path)
+        assert "fixtures/sample.md" in self.indexed(db, fake_embedder, tmp_path, "FIXTURES")

@@ -36,6 +36,9 @@ class Mutation:
     old: str
     new: str
     tests: str
+    # ``src`` mutates the package; ``scripts`` mutates the developer scripts, which the
+    # tests import by name through pytest's ``pythonpath``.
+    area: str = "src"
 
 
 MUTATIONS = (
@@ -124,11 +127,174 @@ MUTATIONS = (
         new='_HTML_TAG.sub(" ", token.content)',
         tests="TestUnitsRound4",
     ),
+    Mutation(
+        name="cache: score a cached index built from a different corpus",
+        module="eval_cache.py",
+        area="scripts",
+        old="    if stored != expected_fingerprint:\n        raise StaleCacheError(",
+        new="    if False:\n        raise StaleCacheError(",
+        tests="test_a_cache_built_from_another_corpus_is_refused",
+    ),
+    Mutation(
+        name="cache: fingerprint the passages but not the section around them",
+        module="eval_cache.py",
+        area="scripts",
+        old='            digest.update(hashlib.sha256(section.content.encode("utf-8")).digest())\n',
+        new="",
+        tests="test_text_no_passage_carries_still_changes_the_fingerprint",
+    ),
+    Mutation(
+        name="cache: fingerprint the section but not how it was cut into passages",
+        module="eval_cache.py",
+        area="scripts",
+        old=(
+            "            for ordinal, unit in enumerate(section.unit_texts):\n"
+            '                digest.update(b"\\x1f")\n'
+            '                digest.update(str(ordinal).encode("ascii"))\n'
+            '                digest.update(hashlib.sha256(unit.encode("utf-8")).digest())'
+        ),
+        new="            pass",
+        tests="test_a_change_in_how_passages_are_cut_changes_the_fingerprint",
+    ),
+    Mutation(
+        name="cache: key on the requested model revision, not the files on disk",
+        module="eval_cache.py",
+        area="scripts",
+        old='        "artifacts": _model_identity(model_cache_dir, embedder),',
+        new='        "artifacts": "",',
+        tests="test_a_reinstalled_model_invalidates_the_cache",
+    ),
+    Mutation(
+        name="cache: trust the directory name instead of the recorded key",
+        module="eval_cache.py",
+        area="scripts",
+        old=(
+            "        if meta.get(field) != getattr(key, field):\n"
+            "            raise StaleCacheError("
+            'f"cached index was built with a different {field}")'
+        ),
+        new="        pass",
+        tests="test_a_cache_directory_copied_from_another_key_is_refused",
+    ),
+    Mutation(
+        name="exclusions: anchor every pattern at the docs root",
+        module="indexer.py",
+        old=(
+            "        elif any(fnmatchcase(part, pattern) for part in parts):\n"
+            "            return True"
+        ),
+        new="        elif False:\n            return True",
+        tests="test_a_bare_name_excludes_that_directory_at_any_depth",
+    ),
+    Mutation(
+        name="exclusions: split a configured pattern on colons as well as commas",
+        module="indexer.py",
+        old='    for part in value.split(","):',
+        new='    for part in __import__("re").split(r"[,:]", value):',
+        tests="test_a_pattern_containing_a_colon_is_one_pattern",
+    ),
+    Mutation(
+        name="cache: let two evaluations measure latency on the same CPU",
+        module="eval_cache.py",
+        area="scripts",
+        old="fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        new="fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)",
+        tests="test_a_second_evaluation_refuses_to_start",
+    ),
+    Mutation(
+        name="cache: leave the write-ahead log behind when discarding an index",
+        module="eval_cache.py",
+        area="scripts",
+        old='    for suffix in ("", "-wal", "-shm"):',
+        new='    for suffix in ("",):',
+        tests="test_discard_removes_the_write_ahead_log_too",
+    ),
+    Mutation(
+        name="cache: trust the cache key instead of reading the stored vectors",
+        module="eval_cache.py",
+        area="scripts",
+        old="    if distance > VECTOR_PROBE_TOLERANCE or passage != probe.text:",
+        new="    if False:",
+        tests="test_an_index_whose_vectors_came_from_another_model_is_refused",
+    ),
+    Mutation(
+        name="cache: accept any passage as the probe's nearest neighbour",
+        module="eval_cache.py",
+        area="scripts",
+        old="    if distance > VECTOR_PROBE_TOLERANCE or passage != probe.text:",
+        new="    if distance > VECTOR_PROBE_TOLERANCE:",
+        tests="test_a_probe_matched_to_the_wrong_passage_is_refused",
+    ),
+    Mutation(
+        name="cache: cache a build over a corpus that moved while it was indexed",
+        module="eval_cache.py",
+        area="scripts",
+        old="    if parse_fingerprint(corpus, exclude) != fingerprint:",
+        new="    if False:",
+        tests="test_a_corpus_that_moved_during_indexing_is_not_cached",
+    ),
+    Mutation(
+        name="cache: probe one passage and call the whole index verified",
+        module="eval_cache.py",
+        area="scripts",
+        old="    spread = found[::step][:count]",
+        new="    spread = found[:1]",
+        tests="test_the_probes_are_spread_through_the_corpus",
+    ),
+    Mutation(
+        name="cache: read a named pipe in the corpus like any other file",
+        module="eval_cache.py",
+        area="scripts",
+        old=(
+            "    if not stat.S_ISREG(info.st_mode):\n"
+            '        return f"not-a-regular-file:{stat.S_IFMT(info.st_mode)}"'
+        ),
+        new="    pass",
+        tests="test_a_named_pipe_in_the_corpus_does_not_hang_the_cache",
+    ),
+    Mutation(
+        name="eval: score and cache an index that failed on some files",
+        module="eval_retrieval.py",
+        area="scripts",
+        old="    if report.errors:",
+        new="    if False:",
+        tests="test_a_partial_build_is_neither_scored_nor_cached",
+    ),
+    Mutation(
+        name="exclusions: strip every leading dot and slash from a pattern",
+        module="indexer.py",
+        old='        cleaned = part.strip().removeprefix("./").rstrip("/")',
+        new='        cleaned = part.strip().lstrip("./").rstrip("/")',
+        tests="test_a_dot_prefixed_name_is_not_mistaken_for_a_relative_path",
+    ),
+    Mutation(
+        name="exclusions: fold case when matching a pattern",
+        module="indexer.py",
+        old="        elif any(fnmatchcase(part, pattern) for part in parts):",
+        new="        elif any(fnmatchcase(part.lower(), pattern.lower()) for part in parts):",
+        tests="test_matching_does_not_depend_on_the_platform_case_rules",
+    ),
+    Mutation(
+        name="config: refuse a directory whose real name contains a dollar-brace",
+        module="server.py",
+        old='    if "${" in value and not Path(value).expanduser().exists():',
+        new='    if "${" in value:',
+        tests="test_a_directory_really_named_like_a_variable_is_allowed",
+    ),
 )
 
 
-def apply(mutation: Mutation, package: Path) -> bool:
-    path = package / "markdown_memory" / mutation.module
+def _ignore_caches(directory: str, names: list[str]) -> set[str]:
+    # eval_data holds the frozen corpus; copying it for a mutation run is pure cost.
+    return {name for name in names if name in {"__pycache__", "eval_data"}}
+
+
+def apply(mutation: Mutation, workspace: Path) -> bool:
+    path = (
+        workspace / "src" / "markdown_memory" / mutation.module
+        if mutation.area == "src"
+        else workspace / "scripts" / mutation.module
+    )
     text = path.read_text(encoding="utf-8")
     if text.count(mutation.old) != 1:
         print(
@@ -139,16 +305,21 @@ def apply(mutation: Mutation, package: Path) -> bool:
     return True
 
 
-def run_tests(package: Path, selector: str) -> bool:
+def run_tests(workspace: Path, mutation: Mutation) -> bool:
     """True when the selected tests fail, which is what a mutation should cause."""
-    environment = dict(os.environ, PYTHONPATH=str(package))
+    environment = dict(os.environ, PYTHONPATH=str(workspace / "src"))
+    # The scripts are imported by name, and pytest's own ``pythonpath`` setting wins over
+    # PYTHONPATH - so point that setting at the mutated copy instead.
+    override = (
+        ["-o", f"pythonpath=tests {workspace / 'scripts'}"] if mutation.area == "scripts" else []
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "not embedding",
-         "-k", selector, "--no-header", "-x"],
+         "-k", mutation.tests, "--no-header", "-x", *override],
         cwd=ROOT, env=environment, capture_output=True, text=True, timeout=1800,
     )  # fmt: skip
     if "no tests ran" in result.stdout:
-        print(f"  SETUP ERROR: no test matches {selector!r}", flush=True)
+        print(f"  SETUP ERROR: no test matches {mutation.tests!r}", flush=True)
         return False
     return result.returncode != 0
 
@@ -168,13 +339,15 @@ def main() -> int:
 
     missed: list[str] = []
     for mutation in chosen:
-        with tempfile.TemporaryDirectory(prefix="mdmem-mutation-") as workspace:
-            package = Path(workspace) / "src"
-            shutil.copytree(ROOT / "src", package)
-            if not apply(mutation, package):
+        with tempfile.TemporaryDirectory(prefix="mdmem-mutation-") as directory:
+            workspace = Path(directory)
+            shutil.copytree(ROOT / "src", workspace / "src")
+            if mutation.area == "scripts":
+                shutil.copytree(ROOT / "scripts", workspace / "scripts", ignore=_ignore_caches)
+            if not apply(mutation, workspace):
                 missed.append(mutation.name)
                 continue
-            caught = run_tests(package, mutation.tests)
+            caught = run_tests(workspace, mutation)
         print(f"{'caught ' if caught else 'MISSED '} {mutation.name}", flush=True)
         if not caught:
             missed.append(mutation.name)

@@ -16,7 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.server as server_module
-from markdown_memory.exceptions import DatabaseError
+from markdown_memory.exceptions import ConfigurationError, DatabaseError
 from markdown_memory.models import (
     OutlineNode,
 )
@@ -288,3 +288,95 @@ class TestServerLifecycleRound2:
             # the inner session ended, the outer one must still work
             assert not (await first.call_tool("list_documents", {})).is_error
         assert len(created) == 1
+
+
+class TestProjectScopedConfiguration:
+    """`.mcp.json` cannot interpolate the project root, so the server resolves it.
+
+    Measured on Claude Code 2.1.278: `${workspaceFolder}` and `${CLAUDE_PROJECT_DIR}` are
+    both reported as missing environment variables and passed through as literal text,
+    while the spawned server does receive `CLAUDE_PROJECT_DIR` and a working directory of
+    the project root.
+    """
+
+    @pytest.fixture(autouse=True)
+    def clean_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for variable in (
+            server_module.ENV_DB_PATH,
+            server_module.ENV_DOCS_DIR,
+            server_module.ENV_MODEL_CACHE,
+            server_module.ENV_EXCLUDE,
+            server_module.ENV_PROJECT_DIR,
+        ):
+            monkeypatch.delenv(variable, raising=False)
+
+    def test_the_docs_root_defaults_to_the_project_claude_code_reports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
+        monkeypatch.chdir(tmp_path)
+        assert ServerConfig.from_env().docs_dir == tmp_path / "project"
+
+    def test_a_relative_database_lands_in_the_project_not_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A project-scoped config has to spell the database relatively; it must not
+        follow a working directory that moved."""
+        project = tmp_path / "project"
+        project.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(project))
+        monkeypatch.setenv(server_module.ENV_DB_PATH, ".markdown-memory/index.db")
+        monkeypatch.chdir(elsewhere)
+        assert ServerConfig.from_env().db_path == project / ".markdown-memory/index.db"
+
+    def test_the_working_directory_is_used_when_no_project_is_exported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, "docs")
+        config = ServerConfig.from_env()
+        assert config.docs_dir == tmp_path / "docs"
+
+    def test_an_absolute_path_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(tmp_path / "absolute"))
+        assert ServerConfig.from_env().docs_dir == tmp_path / "absolute"
+
+    @pytest.mark.parametrize(
+        "value", ["${workspaceFolder}", "${CLAUDE_PROJECT_DIR}/docs", "${MISSING}/index.db"]
+    )
+    def test_an_unexpanded_variable_is_refused_instead_of_indexed(
+        self, value: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Claude Code loads a config it could not expand and passes the text through.
+
+        Treating that as a directory name indexes nothing and reports success, which is
+        indistinguishable from a project with no documentation.
+        """
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, value)
+        with pytest.raises(ConfigurationError) as raised:
+            ServerConfig.from_env()
+        assert server_module.ENV_DOCS_DIR in str(raised.value)
+        assert "relative to the project root" in str(raised.value)
+
+    def test_a_directory_really_named_like_a_variable_is_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rejection is for text nobody expanded, not for an unusual name."""
+        odd = tmp_path / "${version}"
+        odd.mkdir()
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(odd))
+        assert ServerConfig.from_env().docs_dir == odd
+
+    def test_the_committed_config_points_at_the_project_it_ships_with(self) -> None:
+        """The config in this repository must survive the rules measured above."""
+        import json
+
+        config = json.loads((Path(__file__).parent.parent / ".mcp.json").read_text())
+        environment = config["mcpServers"]["markdown-memory"]["env"]
+        assert not any("${" in value for value in environment.values())
+        assert not Path(environment["MARKDOWN_MEMORY_DB"]).is_absolute()

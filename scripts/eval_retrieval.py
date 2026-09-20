@@ -25,16 +25,19 @@ import logging
 import math
 import statistics
 import sys
-import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from markdown_memory.indexer import DEFAULT_EMBEDDER
+import eval_cache
+
+from markdown_memory.indexer import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.models import SearchResult
 from markdown_memory.server import MarkdownMemoryService, ServerConfig
 
 DATA = Path(__file__).parent / "eval_data"
+CORPUS = DATA / "corpus"
 BASELINE = DATA / "baseline.json"
 ACCURACY_FIELDS = ("top1", "top3", "top5", "any_valid_top1")
 PRIMARY_GRADE = 3
@@ -62,7 +65,7 @@ def _labels(result: SearchResult) -> set[str]:
 
 
 def _dcg(grades: list[int]) -> float:
-    return sum((2**grade - 1) / math.log2(rank + 1) for rank, grade in enumerate(grades, 1))
+    return float(sum((2**grade - 1) / math.log2(rank + 1) for rank, grade in enumerate(grades, 1)))
 
 
 def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> Scores:
@@ -139,6 +142,124 @@ def update_baseline(preset: str, scores: dict[str, Scores]) -> None:
     print(f"\nbaseline for {preset!r} written to {BASELINE}")
 
 
+def _probes(corpus: Path) -> tuple[eval_cache.Probe, ...]:
+    """Passages of the corpus, used to ask the cached index whose vectors it holds."""
+    probes = eval_cache.probe_passages(corpus)
+    if not probes:
+        raise SystemExit(f"the corpus at {corpus} has no indexable passage")
+    return probes
+
+
+def open_service(
+    arguments: argparse.Namespace, base: ServerConfig, probes: Sequence[eval_cache.Probe]
+) -> tuple[MarkdownMemoryService, bool]:
+    """Return a service over the cached index, building it only when it cannot be reused.
+
+    The checks are deliberately redundant with the cache key: the key says what the inputs
+    were, these say what the artifact is.
+    """
+    # The model is loaded before the key is computed, so the key sees the files that a
+    # first run downloads - otherwise every machine's second run would find a different
+    # key and rebuild the index it just built.
+    embedder = create_embedder(arguments.embedder, cache_dir=base.model_cache_dir)
+    embedder.embed_query("load the model")  # downloads it on a first run; `warm_up` is
+    # not part of the Embedder protocol, and one query is enough to put the files on disk
+    key = eval_cache.build_key(CORPUS, arguments.embedder, model_cache_dir=base.model_cache_dir)
+    root = eval_cache.cache_root()
+    workspace = root / key.digest
+    workspace.mkdir(parents=True, exist_ok=True)
+    eval_cache.prune(root, key.digest)
+    db_path = workspace / "eval.db"
+    fingerprint = eval_cache.parse_fingerprint(CORPUS)
+    if arguments.rebuild:
+        eval_cache.discard(db_path)
+        reason: str | None = "--rebuild"
+    else:
+        try:
+            eval_cache.validate(db_path, fingerprint, key)
+            reason = None
+        except eval_cache.StaleCacheError as stale:
+            eval_cache.discard(db_path)
+            reason = str(stale)
+
+    service = _service(arguments, base, db_path, embedder)
+    if reason is None:
+        try:
+            eval_cache.check_integrity(service.db)
+            eval_cache.check_vectors(service.db, service.embedder, probes)
+            return service, False
+        except eval_cache.StaleCacheError as stale:
+            reason = str(stale)
+            service.close()
+            eval_cache.discard(db_path)
+            service = _service(arguments, base, db_path, embedder)
+    print(f"index: building ({reason})")
+    report = service.index_directory()
+    print(report.summary())
+    if report.errors:
+        # Scoring a partial index reports a number for a system that was never built,
+        # and caching it would keep reporting it.
+        service.close()
+        eval_cache.discard(db_path)
+        raise SystemExit(f"indexing failed for {len(report.errors)} file(s); not scoring this run")
+    eval_cache.check_vectors(service.db, service.embedder, probes)
+    try:
+        eval_cache.confirm_stable(CORPUS, fingerprint)
+    except eval_cache.StaleCacheError as unstable:
+        service.close()
+        eval_cache.discard(db_path)
+        raise SystemExit(str(unstable)) from unstable
+    eval_cache.record(db_path, key, fingerprint)
+    return service, True
+
+
+def _service(
+    arguments: argparse.Namespace, base: ServerConfig, db_path: Path, embedder: Embedder
+) -> MarkdownMemoryService:
+    return MarkdownMemoryService(
+        ServerConfig(
+            db_path=db_path,
+            docs_dir=CORPUS,
+            embedder=arguments.embedder,
+            model_cache_dir=base.model_cache_dir,
+        ),
+        embedder=embedder,
+    )
+
+
+def run(
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    arguments: argparse.Namespace,
+    base: ServerConfig,
+    probes: Sequence[eval_cache.Probe],
+) -> dict[str, Scores]:
+    service, built = open_service(arguments, base, probes)
+    try:
+        print(f"embedder: {service.embedder.model_name}")
+        if not built:
+            print("index: reused from cache (fingerprint, integrity and vectors verified)")
+        service.search_docs("warm up", 1)
+        header = f"{'set':<22} {'n':>3}  Top-1  Top-3  Top-5  any-valid@1  nDCG@5  median   p95"
+        print("\n" + header + "\n" + "-" * len(header))
+        scores: dict[str, Scores] = {}
+        for split in ("dev", "held_out"):
+            for kind in ("paraphrase", "identifier"):
+                cases = queries[split][kind]
+                result = scores[f"{split}/{kind}"] = evaluate(service, cases)
+                print(
+                    f"{split + ' ' + kind:<22} {len(cases):>3}  {result.top1:5.0%}  "
+                    f"{result.top3:5.0%}  {result.top5:5.0%}  {result.any_valid_top1:11.0%}  "
+                    f"{result.ndcg5:6.2f}  {result.median_ms:4.0f}ms  {result.p95_ms:4.0f}ms"
+                )
+        if arguments.show_misses:
+            for name, result in scores.items():
+                for query, rank in result.misses:
+                    print(f"  miss [{name}] rank={rank}: {query}")
+        return scores
+    finally:
+        service.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -150,6 +271,11 @@ def main() -> int:
     )
     parser.add_argument("--show-misses", action="store_true", help="list queries missed at Top-1")
     parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="discard the cached index and build it again (~25 min on the v2 corpus)",
+    )
+    parser.add_argument(
         "--update-baseline",
         action="store_true",
         help="record these scores as the new frozen baseline for this embedder",
@@ -159,37 +285,13 @@ def main() -> int:
 
     queries = json.loads((DATA / "queries.json").read_text(encoding="utf-8"))
     base = ServerConfig.from_env()
-    with tempfile.TemporaryDirectory(prefix="markdown-memory-eval-") as workspace:
-        service = MarkdownMemoryService(
-            ServerConfig(
-                db_path=Path(workspace) / "eval.db",
-                docs_dir=DATA / "corpus",
-                embedder=arguments.embedder,
-                model_cache_dir=base.model_cache_dir,
-            )
-        )
-        try:
-            print(f"embedder: {service.embedder.model_name}")
-            print(service.index_directory().summary())
-            service.search_docs("warm up", 1)
-            header = f"{'set':<22} {'n':>3}  Top-1  Top-3  Top-5  any-valid@1  nDCG@5  median   p95"
-            print("\n" + header + "\n" + "-" * len(header))
-            scores: dict[str, Scores] = {}
-            for split in ("dev", "held_out"):
-                for kind in ("paraphrase", "identifier"):
-                    cases = queries[split][kind]
-                    result = scores[f"{split}/{kind}"] = evaluate(service, cases)
-                    print(
-                        f"{split + ' ' + kind:<22} {len(cases):>3}  {result.top1:5.0%}  "
-                        f"{result.top3:5.0%}  {result.top5:5.0%}  {result.any_valid_top1:11.0%}  "
-                        f"{result.ndcg5:6.2f}  {result.median_ms:4.0f}ms  {result.p95_ms:4.0f}ms"
-                    )
-            if arguments.show_misses:
-                for name, result in scores.items():
-                    for query, rank in result.misses:
-                        print(f"  miss [{name}] rank={rank}: {query}")
-        finally:
-            service.close()
+    probes = _probes(CORPUS)
+    try:
+        with eval_cache.lock(eval_cache.cache_root()):
+            scores = run(queries, arguments, base, probes)
+    except eval_cache.BusyError as busy:
+        print(f"REFUSING TO RUN: {busy}", file=sys.stderr)
+        return 1
 
     preset = arguments.embedder
     print_deltas(preset, scores)

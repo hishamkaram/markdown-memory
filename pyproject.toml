@@ -67,7 +67,7 @@ follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]  # shared test doubles (tests/fakes.py) under any import mode
+pythonpath = ["tests", "scripts"]  # test doubles (tests/fakes.py) and the scripts under test
 asyncio_mode = "auto"
 markers = [
     "embedding: tests that load the real local ONNX embedding model",

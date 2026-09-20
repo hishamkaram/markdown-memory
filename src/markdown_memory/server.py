@@ -24,6 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from markdown_memory.db import Database
 from markdown_memory.exceptions import (
+    ConfigurationError,
     DocumentNotFoundError,
     IndexingError,
     MarkdownMemoryError,
@@ -60,6 +61,12 @@ ENV_MODEL_CACHE = "MARKDOWN_MEMORY_MODEL_CACHE"
 ENV_EMBEDDER = "MARKDOWN_MEMORY_EMBEDDER"
 ENV_LOG_LEVEL = "MARKDOWN_MEMORY_LOG_LEVEL"
 ENV_EXCLUDE = "MARKDOWN_MEMORY_EXCLUDE"
+# Claude Code exports this to every stdio MCP server it spawns, set to the project root.
+# `.mcp.json` cannot interpolate it - measured on Claude Code 2.1.278, `${CLAUDE_PROJECT_DIR}`
+# and `${workspaceFolder}` are both reported as "Missing environment variables" and passed
+# through literally - so a project-scoped config uses relative paths and the server resolves
+# them here instead.
+ENV_PROJECT_DIR = "CLAUDE_PROJECT_DIR"
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -93,24 +100,60 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls) -> ServerConfig:
-        db_path = os.environ.get(ENV_DB_PATH, "").strip()
-        docs_dir = os.environ.get(ENV_DOCS_DIR, "").strip()
-        model_cache = os.environ.get(ENV_MODEL_CACHE, "").strip()
+        root = _project_root()
+        db_path = _configured_path(ENV_DB_PATH, root)
+        docs_dir = _configured_path(ENV_DOCS_DIR, root)
+        model_cache = _configured_path(ENV_MODEL_CACHE, root)
         return cls(
             db_path=(
-                Path(db_path).expanduser()
+                db_path
                 if db_path
                 else _xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"
             ),
-            docs_dir=Path(docs_dir).expanduser() if docs_dir else Path.cwd(),
+            docs_dir=docs_dir if docs_dir else root,
             embedder=os.environ.get(ENV_EMBEDDER, "").strip() or DEFAULT_EMBEDDER,
             model_cache_dir=(
-                Path(model_cache).expanduser()
+                model_cache
                 if model_cache
                 else _xdg_dir("XDG_CACHE_HOME", ".cache") / "markdown-memory" / "models"
             ),
             exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
         )
+
+
+def _project_root() -> Path:
+    """The directory a relative configured path is relative to.
+
+    Claude Code sets the working directory of a project-scoped server to the project root
+    as well, so the fallback agrees with the export in that case; it differs only for a
+    server started by hand from somewhere else.
+    """
+    exported = os.environ.get(ENV_PROJECT_DIR, "").strip()
+    return Path(exported).expanduser() if exported else Path.cwd()
+
+
+def _configured_path(variable: str, root: Path) -> Path | None:
+    """One configured path, resolved against ``root`` when it is relative.
+
+    An unexpanded `${...}` is rejected rather than used as a directory name: Claude Code
+    loads a config whose variables it could not expand and passes the literal text through,
+    which would otherwise index a directory named `${workspaceFolder}` and report success
+    over zero files.
+    """
+    value = os.environ.get(variable, "").strip()
+    if not value:
+        return None
+    # A directory really named `docs/${version}` is allowed: if the literal path exists,
+    # it is a path, not a variable nobody expanded.
+    if "${" in value and not Path(value).expanduser().exists():
+        raise ConfigurationError(
+            f"{variable} is set to {value!r}, which still contains an unexpanded variable. "
+            "Claude Code expands only environment variables in .mcp.json - not "
+            "${workspaceFolder} or ${CLAUDE_PROJECT_DIR} - so write the path relative to the "
+            "project root instead (for example '.markdown-memory/index.db')."
+        )
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (root / path)
 
 
 class MarkdownMemoryService:

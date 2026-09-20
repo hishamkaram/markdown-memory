@@ -7,6 +7,10 @@ class MarkdownMemoryError(Exception):
     """Base class for every error raised deliberately by this package."""
 
 
+class ConfigurationError(MarkdownMemoryError):
+    """The server was started with configuration it cannot act on."""
+
+
 class DatabaseError(MarkdownMemoryError):
     """The SQLite store could not be opened, migrated, read, or written."""
 

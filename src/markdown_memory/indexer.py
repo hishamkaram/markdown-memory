@@ -10,12 +10,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import re
 import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -361,7 +360,15 @@ def iter_markdown_files(
 
 
 def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
-    """True when ``path`` matches a pattern, tested against its path relative to ``root``."""
+    """True when ``path`` matches a pattern, tested against its path relative to ``root``.
+
+    A pattern with no ``/`` matches a *name* anywhere in the tree, the way ``.gitignore``
+    treats one: ``eval_data`` excludes ``scripts/eval_data/corpus/a.md``. Requiring the
+    full relative path there was a trap - the pattern looked right, matched nothing, and
+    the files were indexed silently. A pattern that does contain ``/`` is anchored at the
+    root and matched with ``fnmatchcase`` (never the platform's case folding), plus an
+    implied ``/*`` so naming a directory covers its subtree.
+    """
     if not patterns:
         return False
     try:
@@ -369,14 +376,31 @@ def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
     except ValueError:  # outside the root: nothing to match against
         return False
     text = relative.as_posix()
-    return any(
-        fnmatch(text, pattern) or fnmatch(text, pattern.rstrip("/") + "/*") for pattern in patterns
-    )
+    parts = relative.parts
+    for pattern in patterns:
+        if "/" in pattern:
+            anchored = pattern.rstrip("/")
+            if fnmatchcase(text, anchored) or fnmatchcase(text, anchored + "/*"):
+                return True
+        elif any(fnmatchcase(part, pattern) for part in parts):
+            return True
+    return False
 
 
 def parse_exclusions(value: str) -> tuple[str, ...]:
-    """Split a configured exclusion list: commas or colons, blanks dropped."""
-    return tuple(part.strip() for part in re.split(r"[,:]", value) if part.strip())
+    """Split a configured exclusion list on commas; blanks and stray ``./`` dropped.
+
+    Comma only: a colon separator would split a pattern that contains one, and silently
+    excluding the wrong thing is worse than not accepting the separator.
+    """
+    patterns = []
+    for part in value.split(","):
+        # One leading "./" only: `lstrip("./")` would eat the dot of `.hidden` and
+        # exclude a `hidden` directory instead of the one that was named.
+        cleaned = part.strip().removeprefix("./").rstrip("/")
+        if cleaned:
+            patterns.append(cleaned)
+    return tuple(patterns)
 
 
 def _printable(path: str) -> str:

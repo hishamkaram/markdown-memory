@@ -74,14 +74,22 @@ and no chance of another project's sections appearing in its results.
       "command": "uv",
       "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
       "env": {
-        "MARKDOWN_MEMORY_DOCS_DIR": "${workspaceFolder}",
-        "MARKDOWN_MEMORY_DB": "${workspaceFolder}/.markdown-memory/index.db",
+        "MARKDOWN_MEMORY_DB": ".markdown-memory/index.db",
         "MARKDOWN_MEMORY_EXCLUDE": "vendor,third_party,tests/fixtures"
       }
     }
   }
 }
 ```
+
+The paths are relative on purpose. Claude Code expands only real environment variables in
+`.mcp.json`: `${workspaceFolder}` is a VS Code idea, and even `${CLAUDE_PROJECT_DIR}` is
+not set at expansion time - measured on Claude Code 2.1.278, both produce a *"Missing
+environment variables"* warning and are passed through as literal text, which would make
+the server index a directory named `${workspaceFolder}` and report success over zero
+files. The server refuses such a value outright, and resolves a relative path against
+`CLAUDE_PROJECT_DIR` (which Claude Code *does* export to the spawned server) or the
+working directory. The docs root defaults to that same project root, so it needs no entry.
 
 Add `.markdown-memory/` to that repository's `.gitignore`: the index is a cache of the
 Markdown files and is rebuilt from them. This repository ships exactly such a file, which
@@ -98,11 +106,16 @@ indexes its own six documentation files and keeps the vendored evaluation corpus
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 
-`MARKDOWN_MEMORY_EXCLUDE` takes glob patterns, comma or colon separated, matched against
-each path relative to the documentation root (`vendor`, `tests/fixtures`, `**/generated/*`).
-A matching directory is pruned, so its subtree costs nothing. Without it, a repository that
-keeps fixtures, vendored documentation or a test corpus in-tree indexes them as if they
-were its own docs.
+`MARKDOWN_MEMORY_EXCLUDE` takes glob patterns separated by commas (only commas - a colon
+would split a pattern that contains one). A pattern with no `/` matches that name at any
+depth, the way `.gitignore` treats one: `eval_data` excludes `scripts/eval_data/corpus/`.
+A pattern containing `/` is anchored at the documentation root (`tests/fixtures`,
+`docs/generated/*`). Matching is case-sensitive everywhere, and a matching directory is
+pruned, so its subtree costs nothing to skip. Files already indexed before an exclusion
+was added are purged on the next index.
+
+Without it, a repository that keeps fixtures, vendored documentation or a test corpus
+in-tree indexes them as if they were its own docs.
 
 Documents are stored under their absolute path, so one database *can* hold several
 projects - though one index per project is usually what you want. Switching to a different model discards the whole index (vectors from two
@@ -193,6 +206,7 @@ uv run mypy --strict src/
 uv run pytest -v                      # unit + integration (real ONNX model for semantic tests)
 uv run python scripts/live_test.py    # spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/eval_retrieval.py --show-misses   # retrieval accuracy; fails on regression
+uv run python scripts/eval_retrieval.py --rebuild       # ... after discarding the cached index
 uv run python scripts/reindex_docs.py DIR --force       # forced re-index + integrity verification
 scripts/check.sh                                        # the whole pre-commit gate, fail-fast
 ```

@@ -102,6 +102,21 @@ rejected: all lowered accuracy and cost 2-12 s per query.
 Changing the embedding model or its dimension invalidates every stored vector: the index
 is discarded and rebuilt (`IndexReport.notes` says so).
 
+The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
+content, the chunking constants, the source of `parser.py`/`indexer.py`/`db.py`/`models.py`,
+the embedder's revision, prompts and dimension, the size and mtime of the model files
+actually on disk, and `MARKDOWN_MEMORY_THREADS` (`scripts/eval_cache.py`). A cached index
+is never trusted on its key alone: before it is scored, its parse fingerprint - every
+section path, section content and passage text, verbatim and in order - is recomputed, the
+recorded key is compared field by field, `integrity_problems()` runs, and a passage of the
+corpus is re-embedded and must come back as its own nearest neighbour (cosine distance
+below 1e-3; measured -6e-8 for a match against 0.384 for the next passage). A query cannot
+do that last job: search fuses keyword and vector rankings, so an identifier query returns
+the right section even when every vector came from a different model. Any check failing
+discards the index and rebuilds it. `--rebuild` forces that by hand. Only one evaluation may run at a time
+(`flock` on `eval.lock`): the script reports median and p95 latency, and a second job on the
+same CPU moves those numbers further than the changes being measured.
+
 <!-- markdown-memory:navigation-rules:start -->
 ## Reading Markdown documentation (when the `markdown-memory` MCP server is mounted)
 
