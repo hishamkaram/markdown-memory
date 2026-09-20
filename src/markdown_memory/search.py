@@ -9,7 +9,9 @@ Two refinements, both measured on a labelled query set, sit in front of the fusi
   match on a common word ("data", "deploy") used to lift a wrong section above the
   correct one that only the vector index had found. A keyword hit now counts only when
   it covers at least half of the query's information (IDF-weighted), or when it matches
-  an identifier-like term (``--flag``, ``ENV_VAR``, ``/path``), which is never noise.
+  an identifier-like term (``--flag``, ``ENV_VAR``, ``/path``) that is rare in the corpus.
+  Spelling alone does not make an identifier: ``HTTP``, ``API`` or ``2024`` look like one
+  and are ordinary vocabulary wherever many sections mention them.
 """
 
 from __future__ import annotations
@@ -32,6 +34,11 @@ CANDIDATES_PER_INDEX = 20
 MAX_RESULT_LIMIT = 50
 _MAX_QUERY_TERMS = 32
 KEYWORD_GATE = 0.5  # minimum IDF-weighted share of the query a keyword hit must cover
+# An identifier-like term passes the gate by itself only while it is rare: found in at most
+# this many sections, or this share of all sections, whichever is larger.
+IDENTIFIER_MAX_SECTIONS = 3
+IDENTIFIER_MAX_SHARE = 0.05
+_STALE_RETRIES = 1  # re-rank once when a concurrent re-index replaced ranked sections
 _PASSAGES_PER_CANDIDATE = 10  # passage neighbours fetched per wanted section
 
 
@@ -189,7 +196,11 @@ _IDENTIFIER_MARKS = frozenset("_./\\:@#$=")
 
 
 def _is_identifier(quoted_term: str) -> bool:
-    """A flag, path, environment variable, constant or version - not a plain word."""
+    """Spelled like a flag, path, environment variable, constant or version.
+
+    Spelling cannot tell ``ENOSPC`` from ``HTTP``: whether a match on such a term may
+    bypass the keyword gate also depends on how rare it is (see ``HybridSearcher._gate``).
+    """
     term = quoted_term.strip('"')
     return (
         term.startswith("-")
@@ -250,8 +261,19 @@ class HybridSearcher:
         if not query:
             return []
         limit = max(1, min(limit, MAX_RESULT_LIMIT))
-        candidates = max(self._candidates, limit)
+        # Re-indexing a document replaces its section rows, so ids ranked a moment ago can
+        # be gone by the time they are fetched. The new rows are already committed: rank
+        # again rather than hand back a short (or empty) page with no explanation.
+        for _ in range(_STALE_RETRIES):
+            results, stale = self._search_once(query, limit)
+            if not stale:
+                return results
+            logger.info("Sections changed during the search; ranking again")
+        return self._search_once(query, limit)[0]
 
+    def _search_once(self, query: str, limit: int) -> tuple[list[SearchResult], bool]:
+        """One ranking pass: the results, and whether a better-ranked section had vanished."""
+        candidates = max(self._candidates, limit)
         try:
             fts_future = self._pool.submit(self._keyword_ranking, query, candidates)
             vec_future = self._pool.submit(self._vector_ranking, query, candidates)
@@ -268,13 +290,21 @@ class HybridSearcher:
         scores = reciprocal_rank_fusion([fts_ranking, vec_ranking], self._rrf_k)
         fts_ranks = {section_id: rank for rank, section_id in enumerate(fts_ranking, start=1)}
         vec_ranks = {section_id: rank for rank, section_id in enumerate(vec_ranking, start=1)}
-        ordered = sorted(scores, key=lambda section_id: (-scores[section_id], section_id))[:limit]
+        ordered = sorted(scores, key=lambda section_id: (-scores[section_id], section_id))
 
-        hydrated = self._db.get_sections_with_documents(ordered)
+        hydrated = self._db.get_sections_with_documents(ordered[:limit])
+        if len(hydrated) < len(ordered[:limit]):
+            # Deleted by a concurrent re-index between ranking and fetch: the next-best
+            # candidates fill the page instead of leaving it short.
+            hydrated.update(self._db.get_sections_with_documents(ordered[limit:]))
         results: list[SearchResult] = []
+        stale = False
         for section_id in ordered:
+            if len(results) == limit:
+                break
             pair = hydrated.get(section_id)
-            if pair is None:  # deleted by a concurrent re-index between ranking and fetch
+            if pair is None:
+                stale = True
                 continue
             section, document = pair
             results.append(
@@ -293,7 +323,7 @@ class HybridSearcher:
                     matched_passage=passages.get(section_id),
                 )
             )
-        return results
+        return results, stale
 
     def _keyword_ranking(self, query: str, limit: int) -> list[int]:
         terms = fts_terms(query)
@@ -312,15 +342,21 @@ class HybridSearcher:
             return hits
         total = self._db.count_rows("sections")
         weights: dict[str, float] = {}
+        frequencies: dict[str, int] = {}
         matched: dict[str, set[int]] = {}
         for term in terms:
             frequency = self._db.fts_document_frequency(term)
             weights[term] = math.log(1 + (total - frequency + 0.5) / (frequency + 0.5))
             matched[term] = self._db.fts_matching(term, hits) if frequency else set()
+            frequencies[term] = frequency
         budget = sum(weights.values()) or 1.0
+        # A term that merely looks like an identifier ("HTTP", "RAM", "2024") and occurs
+        # all over the corpus is vocabulary: admitting every section that mentions it is
+        # exactly the noise this gate exists to remove. It still counts towards coverage.
+        rare = max(IDENTIFIER_MAX_SECTIONS, int(total * IDENTIFIER_MAX_SHARE))
         exact: set[int] = set()
         for term in terms:
-            if _is_identifier(term):
+            if _is_identifier(term) and frequencies[term] <= rare:
                 exact |= matched[term]
 
         def coverage(hit: int) -> float:

@@ -361,22 +361,24 @@ class Indexer:
 
         with self._run_lock:
             started = time.perf_counter()
-            # Migrations that emptied the index (new format, new vector size) left a notice.
-            notes: list[str] = self._db.take_notices()
             previous_model = self._db.get_meta(_MODEL_META_KEY)
             if previous_model not in {None, self._embedder.model_name}:
                 # Vectors from different models are not comparable, and they share one
                 # vector table: every document has to go, not only those under `root`.
-                discarded = self._db.clear()
-                if discarded:  # 0 when a size change already emptied (and announced) it
-                    notes.append(
+                # Nothing is announced when a size change already emptied (and announced) it.
+                self._db.clear(
+                    notice=lambda discarded: (
                         f"Embedding model changed ({previous_model} -> "
                         f"{self._embedder.model_name}): discarded all {discarded} previously "
                         "indexed documents from every directory. Re-run index_directory for "
                         "any other documentation root."
                     )
-                    logger.warning(notes[-1])
+                )
             self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
+            # Whatever emptied the index (new format, new vector size, new model) left a
+            # notice. They are dismissed only once the report carrying them exists: a run
+            # that aborts - the model cannot be loaded - leaves them for the next one.
+            notices = self._db.pending_notices()
             known_hashes = self._db.document_hashes(str(root))
 
             seen: set[str] = set()
@@ -423,8 +425,9 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notes),
+                notes=tuple(notices.values()),
             )
+            self._db.dismiss_notices(notices)
         logger.info(report.summary())
         return report
 

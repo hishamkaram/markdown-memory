@@ -5,15 +5,22 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from fakes import FakeEmbedder
-from helpers import store
+from fakes import FakeEmbedder, vectors_for
+from helpers import draft, store
 
 from markdown_memory.db import Database
 from markdown_memory.exceptions import SearchError
 from markdown_memory.indexer import Indexer
+from markdown_memory.models import (
+    Document,
+    SearchResult,
+    Section,
+    SectionDraft,
+)
 from markdown_memory.search import HybridSearcher, build_fts_query
 
 
@@ -104,3 +111,200 @@ class TestSearchRobustness:
         searcher.close()
         with pytest.raises(SearchError, match="shut down"):
             searcher.search("anything")
+
+
+def keyword_sections(results: Sequence[SearchResult]) -> set[str]:
+    return {result.heading_title for result in results if result.fts_rank is not None}
+
+
+class TestIdentifierGateBypassNeedsRarity:
+    ACRONYM_SECTIONS = (
+        ("Upstream Deadlines", "ORBIT_UPSTREAM_TIMEOUT_MS: the deadline for one request."),
+        ("Status Codes", "HTTP status codes from the backend are passed through unchanged."),
+        ("Headers", "Hop-by-hop HTTP headers are removed before forwarding."),
+        ("Compression", "HTTP bodies are compressed with gzip when the client accepts it."),
+        ("Access Logs", "Every HTTP exchange is written to the access log."),
+        ("Keep Alive", "Idle HTTP connections are closed after a minute."),
+    )  # fmt: skip
+
+    @staticmethod
+    def fill(db: Database, embedder: FakeEmbedder, sections: Sequence[tuple[str, str]]) -> None:
+        drafts = [draft(title, f"## {title}\n\n{body}") for title, body in sections]
+        db.replace_document(
+            file_path="/d/proxy.md", title="Doc", content_hash="h", last_modified=1,
+            sections=drafts, vectors=vectors_for(embedder, drafts),
+        )  # fmt: skip
+
+    def test_common_acronym_does_not_switch_the_gate_off(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        self.fill(db, fake_embedder, self.ACRONYM_SECTIONS)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            upper = searcher.search("HTTP request deadline", limit=6)
+            lower = searcher.search("http request deadline", limit=6)
+        finally:
+            searcher.close()
+        # "HTTP" is in five of six sections: a match on it alone says nothing.
+        assert keyword_sections(upper) == {"Upstream Deadlines"}
+        assert upper[0].heading_title == "Upstream Deadlines"
+        assert [r.heading_title for r in upper] == [r.heading_title for r in lower]
+
+    def test_rare_identifier_still_passes_the_gate_by_itself(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        sections = [*self.ACRONYM_SECTIONS, ("Disk Full", "Writes fail with ENOSPC.")]
+        self.fill(db, fake_embedder, sections)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            # Three words found nowhere dominate the query's IDF: only the bypass keeps it.
+            results = searcher.search("ENOSPC zebra quokka wombat", limit=7)
+        finally:
+            searcher.close()
+        assert keyword_sections(results) == {"Disk Full"}
+        assert results[0].heading_title == "Disk Full"
+
+
+class TestSearchDuringReindex:
+    @staticmethod
+    def fill(db: Database, embedder: FakeEmbedder) -> list[SectionDraft]:
+        retries = [
+            draft("Backoff", "## Backoff\n\nretries use exponential backoff"),
+            draft("Deadlines", "## Deadlines\n\nretries stop at the deadline"),
+        ]
+        colours = [draft("Colours", "## Colours\n\nthe deadline banner is red")]
+        for file_path, sections in (("/d/retries.md", retries), ("/d/colours.md", colours)):
+            db.replace_document(
+                file_path=file_path, title="Doc", content_hash="h", last_modified=1,
+                sections=sections, vectors=vectors_for(embedder, sections),
+            )  # fmt: skip
+        return retries
+
+    def test_sections_replaced_between_ranking_and_fetch_are_ranked_again(
+        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        retries = self.fill(db, fake_embedder)
+        fetch = db.get_sections_with_documents
+        reindexed: list[bool] = []
+
+        def fetch_after_reindex(ids: Sequence[int]) -> dict[int, tuple[Section, Document]]:
+            if not reindexed:  # a concurrent index_directory lands exactly here, once
+                reindexed.append(True)
+                db.replace_document(
+                    file_path="/d/retries.md", title="Doc", content_hash="h2", last_modified=2,
+                    sections=retries, vectors=vectors_for(fake_embedder, retries),
+                )  # fmt: skip
+            return fetch(ids)
+
+        monkeypatch.setattr(db, "get_sections_with_documents", fetch_after_reindex)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            results = searcher.search("retries backoff deadline", limit=5)
+        finally:
+            searcher.close()
+        assert sorted(r.heading_title for r in results) == ["Backoff", "Colours", "Deadlines"]
+        assert results[0].heading_title == "Backoff"
+        current = {int(row[0]) for row in db.connection().execute("SELECT id FROM sections")}
+        assert {r.section_id for r in results} == current  # no stale ids handed out
+
+    def test_page_is_filled_from_the_next_best_when_every_pass_is_raced(
+        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        retries = self.fill(db, fake_embedder)
+        fetch = db.get_sections_with_documents
+
+        def fetch_after_reindex(ids: Sequence[int]) -> dict[int, tuple[Section, Document]]:
+            db.replace_document(  # the re-index never stops: every fetch comes too late
+                file_path="/d/retries.md", title="Doc", content_hash="h", last_modified=1,
+                sections=retries, vectors=vectors_for(fake_embedder, retries),
+            )  # fmt: skip
+            return fetch(ids)
+
+        monkeypatch.setattr(db, "get_sections_with_documents", fetch_after_reindex)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            results = searcher.search("retries backoff deadline", limit=1)
+        finally:
+            searcher.close()
+        assert [r.heading_title for r in results] == ["Colours"]  # not an empty page
+
+
+class TestRankingIsActuallyTested:
+    """Coverage for two ranking rules that every earlier test passed without."""
+
+    def test_a_section_is_ranked_by_its_closest_passage_not_its_average(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        filler = "\n\n".join(f"unrelated billing invoice paragraph {n}" for n in range(12))
+        target = SectionDraft(
+            heading_title="Rotation", heading_level=2, heading_path="Doc > Rotation",
+            base_path="Doc > Rotation", content=f"## Rotation\n\n{filler}", start_line=1,
+            end_line=1, units=(*filler.split("\n\n"), "certificates expire after ninety days"),
+        )  # fmt: skip
+        # The decoy mentions two of the three query words in a short section: its own
+        # vector beats the target's, which is twelve parts filler to one part answer.
+        decoy = draft("Almanac", "## Almanac\n\ncertificates expire\n")
+        noise = [draft(f"N{n}", f"## N{n}\n\nbilling invoice note {n}") for n in range(25)]
+        sections = [target, decoy, *noise]
+        db.replace_document(
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            ranking, passages = searcher._vector_ranking("certificates expire ninety", 20)
+        finally:
+            searcher.close()
+        ids = {
+            str(row[1]): int(row[0])
+            for row in db.connection().execute("SELECT id, heading_title FROM sections")
+        }
+        target_id = ids["Rotation"]
+        # Ranked by section vector alone the decoy wins; by closest passage the target does.
+        section_only = dict(
+            db.vec_search(fake_embedder.embed_query("certificates expire ninety"), 20)
+        )  # noqa: E501
+        assert section_only[ids["Almanac"]] < section_only[target_id]
+        assert ranking[0] == target_id
+        assert passages[target_id] == "certificates expire after ninety days"
+
+    def test_keyword_hits_come_back_in_bm25_order_not_row_order(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        padding = " ".join(f"filler word {n}" for n in range(60))
+        sections = [
+            draft("Alpha Note", f"## Alpha Note\n\n{padding} compaction {padding}"),
+            draft("Storage", f"## Storage\n\ncompaction {padding}"),
+            draft("Compaction", "## Compaction\n\ncompaction compaction compaction"),
+        ]
+        db.replace_document(
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        ids = {
+            str(row[1]): int(row[0])
+            for row in db.connection().execute("SELECT id, heading_title FROM sections")
+        }
+        hits = db.fts_search('"compaction"', 10)
+        assert hits[0] != min(hits)  # not simply the first row that matched
+        assert hits == [ids["Compaction"], ids["Storage"], ids["Alpha Note"]]
+
+    def test_a_match_in_the_heading_outranks_one_buried_in_a_body(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        padding = " ".join(f"filler word {n}" for n in range(60))
+        # Six body hits against one heading hit, in bodies of the same length: with equal
+        # column weights the body wins, so only bm25(5.0, 3.0, 1.0) puts the heading first.
+        sections = [
+            draft("Long Body", f"## Long Body\n\n{padding} " + "vacuuming " * 6),
+            draft("Vacuuming", f"## Vacuuming\n\n{padding} filler word 60"),
+        ]
+        db.replace_document(
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        first = db.fts_search('"vacuuming"', 10)[0]
+        heading_match = db.connection().execute(
+            "SELECT heading_title FROM sections WHERE id = ?", (first,)
+        ).fetchone()  # fmt: skip
+        assert heading_match[0] == "Vacuuming"  # bm25(5.0, 3.0, 1.0) weights the heading

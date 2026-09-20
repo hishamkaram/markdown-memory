@@ -15,6 +15,7 @@ from markdown_memory.db import Database
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
     PREAMBLE_TITLE,
+    ParsedDocument,
     SectionDraft,
 )
 from markdown_memory.parser import DEFAULT_MAX_SECTION_CHARS, MarkdownParser, join_parts
@@ -401,3 +402,89 @@ class TestFrontMatterAdmonitions:
     def test_single_real_key_is_still_front_matter(self) -> None:
         document = parse("---\ntitle: Real\n---\n\n## Body\n\ntext\n")
         assert (document.title, paths(document)) == ("Real", [PREAMBLE_TITLE, "Body"])
+
+
+class TestFencesInsideOversizedBlocks:
+    @staticmethod
+    def assert_fences_whole(document: ParsedDocument, fence: str) -> None:
+        assert len(document.sections) > 1
+        for section in document.sections:
+            assert len(section.content) <= DEFAULT_MAX_SECTION_CHARS
+            assert section.content.count("```") % 2 == 0, section.heading_path
+        assert sum(fence in section.content for section in document.sections) == 1
+
+    def test_fence_directly_below_prose_is_not_cut(self) -> None:
+        prose = " ".join(["word"] * 570)  # 2849 characters, one line
+        rows = ",\n".join(f'  "option_{n:03d}": "value number {n:03d}"' for n in range(45))
+        fence = f"```json\n{{\n{rows}\n}}\n```"
+        assert len(fence) < DEFAULT_MAX_SECTION_CHARS < len(prose) + len(fence)
+        text = f"## Config\n\n{prose}\n{fence}\n"  # no blank line: one block
+        document = parse(text)
+        self.assert_fences_whole(document, fence)
+        assert join_parts(document.sections) == text.rstrip("\n")
+        holder = next(s for s in document.sections if fence in s.content)
+        assert holder.content == fence
+        assert len(holder.units) == 1 and holder.units[0].startswith('{ "option_000"')
+
+    def test_fences_inside_a_tight_list_are_not_cut(self) -> None:
+        def fenced(item: int) -> str:
+            commands = (f"  helios step {item} --number {n:02d} --verbose" for n in range(12))
+            return "  ```bash\n" + "\n".join(commands) + "\n  ```"
+
+        text = "## Steps\n\n" + "\n".join(f"- Step {n}:\n{fenced(n)}" for n in range(8)) + "\n"
+        document = parse(text)
+        for item in range(8):
+            self.assert_fences_whole(document, fenced(item))
+        assert join_parts(document.sections) == text.rstrip("\n")
+
+    def test_fence_larger_than_a_part_is_still_cut(self) -> None:
+        body = "\n".join(f"line {n:04d} of a very long listing" for n in range(200))
+        text = f"## Dump\n\nintro\n```text\n{body}\n```\n"
+        document = parse(text)
+        assert len(document.sections) > 2
+        assert all(len(s.content) <= DEFAULT_MAX_SECTION_CHARS for s in document.sections)
+        assert join_parts(document.sections) == text.rstrip("\n")
+
+
+class TestUnitsRound4:
+    def test_header_only_table_is_a_passage_not_a_stub(self) -> None:
+        document = parse("## Config\n\n| Option | Default |\n|--------|---------|\n")
+        assert document.sections[0].units == ("Option; Default",)
+        filled = parse("## Config\n\n| Option | Default |\n|---|---|\n| a | b |\n")
+        assert filled.sections[0].units == ("Option: a; Default: b",)
+
+    @pytest.mark.parametrize(
+        "comment",
+        [
+            "<!-- a > b -->",
+            '<!--\n<img src="x.png">\n-->',
+            "<!--\n> Note: this was the old wording.\n-->",
+            "<!-- never closed > still hidden",
+        ],
+    )
+    def test_html_comment_containing_an_angle_bracket_leaves_no_text(self, comment: str) -> None:
+        assert parse(f"## Stub\n\n{comment}\n").sections[0].units == ()
+
+    def test_text_around_a_comment_is_kept(self) -> None:
+        document = parse("## Live\n\n<div>\nshown <!-- hidden > gone --> too\n</div>\n")
+        assert document.sections[0].units == ("shown too",)
+
+
+class TestBlankLinesNeverFormAPart:
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_no_part_is_empty(self, blank: str) -> None:
+        text = "A" * (DEFAULT_MAX_SECTION_CHARS - 1) + f"\n{blank}\n" + "B" * 3200
+        document = parse(text)
+        assert [len(s.content.strip()) for s in document.sections] == [3199, 3200]
+        assert [s.part_index for s in document.sections] == [1, 2]
+        assert join_parts(document.sections) == text
+
+
+class TestFrontMatterKeysInAnyScript:
+    def test_non_ascii_keys_are_front_matter_not_a_setext_heading(self) -> None:
+        document = parse("---\n标题: 指南\nавтор: Иван\n---\n\n# 手册\n\n正文。\n")
+        assert paths(document) == [PREAMBLE_TITLE, "手册"]  # as for ASCII keys
+        assert document.title == "手册"
+
+    def test_a_key_still_cannot_start_with_a_digit(self) -> None:
+        assert paths(parse("---\n2024: review\n---\n\n# T\n")) != ["T"]

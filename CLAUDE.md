@@ -39,7 +39,7 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, incremental `Indexer` |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/server.py` | `ServerConfig`, `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
-| `tests/` | `fakes.py` holds `FakeEmbedder` (offline, deterministic); `test_review_regressions.py` pins every bug found in review |
+| `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
 | `scripts/eval_data/` | Frozen eval corpus, labelled queries, `baseline.json` |
 
 Storage: `documents` -> `sections` (ON DELETE CASCADE) -> `units` (ON DELETE CASCADE).

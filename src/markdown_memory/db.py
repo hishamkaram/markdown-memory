@@ -25,7 +25,7 @@ import sqlite3
 import struct
 import threading
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_DIM = 384
 SCHEMA_VERSION = 2
+_SECTION_ID_META_KEY = "next_section_id"
 _BUSY_TIMEOUT_MS = 10_000
 _WAL_ATTEMPTS = 40
 _WAL_RETRY_SECONDS = 0.05
@@ -434,18 +435,23 @@ class Database:
                 (key, value),
             )
 
-    def take_notices(self) -> list[str]:
-        """Return and clear the messages left by migrations that discarded the index.
+    def pending_notices(self) -> dict[str, str]:
+        """Messages left by whatever discarded the index, oldest first, keyed for dismissal.
 
         They are persisted, not logged only, so that whoever next runs ``index_directory``
-        - possibly another process, much later - is told why the index was empty.
+        - possibly another process, much later - is told why the index was empty. Reading
+        does not clear them: a run that fails before it can report them must not eat them.
         """
-        with self.transaction() as conn:
+        with self._reading() as conn:
             rows = conn.execute(
                 "SELECT key, value FROM meta WHERE key LIKE 'notice:%' ORDER BY key"
             ).fetchall()
-            conn.execute("DELETE FROM meta WHERE key LIKE 'notice:%'")
-        return [str(value) for _, value in rows]
+        return {str(key): str(value) for key, value in rows}
+
+    def dismiss_notices(self, keys: Iterable[str]) -> None:
+        """Forget the notices that have been delivered; any added since are kept."""
+        with self.transaction() as conn:
+            conn.executemany("DELETE FROM meta WHERE key = ?", [(key,) for key in keys])
 
     def pragma(self, name: str) -> str:
         """Return a PRAGMA's current value on this thread's connection."""
@@ -562,11 +568,15 @@ class Database:
                     (title, content_hash, last_modified, doc_id),
                 )
                 conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
+            section_id = _next_section_id(conn) - 1
             for section, vector in zip(sections, vectors, strict=True):
-                section_id = conn.execute(
-                    "INSERT INTO sections(doc_id, heading_title, heading_level, heading_path, "
-                    "content, start_line, end_line, part_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                section_id += 1
+                conn.execute(
+                    "INSERT INTO sections(id, doc_id, heading_title, heading_level, "
+                    "heading_path, content, start_line, end_line, part_index) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        section_id,
                         doc_id,
                         section.heading_title,
                         section.heading_level,
@@ -576,7 +586,7 @@ class Database:
                         section.end_line,
                         section.part_index,
                     ),
-                ).lastrowid
+                )
                 if vector.section is not None:
                     conn.execute(
                         "INSERT INTO sections_vec(section_id, embedding) VALUES (?, ?)",
@@ -593,6 +603,11 @@ class Database:
                         "INSERT INTO units_vec(unit_id, embedding) VALUES (?, ?)",
                         (unit_id, serialize_embedding(embedding)),
                     )
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_SECTION_ID_META_KEY, str(section_id + 1)),
+            )
         return Document(
             id=doc_id,
             file_path=file_path,
@@ -622,10 +637,17 @@ class Database:
                 ).rowcount
         return deleted
 
-    def clear(self) -> int:
-        """Delete every document (and, by cascade, every section and vector)."""
+    def clear(self, notice: Callable[[int], str] | None = None) -> int:
+        """Delete every document (and, by cascade, every section and vector).
+
+        ``notice`` words the message for the number of documents discarded; it is persisted
+        in the same transaction, so the explanation cannot be lost while the data is.
+        """
         with self.transaction() as conn:
-            return conn.execute("DELETE FROM documents").rowcount
+            discarded = conn.execute("DELETE FROM documents").rowcount
+            if discarded and notice is not None:
+                _add_notice(conn, notice(discarded))
+            return discarded
 
     # ------------------------------------------------------------------ sections
 
@@ -836,10 +858,25 @@ class Database:
         return int(row[0])
 
 
+def _next_section_id(conn: sqlite3.Connection) -> int:
+    """A section id that was never used before, not even by a row deleted since.
+
+    SQLite hands the rowid of a deleted row out again. A search ranks ids on one connection
+    and fetches them on another, so a re-index in between must make the old ids *vanish*
+    (the search then ranks again) rather than point at whatever section was stored next.
+    """
+    stored = conn.execute("SELECT value FROM meta WHERE key = ?", (_SECTION_ID_META_KEY,))
+    row = stored.fetchone()
+    highest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM sections").fetchone()[0]
+    return max(int(row[0]) if row is not None else 1, int(highest) + 1)
+
+
 def _add_notice(conn: sqlite3.Connection, message: str) -> None:
     logger.warning(message)
-    count = int(conn.execute("SELECT COUNT(*) FROM meta WHERE key LIKE 'notice:%'").fetchone()[0])
-    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (f"notice:{count:04d}", message))
+    # Numbered after the newest, not by count: notices are dismissed one by one.
+    newest = conn.execute("SELECT MAX(key) FROM meta WHERE key LIKE 'notice:%'").fetchone()[0]
+    number = 0 if newest is None else int(str(newest).removeprefix("notice:")) + 1
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (f"notice:{number:04d}", message))
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:

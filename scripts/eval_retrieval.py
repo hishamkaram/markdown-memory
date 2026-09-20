@@ -193,9 +193,9 @@ def main() -> int:
 
     preset = arguments.embedder
     print_deltas(preset, scores)
-    if arguments.update_baseline:
-        update_baseline(preset, scores)
     if preset != DEFAULT_EMBEDDER:
+        if arguments.update_baseline:
+            update_baseline(preset, scores)
         # The floors are calibrated for the default embedder. Say so: a silent exit 0
         # would read as "gates passed".
         print(f"\nGATES NOT CHECKED: floors apply to {DEFAULT_EMBEDDER!r} only, not {preset!r}")
@@ -216,7 +216,13 @@ def main() -> int:
     ]
     if failures:
         print("\nREGRESSION: " + "; ".join(failures))
+        if arguments.update_baseline:
+            # Recording these numbers would make the regression the reference the next run
+            # measures against, and the delta would then read +0pp.
+            print("not recording a baseline for a run that fails the floors")
         return 1
+    if arguments.update_baseline:
+        update_baseline(preset, scores)
     print("\nOK: held-out floors met (Top-1 >= 80%, Top-5 >= 90%, identifiers 100%)")
     return 0
 

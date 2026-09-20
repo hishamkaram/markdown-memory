@@ -101,6 +101,23 @@ class TestDocsMatchTheCode:
             for floor in floors:
                 assert floor in text, f"{name} does not state the {floor} gate"
 
+    def test_documented_query_counts_are_the_real_ones(self) -> None:
+        queries = json.loads((ROOT / "scripts/eval_data/queries.json").read_text())
+        counts = {f"{s}/{k}": len(v) for s in ("dev", "held_out") for k, v in queries[s].items()}
+        assert counts == {
+            "dev/paraphrase": 34, "dev/identifier": 10,
+            "held_out/paraphrase": 34, "held_out/identifier": 8,
+        }  # fmt: skip
+        skill = all_agent_text()[".claude/skills/run-eval/SKILL.md"]
+        assert f"{counts['dev/paraphrase']} paraphrase queries in each split" in skill
+        assert f"{counts['dev/identifier']} dev and" in skill
+        assert f"{counts['held_out/identifier']} held-out identifier queries" in skill
+        for size, weight in (
+            (counts["dev/identifier"], "10pp"),
+            (counts["held_out/identifier"], "12.5pp"),
+        ):  # noqa: E501
+            assert f"{100 / size:g}".rstrip("0") in weight and weight in skill
+
     def test_documented_baseline_is_the_frozen_baseline(self) -> None:
         baseline = json.loads((ROOT / "scripts/eval_data/baseline.json").read_text())
         assert set(baseline) == {"embeddinggemma", "bge-small"}

@@ -5,6 +5,8 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import json
+import logging
 import sys
 from pathlib import Path
 
@@ -12,6 +14,10 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
+from markdown_memory.models import (
+    IndexReport,
+    SearchResult,
+)
 from markdown_memory.server import MarkdownMemoryService, ServerConfig
 
 
@@ -54,3 +60,62 @@ class TestEvalScript:
         assert "default=DEFAULT_EMBEDDER" in source
         assert "base.embedder" not in source  # the environment must not pick the scored model
         assert "GATES NOT CHECKED" in source
+
+
+class _EvalStubService:
+    """Enough of MarkdownMemoryService for eval_retrieval.main(); scoring is stubbed out."""
+
+    def __init__(self, config: ServerConfig) -> None:
+        self.embedder = FakeEmbedder(model_name="stub")
+
+    def index_directory(self, directory: str | None = None) -> IndexReport:
+        return IndexReport(
+            directory="stub", files_scanned=0, files_indexed=0, files_unchanged=0, files_purged=0,
+            sections_indexed=0, passages_indexed=0, elapsed_seconds=0.0,
+        )  # fmt: skip
+
+    def search_docs(self, query: str, limit: int) -> list[SearchResult]:
+        return []
+
+    def close(self) -> None:
+        return None
+
+
+class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
+    def run_main(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, top1: float
+    ) -> tuple[int, dict[str, object]]:
+        baseline = tmp_path / "baseline.json"
+        original = json.loads(
+            (Path(evaluation.__file__).parent / "eval_data/baseline.json").read_text()  # type: ignore[attr-defined]
+        )
+        baseline.write_text(json.dumps(original))
+        scores = evaluation.Scores(  # type: ignore[attr-defined]
+            top1=top1, top3=top1, top5=top1, any_valid_top1=top1, ndcg5=top1,
+            median_ms=1.0, p95_ms=1.0, misses=(),
+        )  # fmt: skip
+        monkeypatch.setattr(evaluation, "BASELINE", baseline)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: scores)
+        monkeypatch.setattr(sys, "argv", ["eval_retrieval.py", "--update-baseline"])
+        monkeypatch.setattr(evaluation, "MarkdownMemoryService", _EvalStubService)
+        try:
+            code = evaluation.main()  # type: ignore[attr-defined]
+        finally:
+            logging.disable(logging.NOTSET)  # main() disables logging process-wide
+        return code, json.loads(baseline.read_text())["embeddinggemma"]
+
+    def test_a_regressed_run_leaves_the_frozen_baseline_alone(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        code, recorded = self.run_main(evaluation, tmp_path, monkeypatch, top1=0.5)
+        assert code == 1
+        assert "REGRESSION" in capsys.readouterr().out
+        assert recorded["held_out/paraphrase"]["top1"] != 0.5  # still the frozen numbers
+
+    def test_a_passing_run_records_the_new_numbers(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        code, recorded = self.run_main(evaluation, tmp_path, monkeypatch, top1=1.0)
+        assert code == 0
+        assert recorded["held_out/paraphrase"]["top1"] == 1.0

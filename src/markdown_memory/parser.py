@@ -62,7 +62,8 @@ _MARKUP_SAMPLE_LANGUAGES = frozenset(
 )
 _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+\S")
 _FRONT_MATTER_TITLE = re.compile(r"^title\s*:\s*(.+?)\s*$", re.IGNORECASE)
-_YAML_KEY = re.compile(r"""^(?:"[^"]+"|'[^']+'|[A-Za-z_][^:#]*?)\s*:(\s|$)""")
+# An unquoted key starts with a letter of any script or "_" (`[^\W\d]`), never a digit.
+_YAML_KEY = re.compile(r"""^(?:"[^"]+"|'[^']+'|[^\W\d][^:#]*?)\s*:(\s|$)""")
 _HTML_TAG_NAME = re.compile(r"^</?([A-Za-z][A-Za-z0-9-]*)")
 # Inline HTML that only styles a heading. Any other "tag" is kept as title text: in
 # technical docs `Option<T>` or `<details>` in a heading is almost always literal.
@@ -74,6 +75,9 @@ _FORMATTING_TAGS = frozenset(
 )  # fmt: skip
 _WHITESPACE = re.compile(r"\s+")
 _HTML_TAG = re.compile(r"<[^>]+>")
+# Removed before tags are: a ">" inside a comment would end the "tag" early and leak the
+# rest of the comment as text. An unterminated comment hides everything after it.
+_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _BLOCK_CLOSERS = {
     "paragraph_open": "paragraph_close",
     "heading_open": "heading_close",
@@ -581,7 +585,7 @@ def _leaf_texts(block: Sequence[Token]) -> list[str]:
         elif token.type in {"fence", "code_block"}:
             texts.append(token.content)
         elif token.type == "html_block":
-            texts.append(_HTML_TAG.sub(" ", token.content))
+            texts.append(_HTML_TAG.sub(" ", _HTML_COMMENT.sub(" ", token.content)))
     return [text for text in texts if text.strip()]
 
 
@@ -597,7 +601,11 @@ def _block_end(tokens: Sequence[Token], start: int) -> int:
 
 
 def _table_rows(block: Sequence[Token]) -> list[str]:
-    """One unit per body row, each cell labelled with its column header."""
+    """One unit per body row, each cell labelled with its column header.
+
+    A table without body rows yields its header cells instead: they are visible text,
+    and a section holding nothing else would otherwise pass for a heading-only stub.
+    """
     headers: list[str] = []
     rows: list[str] = []
     cells: list[str] = []
@@ -618,7 +626,10 @@ def _table_rows(block: Sequence[Token]) -> list[str]:
             ]
             rows.append("; ".join(labelled))
             cells = []
-    return rows
+    if rows:
+        return rows
+    header_row = "; ".join(header for header in headers if header)
+    return [header_row] if header_row else []
 
 
 def _list_items(block: Sequence[Token]) -> list[str]:
@@ -738,7 +749,9 @@ def split_into_spans(
 
     Spans tile the input exactly (``"".join(content[a:b]) == content``). Boundaries are
     paragraph breaks outside code fences; a single block that is still too large falls
-    back to line boundaries, and a single over-long line to whitespace boundaries.
+    back to line boundaries, and a single over-long line to whitespace boundaries. Only
+    blank lines may take a span past the limit: they stay with the text before them,
+    because a span of their own would become a part with no content.
     ``glue_first`` keeps a heading attached to the block that follows it - unless that
     block holds a fence which fits in a part by itself but not together with the heading:
     a lone heading is harmless, a code block cut in two is not.
@@ -762,7 +775,7 @@ def split_into_spans(
     spans: list[tuple[int, int]] = []
     span_start, span_end = pieces[0]
     for begin, end in pieces[1:]:
-        if end - span_start > max_chars:
+        if end - span_start > max_chars and content[begin:end].strip():
             spans.append((span_start, span_end))
             span_start = begin
         span_end = end
@@ -802,7 +815,53 @@ def _paragraph_blocks(content: str) -> list[_Block]:
 
 
 def _split_block(content: str, begin: int, end: int, max_chars: int) -> list[tuple[int, int]]:
-    """Split one oversized block at line boundaries, then at whitespace if needed."""
+    """Split one oversized block at line boundaries, then at whitespace if needed.
+
+    A block is oversized as a whole, yet a fence inside it (prose directly above it, a
+    list whose items carry code) usually is not: a fenced run that fits in a part stays
+    one piece, so it is only ever cut when it exceeds the limit by itself.
+    """
+    pieces: list[tuple[int, int]] = []
+    position = begin
+    for fence_start, fence_end in _fenced_runs(content, begin, end):
+        pieces.extend(_line_pieces(content, position, fence_start, max_chars))
+        if fence_end - fence_start <= max_chars:
+            pieces.append((fence_start, fence_end))
+        else:
+            pieces.extend(_line_pieces(content, fence_start, fence_end, max_chars))
+        position = fence_end
+    pieces.extend(_line_pieces(content, position, end, max_chars))
+    return pieces
+
+
+def _fenced_runs(content: str, begin: int, end: int) -> list[tuple[int, int]]:
+    """Character spans of the fenced runs in ``content[begin:end]``, closing line included.
+
+    ``begin`` is a block boundary, so it is never inside a fence; a fence left open runs
+    to ``end``.
+    """
+    runs: list[tuple[int, int]] = []
+    open_fence: tuple[int, str] | None = None
+    run_start = position = begin
+    while position < end:
+        newline = content.find("\n", position, end)
+        line_end = end if newline == -1 else newline + 1
+        line = content[position:line_end].rstrip("\n")
+        if open_fence is None:
+            opener = _opening_fence(line) if line.strip() else None
+            if opener is not None:
+                open_fence, run_start = (opener[0], opener[1]), position
+        elif _is_closing_fence(line, open_fence[1], open_fence[0] + _MAX_TOP_LEVEL_INDENT):
+            runs.append((run_start, line_end))
+            open_fence = None
+        position = line_end
+    if open_fence is not None:
+        runs.append((run_start, end))
+    return runs
+
+
+def _line_pieces(content: str, begin: int, end: int, max_chars: int) -> list[tuple[int, int]]:
+    """One piece per line of ``content[begin:end]``; an over-long line is cut at whitespace."""
     pieces: list[tuple[int, int]] = []
     position = begin
     while position < end:

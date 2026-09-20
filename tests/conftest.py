@@ -10,7 +10,7 @@ from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
 from markdown_memory.exceptions import EmbeddingError
-from markdown_memory.indexer import Embedder, create_embedder
+from markdown_memory.indexer import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.server import ServerConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -44,10 +44,14 @@ def db(tmp_path: Path) -> Iterator[Database]:
 
 @pytest.fixture(scope="session")
 def real_embedder() -> Embedder:
-    """The production ONNX model. Skips (rather than fails) when it cannot be fetched."""
-    # Same resolution as the server: MARKDOWN_MEMORY_MODEL_CACHE, else XDG_CACHE_HOME.
-    config = ServerConfig.from_env()
-    embedder = create_embedder(config.embedder, cache_dir=config.model_cache_dir)
+    """The default ONNX model. Skips (rather than fails) when it cannot be fetched.
+
+    Pinned to ``DEFAULT_EMBEDDER``: with ``MARKDOWN_MEMORY_EMBEDDER`` set to the light
+    preset these tests would score a model the assertions were never calibrated for -
+    green for a model nobody ships. Only the cache location comes from the environment
+    (``MARKDOWN_MEMORY_MODEL_CACHE``, else ``XDG_CACHE_HOME``).
+    """
+    embedder = create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir)
     try:
         embedder.embed_query("warm up")
     except EmbeddingError as exc:  # offline machine without a cached model

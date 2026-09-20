@@ -399,3 +399,120 @@ class TestIntegrityCheckUnderContention:
         assert "could not verify the FTS5 index" in problems[0]
         assert "not a sign of damage" in problems[0]
         assert db.integrity_problems() == []  # and once the writer is done, all is well
+
+
+class TestNoticesSurviveAnAbortedRun:
+    class NoModel(FakeEmbedder):
+        def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+            raise ModelLoadError("Cannot load embedding model: offline")
+
+    @staticmethod
+    def two_roots(tmp_path: Path) -> tuple[Path, Path]:
+        first, second = tmp_path / "one", tmp_path / "two"
+        for root in (first, second):
+            root.mkdir()
+            (root / "doc.md").write_text(f"# {root.name}\n\nbody\n")
+        return first, second
+
+    def test_dimension_change_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
+        first, second = self.two_roots(tmp_path)
+        path = tmp_path / "switch.db"
+        with Database(path, embedding_dim=384) as database:
+            indexer = Indexer(database, FakeEmbedder(dimension=384, model_name="small"))
+            indexer.index_directory(first)
+            indexer.index_directory(second)
+        with Database(path, embedding_dim=768) as database, pytest.raises(ModelLoadError):
+            Indexer(database, self.NoModel(768, "wide")).index_directory(first)
+        with Database(path, embedding_dim=768) as database:
+            indexer = Indexer(database, FakeEmbedder(dimension=768, model_name="wide"))
+            report = indexer.index_directory(first)
+            assert len(report.notes) == 1
+            assert "discarded all 2 previously indexed documents" in report.notes[0]
+            assert indexer.index_directory(first).notes == ()  # told once
+
+    def test_model_change_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
+        first, second = self.two_roots(tmp_path)
+        with Database(tmp_path / "model.db") as database:
+            indexer = Indexer(database, FakeEmbedder(model_name="old"))
+            indexer.index_directory(first)
+            indexer.index_directory(second)
+            with pytest.raises(ModelLoadError):
+                Indexer(database, self.NoModel(model_name="new")).index_directory(first)
+            assert database.count_rows("documents") == 0
+            report = Indexer(database, FakeEmbedder(model_name="new")).index_directory(first)
+            assert len(report.notes) == 1
+            assert "Embedding model changed (old -> new)" in report.notes[0]
+            assert "discarded all 2 previously indexed documents" in report.notes[0]
+
+    def test_notice_added_after_a_partial_dismissal_gets_a_fresh_key(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        for number in range(3):
+            store(db, fake_embedder, f"/d/{number}.md", count=1)
+            assert db.clear(notice=lambda count, n=number: f"run {n}: dropped {count}") == 1
+            if number == 1:
+                db.dismiss_notices(["notice:0000"])
+        assert list(db.pending_notices().values()) == ["run 1: dropped 1", "run 2: dropped 1"]
+        assert db.clear(notice=lambda count: "nothing was dropped") == 0
+        assert len(db.pending_notices()) == 2  # an empty index is not announced
+
+
+class TestSymlinkedDirectories:
+    def test_a_symlink_back_to_an_ancestor_neither_hangs_nor_indexes_twice(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "docs"
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "a.md").write_text("# A\n\nalpha body\n")
+        try:
+            (root / "sub" / "back").symlink_to(root, target_is_directory=True)
+        except OSError:  # pragma: no cover - Windows without developer mode
+            pytest.skip("this file system does not support symlinks")
+        report = Indexer(db, fake_embedder).index_directory(root)  # must terminate
+        assert (report.files_scanned, report.files_indexed) == (1, 1)
+
+    def test_a_file_reachable_only_through_a_symlinked_directory_is_not_indexed(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root, outside = tmp_path / "docs", tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        (root / "here.md").write_text("# Here\n\nbody\n")
+        (outside / "there.md").write_text("# There\n\nbody\n")
+        try:
+            (root / "link").symlink_to(outside, target_is_directory=True)
+        except OSError:  # pragma: no cover - Windows without developer mode
+            pytest.skip("this file system does not support symlinks")
+        report = Indexer(db, fake_embedder).index_directory(root)
+        assert report.files_scanned == 1
+        indexed = [document.file_path for document in db.list_documents()]
+        assert indexed == [str(root / "here.md")]
+
+
+class TestSectionIdsAreNeverReused:
+    def test_a_deleted_section_does_not_lend_its_id_to_the_next_one(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        def ids() -> list[int]:
+            return [int(row[0]) for row in db.connection().execute("SELECT id FROM sections")]
+
+        store(db, fake_embedder, "/d/a.md", count=3)
+        first = ids()
+        db.delete_documents(["/d/a.md"])
+        store(db, fake_embedder, "/d/b.md", count=3)
+        # SQLite hands a deleted rowid out again; a search that ranked the old ids would
+        # then fetch whatever took their place instead of noticing they are gone.
+        assert not set(first) & set(ids())
+
+    def test_ids_keep_rising_across_reopens(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        path = tmp_path / "ids.db"
+        seen: set[int] = set()
+        for round_number in range(3):
+            with Database(path) as database:
+                store(database, fake_embedder, f"/d/{round_number}.md", count=2)
+                ids = {int(r[0]) for r in database.connection().execute("SELECT id FROM sections")}
+                assert not seen & ids
+                seen |= ids
+                database.delete_documents([f"/d/{round_number}.md"])

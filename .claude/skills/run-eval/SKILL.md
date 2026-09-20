@@ -6,8 +6,9 @@ description: Run the markdown-memory retrieval benchmark, check the accuracy gat
 # run-eval
 
 Scores the **shipped** `search_docs` pipeline against the frozen corpus
-(`scripts/eval_data/corpus/`, 54 sections) and the labelled queries
-(`scripts/eval_data/queries.json`: 34 paraphrase + identifier queries per split).
+(`scripts/eval_data/corpus/`, 54 sections) and the labelled queries in
+`scripts/eval_data/queries.json`: 34 paraphrase queries in each split, plus 10 dev and
+8 held-out identifier queries.
 
 ## Run
 
@@ -34,9 +35,11 @@ means the gates passed - an exit code of 0 alone does not.
 | Paraphrase Top-5 | >= 90% | 97% |
 | Identifier Top-1 (dev and held-out) | = 100% | 100% |
 
-One query is ~3 percentage points (34 queries per set), so a 3pp move is a single query
-changing rank - look at `--show-misses` before calling it a trend. Latency deltas are
-informational: they depend on the machine and on what else is running.
+A single query changing rank moves a paraphrase row ~3pp (34 queries), a dev identifier
+row 10pp and a held-out identifier row 12.5pp - so read a delta as queries, not as a
+trend, and look at `--show-misses` first. The identifier gate is `= 100%`: one lost query
+fails it. Latency deltas are informational: they depend on the machine and on what else
+is running.
 
 ## Report
 
