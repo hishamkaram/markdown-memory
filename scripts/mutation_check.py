@@ -46,17 +46,23 @@ MUTATIONS = (
         name="max-sim: rank a section by its own vector, never by its best passage",
         module="search.py",
         old=(
-            "            if distance < best.get(section_id, math.inf):\n"
-            "                best[section_id] = distance"
+            "                if distance < best.get(section_id, math.inf):\n"
+            "                    best[section_id] = distance"
         ),
-        new="            pass",
+        new="                pass",
         tests="TestRankingIsActuallyTested",
     ),
     Mutation(
         name="BM25: return keyword hits in row order instead of by relevance",
         module="db.py",
-        old="ORDER BY rank LIMIT ?",
-        new="ORDER BY rowid LIMIT ?",
+        old=(
+            '"WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "\n'
+            '                    "ORDER BY rank LIMIT ?"'
+        ),
+        new=(
+            '"WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "\n'
+            '                    "ORDER BY rowid LIMIT ?"'
+        ),
         tests="TestRankingIsActuallyTested",
     ),
     Mutation(
@@ -280,6 +286,30 @@ MUTATIONS = (
         old='    if "${" in value and not Path(value).expanduser().exists():',
         new='    if "${" in value:',
         tests="test_a_directory_really_named_like_a_variable_is_allowed",
+    ),
+    Mutation(
+        name="scope: search every documentation root the database happens to hold",
+        module="search.py",
+        old="                allowed = self._db.sections_under(list(best), self._scope)",
+        new="                allowed = set(best)",
+        tests="test_one_project_never_answers_with_another_project_s_documentation",
+    ),
+    Mutation(
+        name="scope: stop widening the vector search when the page is not full",
+        module="search.py",
+        old="            if self._scope is None or len(best) >= limit or fetch >= ceiling:",
+        new="            if True:",
+        tests="test_the_vector_side_keeps_looking_past_a_crowded_neighbour",
+    ),
+    Mutation(
+        name="scope: list every project's documents, not this project's",
+        module="server.py",
+        old=(
+            "        return self._db.list_documents("
+            "str(self._resolve_directory(directory or None)))"
+        ),
+        new="        return self._db.list_documents()",
+        tests="test_listing_documents_shows_this_project_only",
     ),
 )
 

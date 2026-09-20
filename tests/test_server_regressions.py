@@ -20,6 +20,7 @@ from markdown_memory.exceptions import ConfigurationError, DatabaseError
 from markdown_memory.models import (
     OutlineNode,
 )
+from markdown_memory.search import HybridSearcher
 from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
 
 ARROWS = """# API
@@ -380,3 +381,124 @@ class TestProjectScopedConfiguration:
         environment = config["mcpServers"]["markdown-memory"]["env"]
         assert not any("${" in value for value in environment.values())
         assert not Path(environment["MARKDOWN_MEMORY_DB"]).is_absolute()
+
+
+class TestOneDatabaseManyProjects:
+    """The default database is shared by every project on the machine.
+
+    Found in design review: the docs root defaults to the current project, the database
+    defaults to a single path under the user's data directory, and search had no root
+    filter - so an agent working in one project got confident answers out of another
+    project's documentation.
+    """
+
+    @staticmethod
+    def tree(root: Path, name: str, body: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{name}.md").write_text(f"# {name}\n\n## Retry policy\n\n{body}\n")
+        return root
+
+    @pytest.fixture
+    def shared(self, tmp_path: Path, fake_embedder: FakeEmbedder) -> tuple[Path, Path, Path]:
+        alpha = self.tree(tmp_path / "alpha", "alpha", "alpha service retries twice")
+        beta = self.tree(tmp_path / "beta", "beta", "beta service retries twice")
+        return tmp_path / "shared.db", alpha, beta
+
+    def service(self, db_path: Path, docs: Path, embedder: FakeEmbedder) -> MarkdownMemoryService:
+        service = MarkdownMemoryService(ServerConfig(db_path=db_path, docs_dir=docs), embedder)
+        service.index_directory()
+        return service
+
+    def test_one_project_never_answers_with_another_project_s_documentation(
+        self, shared: tuple[Path, Path, Path], fake_embedder: FakeEmbedder
+    ) -> None:
+        db_path, alpha, beta = shared
+        first = self.service(db_path, alpha, fake_embedder)
+        second = self.service(db_path, beta, fake_embedder)
+        try:
+            for service, own, other in ((first, "alpha", "beta"), (second, "beta", "alpha")):
+                results = service.search_docs("retries twice", 5)
+                assert results, f"{own} found nothing in its own documentation"
+                paths = {Path(result.file_path).name for result in results}
+                assert paths == {f"{own}.md"}, f"{own} saw {other}: {paths}"
+        finally:
+            first.close()
+            second.close()
+
+    def test_listing_documents_shows_this_project_only(
+        self, shared: tuple[Path, Path, Path], fake_embedder: FakeEmbedder
+    ) -> None:
+        db_path, alpha, beta = shared
+        first = self.service(db_path, alpha, fake_embedder)
+        second = self.service(db_path, beta, fake_embedder)
+        try:
+            listed = {Path(doc.file_path).name for doc in first.list_documents()}
+            assert listed == {"alpha.md"}
+        finally:
+            first.close()
+            second.close()
+
+    def test_the_vector_side_keeps_looking_past_a_crowded_neighbour(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """A vec0 KNN query applies its own k before anything can filter by root.
+
+        With eighty closer sections next door, one page of neighbours is entirely
+        someone else's documentation, and this project's own section is never reached.
+        The keyword side cannot cover for it: a query that lands only in the vector
+        index would come back empty.
+        """
+        db_path = tmp_path / "shared.db"
+        # This project's passage carries unrelated words too, so every neighbour passage
+        # sits closer to the query than it does.
+        mine = self.tree(tmp_path / "mine", "mine", "retry backoff policy plus local detail here")
+        crowd = tmp_path / "crowd"
+        crowd.mkdir()
+        # More passages than one widened fetch returns (limit 1 -> 4 sections -> 40
+        # passages), so reaching this project's section takes another round.
+        for index in range(60):
+            body = "\n\n".join(["retry backoff policy"] * 3)
+            (crowd / f"doc{index}.md").write_text(f"# Doc {index}\n\n## Retry policy\n\n{body}\n")
+        neighbour = MarkdownMemoryService(
+            ServerConfig(db_path=db_path, docs_dir=crowd), fake_embedder
+        )
+        neighbour.index_directory()
+        neighbour.close()
+        service = self.service(db_path, mine, fake_embedder)
+        try:
+            searcher = HybridSearcher(service.db, fake_embedder, scope=str(mine))
+            best, _ = searcher._nearest(fake_embedder.embed_query("retry backoff policy"), 1)
+            assert best, "the vector search never reached this project's own section"
+        finally:
+            service.close()
+
+    def test_a_crowded_neighbour_does_not_empty_the_page(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Scoping filters after each index applied its own limit.
+
+        Without over-fetching, a larger root next door fills the candidate list and the
+        scoped search hands back a short page - or nothing at all.
+        """
+        db_path = tmp_path / "shared.db"
+        mine = self.tree(tmp_path / "mine", "mine", "retry backoff policy")
+        crowd = tmp_path / "crowd"
+        crowd.mkdir()
+        # Every neighbour matches the query better than the one document that belongs to
+        # this project, and there are eighty of them.
+        for index in range(80):
+            (crowd / f"doc{index}.md").write_text(
+                f"# Doc {index}\n\n## Retry policy\n\n"
+                "retry backoff policy retry backoff policy retry backoff policy\n"
+            )
+        neighbour = MarkdownMemoryService(
+            ServerConfig(db_path=db_path, docs_dir=crowd), fake_embedder
+        )
+        neighbour.index_directory()
+        neighbour.close()
+        service = self.service(db_path, mine, fake_embedder)
+        try:
+            results = service.search_docs("retry backoff policy", 5)
+            assert [Path(result.file_path).name for result in results] == ["mine.md"]
+        finally:
+            service.close()

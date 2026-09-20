@@ -30,6 +30,8 @@ from markdown_memory.models import SearchResult
 logger = logging.getLogger(__name__)
 
 RRF_K = 60
+# Scoped search filters after each index has applied its own limit.
+_SCOPED_OVERFETCH = 4
 CANDIDATES_PER_INDEX = 20
 MAX_RESULT_LIMIT = 50
 _MAX_QUERY_TERMS = 32
@@ -244,11 +246,16 @@ class HybridSearcher:
         *,
         candidates_per_index: int = CANDIDATES_PER_INDEX,
         rrf_k: int = RRF_K,
+        scope: str | None = None,
     ) -> None:
         self._db = db
         self._embedder = embedder
         self._candidates = candidates_per_index
         self._rrf_k = rrf_k
+        # One database can hold several documentation roots - the default path is shared
+        # by every project on the machine. Without this, an agent working in one project
+        # gets confident answers out of another project's documentation.
+        self._scope = scope
         # Two long-lived workers so each keeps its own (per-thread) SQLite connection.
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mdmem-search")
 
@@ -329,7 +336,7 @@ class HybridSearcher:
         terms = fts_terms(query)
         if not terms:
             return []
-        hits = self._db.fts_search(" OR ".join(terms), limit)
+        hits = self._db.fts_search(" OR ".join(terms), limit, self._scope)
         hits = self._gate(terms, hits)
         # Heading-only sections are signposts: their children carry the same breadcrumb
         # words plus the actual text. They stay only when nothing else matched.
@@ -367,16 +374,38 @@ class HybridSearcher:
     def _vector_ranking(self, query: str, limit: int) -> tuple[list[int], dict[int, str]]:
         """Sections by their closest vector, plus each section's best-matching passage."""
         embedding = self._embedder.embed_query(query)
-        best: dict[int, float] = dict(self._db.vec_search(embedding, limit))
-        passages: dict[int, str] = {}
-        for section_id, distance, passage in self._db.unit_search(
-            embedding, limit * _PASSAGES_PER_CANDIDATE
-        ):
-            passages.setdefault(section_id, passage)  # closest first: keep the best one
-            if distance < best.get(section_id, math.inf):
-                best[section_id] = distance
+        best, passages = self._nearest(embedding, limit)
         ranking = sorted(best, key=lambda section_id: (best[section_id], section_id))[:limit]
         return ranking, {sid: passages[sid] for sid in ranking if sid in passages}
+
+    def _nearest(
+        self, embedding: list[float], limit: int
+    ) -> tuple[dict[int, float], dict[int, str]]:
+        """Closest sections and their best passages, restricted to this server's root.
+
+        A vec0 KNN query applies its own ``k`` before anything can filter it, so a scoped
+        search widens ``k`` until it has a full page or has seen the whole index. A fixed
+        multiplier is not enough: a neighbouring root in the same database can be
+        arbitrarily larger than this one.
+        """
+        ceiling = max(self._db.count_rows("sections"), limit)
+        fetch = limit if self._scope is None else min(limit * _SCOPED_OVERFETCH, ceiling)
+        while True:
+            best: dict[int, float] = dict(self._db.vec_search(embedding, fetch))
+            passages: dict[int, str] = {}
+            for section_id, distance, passage in self._db.unit_search(
+                embedding, fetch * _PASSAGES_PER_CANDIDATE
+            ):
+                passages.setdefault(section_id, passage)  # closest first: keep the best one
+                if distance < best.get(section_id, math.inf):
+                    best[section_id] = distance
+            if self._scope is not None and best:
+                allowed = self._db.sections_under(list(best), self._scope)
+                best = {sid: distance for sid, distance in best.items() if sid in allowed}
+                passages = {sid: text for sid, text in passages.items() if sid in allowed}
+            if self._scope is None or len(best) >= limit or fetch >= ceiling:
+                return best, passages
+            fetch = min(fetch * _SCOPED_OVERFETCH, ceiling)
 
 
 _R = TypeVar("_R")

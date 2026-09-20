@@ -166,7 +166,7 @@ class MarkdownMemoryService:
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
         self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
-        self._searcher = HybridSearcher(self._db, self._embedder)
+        self._searcher = HybridSearcher(self._db, self._embedder, scope=str(self._config.docs_dir))
 
     @property
     def db(self) -> Database:
@@ -186,9 +186,9 @@ class MarkdownMemoryService:
         return self._indexer.index_directory(self._resolve_directory(directory))
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
-        if not directory.strip():
-            return self._db.list_documents()
-        return self._db.list_documents(str(self._resolve_directory(directory)))
+        # An empty argument means "this project", not "everything this database holds":
+        # the default database is shared by every project on the machine.
+        return self._db.list_documents(str(self._resolve_directory(directory or None)))
 
     def get_document_outline(self, file_path: str) -> list[OutlineNode]:
         document = self._resolve_document(file_path)

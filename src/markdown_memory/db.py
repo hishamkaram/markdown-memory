@@ -706,13 +706,30 @@ class Database:
 
     # ------------------------------------------------------------------ search primitives
 
-    def fts_search(self, match_query: str, limit: int) -> list[int]:
-        """Section ids matching an FTS5 query, best BM25 rank first."""
+    def fts_search(self, match_query: str, limit: int, scope: str | None = None) -> list[int]:
+        """Section ids matching an FTS5 query, best BM25 rank first.
+
+        ``scope`` restricts the search to documents under one directory. The predicate
+        joins inside the query so the limit applies to what survives it: filtering a
+        page afterwards would return fewer rows than asked for whenever a neighbouring
+        documentation root in the same database ranks higher.
+        """
         with self._reading() as conn:
-            rows = conn.execute(
-                "SELECT rowid FROM sections_fts WHERE sections_fts MATCH ? ORDER BY rank LIMIT ?",
-                (match_query, limit),
-            ).fetchall()
+            if scope is None:
+                rows = conn.execute(
+                    "SELECT rowid FROM sections_fts WHERE sections_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (match_query, limit),
+                ).fetchall()
+            else:
+                prefix = _directory_prefix(scope)
+                rows = conn.execute(
+                    "SELECT f.rowid FROM sections_fts f "
+                    "JOIN sections s ON s.id = f.rowid JOIN documents d ON d.id = s.doc_id "
+                    "WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "
+                    "ORDER BY rank LIMIT ?",
+                    (match_query, prefix, prefix, limit),
+                ).fetchall()
         return [int(row[0]) for row in rows]
 
     def vec_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float]]:
@@ -780,6 +797,26 @@ class Database:
             rows = conn.execute(
                 f"SELECT DISTINCT section_id FROM units WHERE section_id IN ({placeholders})",
                 tuple(section_ids),
+            ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def sections_under(self, section_ids: Sequence[int], directory: str) -> set[int]:
+        """The subset of ``section_ids`` whose document lives under ``directory``.
+
+        Search is scoped with this rather than with a predicate inside the FTS5 and
+        vec0 queries: both apply their own limit before any join would filter, so a
+        scoped predicate there silently returns fewer results than asked for.
+        """
+        if not section_ids:
+            return set()
+        prefix = _directory_prefix(directory)
+        placeholders = ", ".join("?" for _ in section_ids)
+        with self._reading() as conn:
+            rows = conn.execute(
+                f"SELECT s.id FROM sections s JOIN documents d ON d.id = s.doc_id "
+                f"WHERE s.id IN ({placeholders}) "
+                "AND substr(d.file_path, 1, length(?)) = ?",
+                (*section_ids, prefix, prefix),
             ).fetchall()
         return {int(row[0]) for row in rows}
 
