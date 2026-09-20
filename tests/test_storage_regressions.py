@@ -5,8 +5,10 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import gzip
 import math
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -20,7 +22,7 @@ from helpers import draft, store
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.indexer as indexer_module
-from markdown_memory.db import Database
+from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
@@ -576,3 +578,94 @@ class TestNoticeNumberingBeyondFourDigits:
         # 'notice:10000' sorts below 'notice:9999' as text: both the successor key and the
         # delivery order have to be computed numerically.
         assert list(db.pending_notices().values()) == ["older", "newer", "newest: dropped 1"]
+
+
+class TestMigratingARealOldDatabase:
+    """Databases written by earlier releases, kept as fixtures and migrated forward.
+
+    The other migration tests simulate an old database by dropping tables from a current
+    one, which tests the simulation. These files were written by the schema statements of
+    their own version, with the rows that version wrote and no key it never wrote - the
+    missing ``next_section_id`` is how the section-id reuse bug reached users.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "databases"
+
+    @staticmethod
+    def unpack(archive: Path, destination: Path) -> Path:
+        """Opening a database migrates it, so every test gets its own copy."""
+        path = destination / archive.with_suffix("").name
+        with gzip.open(archive, "rb") as packed, path.open("wb") as raw:
+            shutil.copyfileobj(packed, raw)
+        return path
+
+    @pytest.fixture(params=[1, 2])
+    def old_database(self, request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+        return self.unpack(self.FIXTURES / f"v{request.param}_seed.db.gz", tmp_path)
+
+    def test_the_fixture_is_the_version_it_claims(self, old_database: Path) -> None:
+        conn = sqlite3.connect(old_database)
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            keys = {str(row[0]) for row in conn.execute("SELECT key FROM meta")}
+        finally:
+            conn.close()
+        assert version == int(old_database.stem[1])
+        assert ("units" in tables) == (version >= 2)
+        assert "next_section_id" not in keys  # no release wrote one before this fix
+
+    def test_opening_it_migrates_to_the_current_schema(self, old_database: Path) -> None:
+        with Database(old_database) as database:
+            assert database.get_meta("embedding_dim") == "384"
+            conn = database.connection()
+            assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert database.integrity_problems() == []
+
+    def test_the_migrated_schema_matches_a_fresh_database(
+        self, old_database: Path, tmp_path: Path
+    ) -> None:
+        def schema(path: Path) -> list[tuple[str, str]]:
+            with Database(path) as database:
+                rows = database.connection().execute(
+                    "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+                )
+                return [(str(name), " ".join(str(sql).split())) for name, sql in rows]
+
+        assert schema(old_database) == schema(tmp_path / "fresh.db")
+
+    def test_reindexing_after_the_upgrade_does_not_reuse_section_ids(
+        self, old_database: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        def section_ids(database: Database) -> set[int]:
+            rows = database.connection().execute("SELECT id FROM sections")
+            return {int(row[0]) for row in rows}
+
+        with Database(old_database) as database:
+            before = section_ids(database)
+            database.delete_documents(
+                [document.file_path for document in database.list_documents()]
+            )
+            store(database, fake_embedder, "/docs/gamma.md", count=3)
+            assert not before & section_ids(database)
+
+    def test_a_v1_database_is_told_why_its_documents_are_gone(self, tmp_path: Path) -> None:
+        # v1 had no passage vectors, so the v2 migration discards the index and says so.
+        path = self.unpack(self.FIXTURES / "v1_seed.db.gz", tmp_path)
+        with Database(path) as database:
+            assert database.count_rows("documents") == 0
+            notices = list(database.pending_notices().values())
+        assert len(notices) == 1
+        assert "discarded all 2 previously indexed documents" in notices[0]
+
+    def test_a_v2_database_keeps_its_documents(self, tmp_path: Path) -> None:
+        path = self.unpack(self.FIXTURES / "v2_seed.db.gz", tmp_path)
+        with Database(path) as database:
+            assert database.count_rows("documents") == 2
+            assert database.count_rows("sections") == 4
+            assert database.pending_notices() == {}
