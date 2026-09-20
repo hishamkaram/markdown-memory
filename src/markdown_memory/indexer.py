@@ -49,7 +49,20 @@ GEMMA_MAX_TOKENS = 512
 # Prompts from the EmbeddingGemma model card; the model is trained to expect them.
 GEMMA_QUERY_PROMPT = "task: search result | query: "
 GEMMA_DOCUMENT_PROMPT = "title: none | text: "
-_GEMMA_BATCH_SIZE = 4  # measured: faster than 1, 2 and 8 on CPU; memory is the same
+# Measured, and kept at 4 deliberately. Embedding passages in isolation, a larger batch
+# looks much faster; indexing a real directory it is not, because each file is embedded on
+# its own and its sections and passages differ enough in length that the padding eats the
+# gain. End to end over the same corpus: batch 4 gave 3.76 vectors/s at 1,639 MB peak RSS,
+# batch 16 gave 4.41 vectors/s at 2,780 MB. +17% throughput does not buy +1.1 GB on a tool
+# that runs beside an editor. Sorting by token count instead of characters was measured
+# too: worth ~30% at batch 4 only, which a second tokenisation pass cancels out.
+_GEMMA_BATCH_SIZE = 4
+# Thread count is left to onnxruntime. Pinning it was measured from 4 to 16 threads and
+# every value sat inside the run-to-run noise, except the full logical count, which was
+# consistently worse. Deriving it from the CPU topology is a trap: this machine reports 16
+# physical cores and 16 is the one value that loses. Only a machine that disagrees with
+# the default needs MARKDOWN_MEMORY_THREADS.
+_THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 MAX_FILE_BYTES = 10 * 1024 * 1024
 _EMBED_BATCH_SIZE = 32
@@ -239,8 +252,12 @@ class EmbeddingGemmaEmbedder:
                     tokenizer = Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))
                     tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
                     tokenizer.enable_padding()
+                    options = onnxruntime.SessionOptions()
+                    if threads := _inference_threads():
+                        options.intra_op_num_threads = threads
                     self._session = onnxruntime.InferenceSession(
                         str(self._model_dir / GEMMA_MODEL_FILE),
+                        options,
                         providers=["CPUExecutionProvider"],
                     )
                     self._tokenizer = tokenizer
@@ -288,6 +305,17 @@ def create_embedder(preset: str = DEFAULT_EMBEDDER, *, cache_dir: Path | None = 
     if preset == "bge-small":
         return FastEmbedEmbedder(BGE_SMALL_MODEL_NAME, cache_dir=cache_dir)
     raise IndexingError(f"Unknown embedder {preset!r}; choose 'embeddinggemma' or 'bge-small'")
+
+
+def _inference_threads() -> int:
+    """Thread count for one embedding pass: onnxruntime's own choice unless overridden.
+
+    Deriving it from the machine was tried and rejected: on a 16-core VM the topology
+    says 16, which measured worse than the default, while every count from 4 to 12 sat
+    inside the run-to-run noise. A wrong number is slower than no number.
+    """
+    override = os.environ.get(_THREADS_ENV, "").strip()
+    return int(override) if override.isdigit() and int(override) > 0 else 0
 
 
 def _to_floats(values: Sequence[float]) -> list[float]:
