@@ -120,8 +120,11 @@ class TestUnitExtraction:
     def test_units_are_capped_in_number_and_length(self) -> None:
         many = "\n".join(f"- item {n}" for n in range(200))
         assert len(units_of(f"# T\n\n{many}\n", "T")) == MAX_UNITS_PER_SECTION
+        # A long run is now windowed, not truncated: every character keeps a passage
+        # vector, and no window exceeds the limit.
         long_unit = MarkdownParser().extract_units("x" * 5000)
-        assert [len(unit) for unit in long_unit] == [MAX_UNIT_CHARS]
+        assert "".join(long_unit) == "x" * 5000
+        assert all(0 < len(unit) <= MAX_UNIT_CHARS for unit in long_unit)
 
     def test_embedding_texts_carry_the_breadcrumb(self) -> None:
         section = next(

@@ -357,6 +357,62 @@ MUTATIONS = (
         new="        except ValueError:\n            return []",
         tests="test_a_half_written_line_does_not_lose_the_session",
     ),
+    Mutation(
+        name="units: throw away everything past the character limit again",
+        module="parser.py",
+        old="            for window in _windows(unit):",
+        new="            for window in [unit[:MAX_UNIT_CHARS]]:",
+        tests="test_no_line_of_a_long_block_is_dropped or test_the_tail_reaches_the_embedder",
+    ),
+    Mutation(
+        name="units: let a window run past the limit instead of splitting",
+        module="parser.py",
+        old="    if len(text) <= MAX_UNIT_CHARS:\n        return [text]",
+        new="    if True:\n        return [text]",
+        tests="test_every_window_still_respects_the_limit",
+    ),
+    Mutation(
+        name="units: drop the remainder after the last full window",
+        module="parser.py",
+        old="    if remaining:\n        pieces.append(remaining)",
+        new="    if False:\n        pieces.append(remaining)",
+        tests="test_the_windows_reassemble_into_exactly_what_arrived",
+    ),
+    Mutation(
+        name="units: cut a window mid-word instead of at a boundary",
+        module="parser.py",
+        old='        cut = max(head.rfind("\\n"), head.rfind(". "), _last_space(head))',
+        new="        cut = MAX_UNIT_CHARS",
+        tests="test_a_window_does_not_end_mid_word",
+    ),
+    Mutation(
+        name="preflight: count requests only in assistant turns, shifting every task",
+        module="preflight.py",
+        area="scripts",
+        old="        if not isinstance(content, list):\n            continue",
+        new=(
+            '        if not isinstance(content, list) or message.get("role") != "assistant":\n'
+            "            continue"
+        ),
+        tests="test_a_tool_call_outside_an_assistant_turn_does_not_shift_attribution",
+    ),
+    Mutation(
+        name="units: let a long final block overrun the passage cap",
+        module="parser.py",
+        old=(
+            "                if len(passages) >= MAX_UNITS_PER_SECTION:\n"
+            "                    return tuple(passages)"
+        ),
+        new="                if False:\n                    return tuple(passages)",
+        tests="test_windows_never_push_a_section_past_the_passage_cap",
+    ),
+    Mutation(
+        name="units: break only on a literal space, never on a tab",
+        module="parser.py",
+        old="        if text[index].isspace():",
+        new='        if text[index] == " ":',
+        tests="test_a_run_broken_only_by_tabs_breaks_there",
+    ),
 )
 
 

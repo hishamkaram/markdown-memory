@@ -118,9 +118,11 @@ Without it, a repository that keeps fixtures, vendored documentation or a test c
 in-tree indexes them as if they were its own docs.
 
 Documents are stored under their absolute path, so one database *can* hold several
-projects - though one index per project is usually what you want. Switching to a different model discards the whole index (vectors from two
-models cannot be compared); `index_directory` reports that and every root must be
-indexed again.
+projects - but **search only ever answers from the root this server was started with**,
+and `list_documents` shows only that root. A second project in the same file is indexed,
+invisible, and paying for itself in disk; give each project its own database. Switching to
+a different model discards the whole index (vectors from two models cannot be compared);
+`index_directory` reports that and every root must be indexed again.
 
 ### Embedding models
 
@@ -152,10 +154,12 @@ times faster at a real cost in accuracy - see the table above. EmbeddingGemma is
    vector index.
 2. **Vectors.** Every paragraph, list item, table row (rendered as `Header: cell; ...`) and
    code block - also inside block quotes and list items - is embedded separately, alongside
-   one vector for the section. A table split across `(Part n)` sections keeps its header
-   for every part. A section is
-   ranked by its closest vector, so one relevant table row is enough. Heading-only
-   sections have no vectors and are never returned ahead of their children.
+   one vector for the section. A passage longer than 600 characters is split into
+   consecutive windows at line, sentence or word boundaries, so a long command list or
+   configuration block keeps a vector for all of itself rather than for its first 600
+   characters. A table split across `(Part n)` sections keeps its header for every part. A
+   section is ranked by its closest vector, so one relevant table row is enough.
+   Heading-only sections have no vectors and are never returned ahead of their children.
 3. **Reciprocal Rank Fusion** of the two rankings.
 
 Cross-encoder rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
