@@ -90,7 +90,7 @@ class TestSearchRobustness:
     ) -> None:
         store(db, fake_embedder, "/d/a.md")
 
-        def broken(match_query: str, limit: int) -> list[int]:
+        def broken(*_arguments: object) -> list[int]:
             raise RuntimeError("not a domain error")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -285,9 +285,13 @@ class TestRankingIsActuallyTested:
             str(row[1]): int(row[0])
             for row in db.connection().execute("SELECT id, heading_title FROM sections")
         }
+        expected = [ids["Compaction"], ids["Storage"], ids["Alpha Note"]]
         hits = db.fts_search('"compaction"', 10)
         assert hits[0] != min(hits)  # not simply the first row that matched
-        assert hits == [ids["Compaction"], ids["Storage"], ids["Alpha Note"]]
+        assert hits == expected
+        # A scoped search is a second query with its own ORDER BY: it ranks the same way
+        # or a project-scoped server silently gets row order.
+        assert db.fts_search('"compaction"', 10, "/d") == expected
 
     def test_a_match_in_the_heading_outranks_one_buried_in_a_body(
         self, db: Database, fake_embedder: FakeEmbedder
