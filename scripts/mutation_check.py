@@ -311,6 +311,52 @@ MUTATIONS = (
         new="        return self._db.list_documents()",
         tests="test_listing_documents_shows_this_project_only",
     ),
+    Mutation(
+        name="usage: miss the calls a subagent made",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old='        yield from sorted(directory.rglob("*.jsonl"))',
+        new='        yield from sorted(directory.glob("*.jsonl"))',
+        tests="test_a_subagents_calls_count_too",
+    ),
+    Mutation(
+        name="usage: count another MCP server's tools as ours",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old='SERVER_TOOL = re.compile(r"^mcp__[^_]*markdown[^_]*__(?P<tool>\\w+)$", re.IGNORECASE)',
+        new='SERVER_TOOL = re.compile(r"^mcp__.*__(?P<tool>\\w+)$", re.IGNORECASE)',
+        tests="test_another_servers_tools_are_not_counted_as_ours",
+    ),
+    Mutation(
+        name="usage: stop noticing that the agent gave up and read the file",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old=(
+            "            if any(_touches_markdown(later) for later in window):\n"
+            "                report.searches_followed_by_file_access += 1"
+        ),
+        new=("            if False:\n                report.searches_followed_by_file_access += 1"),
+        tests="test_a_search_abandoned_for_the_file_system or test_a_search_abandoned_for_grep",
+    ),
+    Mutation(
+        name="usage: blame a search for a file read that came much later",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old="            window = calls[position + 1 : position + 1 + FALLBACK_WINDOW]",
+        new="            window = calls[position + 1 :]",
+        tests="test_a_file_read_long_after_a_search_is_not_attributed_to_it",
+    ),
+    Mutation(
+        name="usage: lose a whole session to one half-written line",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old=(
+            "        except ValueError:\n"
+            "            continue  # a transcript being written to can end mid-line"
+        ),
+        new="        except ValueError:\n            return []",
+        tests="test_a_half_written_line_does_not_lose_the_session",
+    ),
 )
 
 
