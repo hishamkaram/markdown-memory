@@ -1,0 +1,208 @@
+"""Reproducible retrieval-quality benchmark for the shipped search pipeline.
+
+Indexes the frozen corpus in ``scripts/eval_data/corpus`` and scores ``search_docs``
+against the labelled queries in ``scripts/eval_data/queries.json``:
+
+    uv run python scripts/eval_retrieval.py                 # default embedder
+    uv run python scripts/eval_retrieval.py --embedder bge-small
+    uv run python scripts/eval_retrieval.py --show-misses   # list queries missed at Top-1
+    uv run python scripts/eval_retrieval.py --update-baseline   # after an ACCEPTED change
+
+Scores are compared with the frozen baseline in ``scripts/eval_data/baseline.json``
+(accuracy in percentage points, latency in ms; latency is informational - it depends on
+the machine - and never gates).
+
+Exits non-zero when the held-out set regresses below the documented floor, so it can
+gate a change to the parser, the embedder or the ranking. The held-out queries were
+written before any tuning: tune on ``dev`` only, never on ``held_out``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import math
+import statistics
+import sys
+import tempfile
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from markdown_memory.models import SearchResult
+from markdown_memory.server import MarkdownMemoryService, ServerConfig
+
+DATA = Path(__file__).parent / "eval_data"
+BASELINE = DATA / "baseline.json"
+ACCURACY_FIELDS = ("top1", "top3", "top5", "any_valid_top1")
+PRIMARY_GRADE = 3
+# Floors for the default embedder on the held-out set (measured: 88% / 97% / 100%).
+FLOOR_PARAPHRASE_TOP1 = 0.80
+FLOOR_PARAPHRASE_TOP5 = 0.90
+FLOOR_IDENTIFIER_TOP1 = 1.00
+
+
+@dataclass(slots=True, frozen=True)
+class Scores:
+    top1: float
+    top3: float
+    top5: float
+    any_valid_top1: float
+    ndcg5: float
+    median_ms: float
+    p95_ms: float
+    misses: tuple[tuple[str, int | None], ...]
+
+
+def _labels(result: SearchResult) -> set[str]:
+    base = result.heading_path.split(" (Part ")[0]
+    return {base, f"{Path(result.file_path).name}::{base}"}
+
+
+def _dcg(grades: list[int]) -> float:
+    return sum((2**grade - 1) / math.log2(rank + 1) for rank, grade in enumerate(grades, 1))
+
+
+def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> Scores:
+    ranks: list[int | None] = []
+    valid_first = 0
+    ndcg: list[float] = []
+    latencies: list[float] = []
+    for case in cases:
+        query, expected = str(case["query"]), str(case["expected"])
+        also_valid = case.get("also_valid", {})
+        grades = {expected: PRIMARY_GRADE, **(also_valid if isinstance(also_valid, dict) else {})}
+        started = time.perf_counter()
+        results = service.search_docs(query, 20)
+        latencies.append((time.perf_counter() - started) * 1000)
+        relevance = [max((grades.get(k, 0) for k in _labels(r)), default=0) for r in results]
+        ranks.append(next((i for i, r in enumerate(results, 1) if expected in _labels(r)), None))
+        valid_first += bool(relevance and relevance[0] > 0)
+        ideal = sorted(grades.values(), reverse=True)[:5]
+        ndcg.append(_dcg(relevance[:5]) / _dcg(ideal))
+    total = len(cases)
+
+    def within(k: int) -> float:
+        return sum(rank is not None and rank <= k for rank in ranks) / total
+
+    ordered = sorted(latencies)
+    return Scores(
+        top1=within(1),
+        top3=within(3),
+        top5=within(5),
+        any_valid_top1=valid_first / total,
+        ndcg5=statistics.mean(ndcg),
+        median_ms=statistics.median(latencies),
+        p95_ms=ordered[max(0, math.ceil(total * 0.95) - 1)],
+        misses=tuple(
+            (str(case["query"]), rank) for case, rank in zip(cases, ranks, strict=True) if rank != 1
+        ),
+    )
+
+
+def print_deltas(preset: str, scores: dict[str, Scores]) -> None:
+    """Compare ``scores`` with the frozen baseline for ``preset`` (if one is recorded)."""
+    recorded = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
+    baseline = recorded.get(preset)
+    if baseline is None:
+        print(f"\n(no baseline recorded for {preset!r}; run with --update-baseline)")
+        return
+    print("\ndelta vs frozen baseline (percentage points; latency in ms, informational)")
+    for name, result in scores.items():
+        before = baseline.get(name)
+        if before is None:
+            continue
+        accuracy = "  ".join(
+            f"{field} {(getattr(result, field) - before[field]) * 100:+.0f}pp"
+            for field in ACCURACY_FIELDS
+        )
+        latency = result.median_ms - before["median_ms"]
+        print(f"  {name:<22} {accuracy}  median {latency:+.0f}ms")
+
+
+def update_baseline(preset: str, scores: dict[str, Scores]) -> None:
+    recorded = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
+    recorded[preset] = {
+        name: {k: round(v, 4) for k, v in asdict(result).items() if k != "misses"}
+        for name, result in scores.items()
+    }
+    BASELINE.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"\nbaseline for {preset!r} written to {BASELINE}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--embedder", default=None, help="embeddinggemma (default) or bge-small")
+    parser.add_argument("--show-misses", action="store_true", help="list queries missed at Top-1")
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="record these scores as the new frozen baseline for this embedder",
+    )
+    arguments = parser.parse_args()
+    logging.disable(logging.CRITICAL)
+
+    queries = json.loads((DATA / "queries.json").read_text(encoding="utf-8"))
+    base = ServerConfig.from_env()
+    with tempfile.TemporaryDirectory(prefix="markdown-memory-eval-") as workspace:
+        service = MarkdownMemoryService(
+            ServerConfig(
+                db_path=Path(workspace) / "eval.db",
+                docs_dir=DATA / "corpus",
+                embedder=arguments.embedder or base.embedder,
+                model_cache_dir=base.model_cache_dir,
+            )
+        )
+        try:
+            print(f"embedder: {service.embedder.model_name}")
+            print(service.index_directory().summary())
+            service.search_docs("warm up", 1)
+            header = f"{'set':<22} {'n':>3}  Top-1  Top-3  Top-5  any-valid@1  nDCG@5  median   p95"
+            print("\n" + header + "\n" + "-" * len(header))
+            scores: dict[str, Scores] = {}
+            for split in ("dev", "held_out"):
+                for kind in ("paraphrase", "identifier"):
+                    cases = queries[split][kind]
+                    result = scores[f"{split}/{kind}"] = evaluate(service, cases)
+                    print(
+                        f"{split + ' ' + kind:<22} {len(cases):>3}  {result.top1:5.0%}  "
+                        f"{result.top3:5.0%}  {result.top5:5.0%}  {result.any_valid_top1:11.0%}  "
+                        f"{result.ndcg5:6.2f}  {result.median_ms:4.0f}ms  {result.p95_ms:4.0f}ms"
+                    )
+            if arguments.show_misses:
+                for name, result in scores.items():
+                    for query, rank in result.misses:
+                        print(f"  miss [{name}] rank={rank}: {query}")
+        finally:
+            service.close()
+
+    preset = arguments.embedder or base.embedder
+    print_deltas(preset, scores)
+    if arguments.update_baseline:
+        update_baseline(preset, scores)
+    if preset != "embeddinggemma":
+        return 0  # the floors below are calibrated for the default embedder only
+    held_out, identifiers = scores["held_out/paraphrase"], scores["held_out/identifier"]
+    failures = [
+        message
+        for ok, message in (
+            (held_out.top1 >= FLOOR_PARAPHRASE_TOP1, f"held-out Top-1 {held_out.top1:.0%}"),
+            (held_out.top5 >= FLOOR_PARAPHRASE_TOP5, f"held-out Top-5 {held_out.top5:.0%}"),
+            (
+                identifiers.top1 >= FLOOR_IDENTIFIER_TOP1
+                and scores["dev/identifier"].top1 >= FLOOR_IDENTIFIER_TOP1,
+                "identifier Top-1 below 100%",
+            ),
+        )
+        if not ok
+    ]
+    if failures:
+        print("\nREGRESSION: " + "; ".join(failures))
+        return 1
+    print("\nOK: held-out floors met (Top-1 >= 80%, Top-5 >= 90%, identifiers 100%)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

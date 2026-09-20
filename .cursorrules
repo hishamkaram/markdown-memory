@@ -1,0 +1,52 @@
+# markdown-memory - Cursor rules
+
+Project: local MCP server for AST-aware Markdown indexing (SQLite FTS5 + sqlite-vec,
+EmbeddingGemma-300m / bge-small, RRF hybrid search). Full developer guide: CLAUDE.md.
+
+## Development rules
+
+- Python 3.11+. `uv run mypy --strict src/` must report zero errors; no untyped defs, no
+  unconstrained `Any`.
+- Domain models are `@dataclass(slots=True, frozen=True)`; never mutate, build a new one.
+- SQLite runs in WAL mode; every write goes through `with db.transaction():`.
+- Never `print()` or touch stdout inside `src/` - stdout is the MCP JSON-RPC channel. Use
+  `logging` (stderr).
+- Errors meant for the agent must subclass `MarkdownMemoryError`.
+- Before finishing: `uv run ruff check . && uv run ruff format . && uv run mypy --strict src/
+  && uv run pytest`. For ranking, chunking or embedding changes also run
+  `uv run python scripts/eval_retrieval.py` (gates: Top-1 >= 80%, Top-5 >= 90%,
+  identifiers 100%; never tune on the held-out queries).
+- Every bug fix ships with a regression test that fails when the fix is reverted.
+
+<!-- markdown-memory:navigation-rules:start -->
+## Reading Markdown documentation (when the `markdown-memory` MCP server is mounted)
+
+**Never dump whole files.** Do not `Read`/`read_file`/`cat` a Markdown document longer than
+~150 lines into context unless the user explicitly asks for the whole file. Fetch the one
+section you need instead; it is typically 10-50x cheaper.
+
+Work in this order:
+
+1. **`search_docs(query, limit=5)`** - start here. Returns the best sections with their
+   breadcrumb (`heading_path`), line range, token estimate, full section `content`, and the
+   `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
+   `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
+   questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
+   Top-1 ~88%).
+2. **`get_document_outline(file_path)`** - only when you need the structure of a document:
+   the heading tree with line spans and per-section token estimates, at a few hundred
+   tokens. Use it to choose a section, or to find sibling sections of a search hit.
+3. **`read_section(file_path, heading_path)`** - fetch exactly one section, verbatim.
+   `heading_path` is the breadcrumb `Root > Child > Subchild` as shown by the outline or
+   by `search_docs`; a bare heading title works when it is unambiguous. It returns the
+   section's own text only - pass `include_subsections=true` for a parent heading whose
+   content lives in its children. Oversized sections appear as `Path (Part n)`; reading
+   the base path returns all parts reassembled.
+
+Supporting tools: `list_documents(directory="")` shows what is indexed;
+`index_directory(directory=None)` (re)indexes - run it once per session if searches come
+back empty or stale. It is incremental (SHA-256 per file), so re-running is cheap.
+`file_path` may be absolute, relative to the docs root, or any unique path suffix. An
+error from `read_section` lists the valid heading paths - retry with one of them rather
+than falling back to reading the file.
+<!-- markdown-memory:navigation-rules:end -->

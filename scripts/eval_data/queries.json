@@ -1,0 +1,387 @@
+{
+  "_about": "Labelled retrieval queries over scripts/eval_data/corpus. 'expected' is a heading path (or 'file.md::path' when ambiguous across files). 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. The held-out set was written BEFORE any tuning and must never be used to tune.",
+  "dev": {
+    "paraphrase": [
+      {
+        "query": "what happens when the system is overloaded",
+        "expected": "Ingest Pipeline Architecture > Backpressure"
+      },
+      {
+        "query": "consumers can't keep up with incoming data",
+        "expected": "Ingest Pipeline Architecture > Backpressure"
+      },
+      {
+        "query": "how are repeated records removed",
+        "expected": "Ingest Pipeline Architecture > Stages > Deduplicator"
+      },
+      {
+        "query": "getting rid of the same event arriving twice",
+        "expected": "Ingest Pipeline Architecture > Stages > Deduplicator"
+      },
+      {
+        "query": "converting binary messages into objects",
+        "expected": "Ingest Pipeline Architecture > Stages > Decoder"
+      },
+      {
+        "query": "how is data persisted atomically",
+        "expected": "Ingest Pipeline Architecture > Stages > Writer"
+      },
+      {
+        "query": "what can go wrong and how does it recover on its own",
+        "expected": "Ingest Pipeline Architecture > Failure Modes"
+      },
+      {
+        "query": "how big should my cluster be",
+        "expected": "Ingest Pipeline Architecture > Capacity Planning"
+      },
+      {
+        "query": "what does this service do at a high level",
+        "expected": "Ingest Pipeline Architecture > Overview",
+        "also_valid": {
+          "Orbit Gateway": 2,
+          "markdown-memory": 2,
+          "orbit.md::[Overview / Preamble]": 2
+        }
+      },
+      {
+        "query": "credential expiry policy",
+        "expected": "Deployment Guide > Secrets Management"
+      },
+      {
+        "query": "how often should passwords be changed",
+        "expected": "Deployment Guide > Secrets Management"
+      },
+      {
+        "query": "how do I undo a bad deploy",
+        "expected": "Deployment Guide > Rolling Back"
+      },
+      {
+        "query": "monitoring and alerting",
+        "expected": "Deployment Guide > Observability"
+      },
+      {
+        "query": "cpu and ram requested by the container",
+        "expected": "Deployment Guide > Kubernetes"
+      },
+      {
+        "query": "pod gets killed for using too much RAM",
+        "expected": "Troubleshooting > Out Of Memory Kills"
+      },
+      {
+        "query": "queries got sluggish after we upgraded",
+        "expected": "Troubleshooting > Slow Queries After Upgrade"
+      },
+      {
+        "query": "pipeline is frozen and not advancing",
+        "expected": "Troubleshooting > Consumer stuck at the same offset"
+      },
+      {
+        "query": "how do I confirm the performance problem is gone",
+        "expected": "Troubleshooting > Slow Queries After Upgrade > Verifying The Fix"
+      },
+      {
+        "query": "tune how many items are fetched at once",
+        "expected": "Helios Configuration Reference > Environment Variables > Ingest"
+      },
+      {
+        "query": "database connection settings",
+        "expected": "Helios Configuration Reference > Environment Variables > Storage"
+      },
+      {
+        "query": "reprocess old messages from the beginning",
+        "expected": "Helios Configuration Reference > Command Line Flags"
+      },
+      {
+        "query": "example of the settings file",
+        "expected": "Helios Configuration Reference > File Format",
+        "also_valid": {
+          "configuration.md::[Overview / Preamble]": 1
+        }
+      },
+      {
+        "query": "is the proxy alive endpoint",
+        "expected": "Orbit Gateway > Operations > Health Checks"
+      },
+      {
+        "query": "stop the server without dropping requests",
+        "expected": "Orbit Gateway > Operations > Graceful Shutdown"
+      },
+      {
+        "query": "compile it myself instead of downloading",
+        "expected": "Orbit Gateway > Installation > From Source"
+      },
+      {
+        "query": "what licence is this under",
+        "expected": "Orbit Gateway > License"
+      },
+      {
+        "query": "per tenant concurrency limit",
+        "expected": "Orbit Gateway > Configuration > Environment Variables",
+        "also_valid": {
+          "Orbit Gateway": 1
+        }
+      },
+      {
+        "query": "how does it cope with broken markdown",
+        "expected": "markdown-memory > How malformed Markdown is handled"
+      },
+      {
+        "query": "which files get picked up when scanning",
+        "expected": "markdown-memory > Indexing rules",
+        "also_valid": {
+          "markdown-memory > Tools": 1
+        }
+      },
+      {
+        "query": "where is the index stored on disk",
+        "expected": "markdown-memory > Configuration"
+      },
+      {
+        "query": "hooking it up to my editor",
+        "expected": "markdown-memory > Install and run"
+      },
+      {
+        "query": "how do I run the checks before committing",
+        "expected": "markdown-memory > Development"
+      },
+      {
+        "query": "what operations does the server expose",
+        "expected": "markdown-memory > Tools"
+      },
+      {
+        "query": "what changed in the newest release",
+        "expected": "Changelog > 2.1.0 > Added",
+        "also_valid": {
+          "Changelog > 2.1.0": 2,
+          "Changelog > 2.1.0 > Fixed": 2
+        }
+      }
+    ],
+    "identifier": [
+      {
+        "query": "HELIOS_WAL_SEGMENT_MB",
+        "expected": "Helios Configuration Reference > Environment Variables > Storage"
+      },
+      {
+        "query": "HELIOS_INGEST_BATCH_SIZE",
+        "expected": "Helios Configuration Reference > Environment Variables > Ingest"
+      },
+      {
+        "query": "--replay-from-offset",
+        "expected": "Helios Configuration Reference > Command Line Flags"
+      },
+      {
+        "query": "ENOSPC",
+        "expected": "Ingest Pipeline Architecture > Failure Modes"
+      },
+      {
+        "query": "ORBIT_MAX_INFLIGHT",
+        "expected": "Orbit Gateway > Configuration > Environment Variables"
+      },
+      {
+        "query": "--drain-seconds",
+        "expected": "Orbit Gateway > Configuration > Command Line Flags"
+      },
+      {
+        "query": "SIGHUP",
+        "expected": "Deployment Guide > Secrets Management"
+      },
+      {
+        "query": "MARKDOWN_MEMORY_DB",
+        "expected": "markdown-memory > Configuration"
+      },
+      {
+        "query": "kubectl rollout status",
+        "expected": "Deployment Guide > Kubernetes"
+      },
+      {
+        "query": "ANALYZE",
+        "expected": "Troubleshooting > Slow Queries After Upgrade"
+      }
+    ]
+  },
+  "held_out": {
+    "paraphrase": [
+      {
+        "query": "why does ingestion pause when downstream is slow",
+        "expected": "Ingest Pipeline Architecture > Backpressure"
+      },
+      {
+        "query": "avoiding double counting of records",
+        "expected": "Ingest Pipeline Architecture > Stages > Deduplicator"
+      },
+      {
+        "query": "turning serialized bytes into structs",
+        "expected": "Ingest Pipeline Architecture > Stages > Decoder"
+      },
+      {
+        "query": "how are rows batched and committed to the store",
+        "expected": "Ingest Pipeline Architecture > Stages > Writer"
+      },
+      {
+        "query": "what happens if the disk fills up",
+        "expected": "Ingest Pipeline Architecture > Failure Modes"
+      },
+      {
+        "query": "behaviour during a schema registry outage",
+        "expected": "Ingest Pipeline Architecture > Failure Modes"
+      },
+      {
+        "query": "sizing hardware for peak traffic",
+        "expected": "Ingest Pipeline Architecture > Capacity Planning"
+      },
+      {
+        "query": "how are secrets delivered to the app",
+        "expected": "Deployment Guide > Secrets Management"
+      },
+      {
+        "query": "do I need to restart after rotating keys",
+        "expected": "Deployment Guide > Secrets Management"
+      },
+      {
+        "query": "going back to the previous version",
+        "expected": "Deployment Guide > Rolling Back"
+      },
+      {
+        "query": "where are the dashboards",
+        "expected": "Deployment Guide > Observability"
+      },
+      {
+        "query": "applying the manifests to the cluster",
+        "expected": "Deployment Guide > Kubernetes"
+      },
+      {
+        "query": "container restarted because it exceeded its memory limit",
+        "expected": "Troubleshooting > Out Of Memory Kills"
+      },
+      {
+        "query": "database statistics outdated after a major version bump",
+        "expected": "Troubleshooting > Slow Queries After Upgrade"
+      },
+      {
+        "query": "a bad message is blocking the partition",
+        "expected": "Troubleshooting > Consumer stuck at the same offset"
+      },
+      {
+        "query": "comparing latency before and after",
+        "expected": "Troubleshooting > Slow Queries After Upgrade > Verifying The Fix"
+      },
+      {
+        "query": "number of parallel decoding threads",
+        "expected": "Helios Configuration Reference > Environment Variables > Ingest"
+      },
+      {
+        "query": "maximum size of the connection pool",
+        "expected": "Helios Configuration Reference > Environment Variables > Storage"
+      },
+      {
+        "query": "validate input without writing anything",
+        "expected": "Helios Configuration Reference > Command Line Flags"
+      },
+      {
+        "query": "toml layout for the ingest and store sections",
+        "expected": "Helios Configuration Reference > File Format"
+      },
+      {
+        "query": "which wins: file, environment or flag",
+        "expected": "configuration.md::[Overview / Preamble]",
+        "also_valid": {
+          "Orbit Gateway > Configuration": 2,
+          "Orbit Gateway > Configuration > Command Line Flags": 1
+        }
+      },
+      {
+        "query": "readiness probe url",
+        "expected": "Orbit Gateway > Operations > Health Checks"
+      },
+      {
+        "query": "what signal triggers draining",
+        "expected": "Orbit Gateway > Operations > Graceful Shutdown"
+      },
+      {
+        "query": "install script one liner",
+        "expected": "Orbit Gateway > Installation"
+      },
+      {
+        "query": "open source terms",
+        "expected": "Orbit Gateway > License"
+      },
+      {
+        "query": "address and port the gateway listens on",
+        "expected": "Orbit Gateway > Configuration > Environment Variables"
+      },
+      {
+        "query": "override the config path from the command line",
+        "expected": "Orbit Gateway > Configuration > Command Line Flags",
+        "also_valid": {
+          "Helios Configuration Reference > Command Line Flags": 2
+        }
+      },
+      {
+        "query": "what does it do with yaml front matter",
+        "expected": "markdown-memory > How malformed Markdown is handled"
+      },
+      {
+        "query": "are symlinks followed",
+        "expected": "markdown-memory > Indexing rules"
+      },
+      {
+        "query": "change the log verbosity",
+        "expected": "markdown-memory > Configuration"
+      },
+      {
+        "query": "set it up in claude desktop",
+        "expected": "markdown-memory > Install and run"
+      },
+      {
+        "query": "running the linters and the type checker",
+        "expected": "markdown-memory > Development"
+      },
+      {
+        "query": "how are very long sections addressed",
+        "expected": "markdown-memory > Tools"
+      },
+      {
+        "query": "which bug fixes shipped in version two",
+        "expected": "Changelog > 2.0.0 > Fixed",
+        "also_valid": {
+          "Changelog > 2.0.0": 1
+        }
+      }
+    ],
+    "identifier": [
+      {
+        "query": "HELIOS_STORE_POOL_MAX",
+        "expected": "Helios Configuration Reference > Environment Variables > Storage"
+      },
+      {
+        "query": "--dry-run",
+        "expected": "Helios Configuration Reference > Command Line Flags"
+      },
+      {
+        "query": "ORBIT_LISTEN_ADDR",
+        "expected": "Orbit Gateway > Configuration > Environment Variables"
+      },
+      {
+        "query": "SIGTERM",
+        "expected": "Orbit Gateway > Operations > Graceful Shutdown"
+      },
+      {
+        "query": "kustomize",
+        "expected": "Deployment Guide > Kubernetes"
+      },
+      {
+        "query": "MARKDOWN_MEMORY_LOG_LEVEL",
+        "expected": "markdown-memory > Configuration"
+      },
+      {
+        "query": "/healthz",
+        "expected": "Orbit Gateway > Operations > Health Checks"
+      },
+      {
+        "query": "cuckoo filter",
+        "expected": "Ingest Pipeline Architecture > Stages > Deduplicator"
+      }
+    ]
+  }
+}

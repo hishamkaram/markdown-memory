@@ -1,0 +1,247 @@
+"""Agent-facing docs and skills must describe the code that actually exists."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+from fakes import FakeEmbedder, vectors_for
+
+from markdown_memory.db import Database
+from markdown_memory.models import SectionDraft
+from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
+
+ROOT = Path(__file__).parent.parent
+AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules")
+SKILLS = ("run-eval", "reindex-docs", "test-regression")
+NAVIGATION_BLOCK = re.compile(
+    r"<!-- markdown-memory:navigation-rules:start -->.*?"
+    r"<!-- markdown-memory:navigation-rules:end -->",
+    re.DOTALL,
+)
+
+
+def load_script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def all_agent_text() -> dict[str, str]:
+    files = [ROOT / name for name in AGENT_FILES]
+    files += [ROOT / ".claude" / "skills" / skill / "SKILL.md" for skill in SKILLS]
+    return {str(path.relative_to(ROOT)): path.read_text(encoding="utf-8") for path in files}
+
+
+class TestNavigationRules:
+    def test_the_rule_block_is_identical_in_every_agent_file(self) -> None:
+        blocks = {}
+        for name in AGENT_FILES:
+            match = NAVIGATION_BLOCK.search((ROOT / name).read_text(encoding="utf-8"))
+            assert match is not None, f"{name} has no navigation-rules block"
+            blocks[name] = match.group(0)
+        assert len(set(blocks.values())) == 1, "navigation rules drifted between agent files"
+
+    def test_rules_state_the_workflow_in_order(self) -> None:
+        match = NAVIGATION_BLOCK.search((ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+        assert match is not None
+        block = match.group(0)
+        assert "Never dump whole files" in block and "150 lines" in block
+        positions = [
+            block.index("1. **`search_docs("),
+            block.index("2. **`get_document_outline("),
+            block.index("3. **`read_section("),
+        ]
+        assert positions == sorted(positions)
+        assert "matched_passage" in block and "include_subsections" in block
+
+    async def test_every_tool_the_rules_mention_exists_with_those_parameters(
+        self, tmp_path: Path
+    ) -> None:
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "d.db", docs_dir=tmp_path), embedder=FakeEmbedder()
+        )
+        try:
+            tools = {t.name: t for t in await create_server(service=service).list_tools()}
+        finally:
+            service.close()
+        block = NAVIGATION_BLOCK.search((ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+        assert block is not None
+        mentioned = set(re.findall(r"`(\w+)\(", block.group(0)))
+        assert mentioned == set(tools), (mentioned, set(tools))
+        assert set(tools["read_section"].input_schema["properties"]) == {
+            "file_path",
+            "heading_path",
+            "include_subsections",
+        }
+        assert set(tools["search_docs"].input_schema["properties"]) == {"query", "limit"}
+
+
+class TestDocsMatchTheCode:
+    def test_documented_gates_are_the_gates_the_eval_enforces(self) -> None:
+        evaluation = load_script("eval_retrieval")
+        floors = (
+            f">= {evaluation.FLOOR_PARAPHRASE_TOP1:.0%}",
+            f">= {evaluation.FLOOR_PARAPHRASE_TOP5:.0%}",
+            f"{evaluation.FLOOR_IDENTIFIER_TOP1:.0%}",
+        )
+        assert floors == (">= 80%", ">= 90%", "100%")
+        for name in ("CLAUDE.md", ".claude/skills/run-eval/SKILL.md"):
+            text = all_agent_text()[name]
+            for floor in floors:
+                assert floor in text, f"{name} does not state the {floor} gate"
+
+    def test_documented_baseline_is_the_frozen_baseline(self) -> None:
+        baseline = json.loads((ROOT / "scripts/eval_data/baseline.json").read_text())
+        assert set(baseline) == {"embeddinggemma", "bge-small"}
+        held_out = baseline["embeddinggemma"]["held_out/paraphrase"]
+        quoted = (f"{held_out['top1']:.0%}", f"{held_out['top5']:.0%}")
+        for name in ("CLAUDE.md", ".claude/skills/run-eval/SKILL.md"):
+            text = all_agent_text()[name]
+            assert f"| {quoted[0]} |" in text and f"| {quoted[1]} |" in text, (name, quoted)
+        for preset in baseline.values():
+            assert set(preset) == {
+                "dev/paraphrase",
+                "dev/identifier",
+                "held_out/paraphrase",
+                "held_out/identifier",
+            }
+            assert preset["dev/identifier"]["top1"] == preset["held_out/identifier"]["top1"] == 1
+
+    def test_every_referenced_repository_path_exists(self) -> None:
+        pattern = re.compile(r"(?<![\w/.-])((?:src|scripts|tests|\.claude)/[\w./-]+\w)")
+        for name, text in all_agent_text().items():
+            for path in set(pattern.findall(text)):
+                assert (ROOT / path).exists(), f"{name} references missing path {path}"
+
+    def test_every_documented_flag_is_accepted_by_its_script(self) -> None:
+        for script, flags in (
+            ("scripts/eval_retrieval.py", ("--show-misses", "--update-baseline", "--embedder")),
+            ("scripts/reindex_docs.py", ("--force", "--db", "--embedder")),
+            ("src/markdown_memory/server.py", ("--db", "--docs-dir", "--log-level", "--embedder")),
+        ):
+            usage = subprocess.run(
+                [sys.executable, str(ROOT / script), "--help"],
+                capture_output=True, text=True, check=True,
+            ).stdout  # fmt: skip
+            for flag in flags:
+                assert flag in usage, f"{script} does not accept {flag}"
+
+    def test_no_placeholders(self) -> None:
+        for name, text in all_agent_text().items():
+            for marker in ("TODO", "TBD", "FIXME", "XXX", "<placeholder", "lorem ipsum"):
+                assert marker.lower() not in text.lower(), f"{name} contains {marker!r}"
+
+    def test_check_script_runs_the_documented_steps_in_order(self) -> None:
+        script = (ROOT / "scripts/check.sh").read_text(encoding="utf-8")
+        steps = [
+            "step uv run ruff check .",
+            "step uv run ruff format --check .",
+            "step uv run mypy --strict src/",
+            "step uv run pytest -q",
+            "step uv run python scripts/live_test.py",
+        ]
+        positions = [script.index(step) for step in steps]
+        assert positions == sorted(positions)
+        assert "set -euo pipefail" in script
+        assert (ROOT / "scripts/check.sh").stat().st_mode & 0o111, "check.sh is not executable"
+
+
+class TestSkills:
+    @pytest.mark.parametrize("skill", SKILLS)
+    def test_front_matter(self, skill: str) -> None:
+        text = (ROOT / ".claude" / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+        match = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
+        assert match is not None, "SKILL.md must start with YAML front matter"
+        fields = dict(line.split(": ", 1) for line in match.group(1).splitlines())
+        assert fields["name"] == skill
+        assert len(fields["description"]) > 80  # says what it does AND when to use it
+        assert "Use " in fields["description"]
+
+    def test_claude_md_lists_every_skill(self) -> None:
+        text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        for skill in SKILLS:
+            assert f"**`{skill}`**" in text
+
+
+# ---------------------------------------------------------------------- what the skills run
+
+
+def _draft(title: str, body: str) -> SectionDraft:
+    return SectionDraft(
+        heading_title=title, heading_level=2, heading_path=f"Doc > {title}",
+        base_path=f"Doc > {title}", content=f"## {title}\n\n{body}", start_line=1, end_line=3,
+        units=(body,),
+    )  # fmt: skip
+
+
+class TestIntegrityProblems:
+    def test_sound_database_reports_nothing(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        assert db.integrity_problems() == []
+        sections = [_draft("A", "alpha text"), _draft("B", "beta text")]
+        db.replace_document(
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        assert db.integrity_problems() == []
+
+    def test_each_kind_of_damage_is_named(self, db: Database, fake_embedder: FakeEmbedder) -> None:
+        sections = [_draft("A", "alpha text"), _draft("B", "beta text")]
+        db.replace_document(
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            sections=sections, vectors=vectors_for(fake_embedder, sections),
+        )  # fmt: skip
+        conn = db.connection()
+        conn.execute("DELETE FROM units_vec WHERE unit_id = (SELECT MIN(id) FROM units)")
+        conn.execute("DELETE FROM sections_vec WHERE section_id = (SELECT MAX(id) FROM sections)")
+        conn.execute("INSERT INTO sections_fts(sections_fts) VALUES ('delete-all')")
+        conn.execute("UPDATE meta SET value = '999' WHERE key = 'embedding_dim'")
+        problems = "\n".join(db.integrity_problems())
+        assert "2 passages but 1 passage vectors" in problems
+        assert "1 section vectors but 2 sections with passages" in problems
+        assert "2 sections but 0 FTS rows" in problems
+        assert "FTS5 index does not match the sections table" in problems
+        assert "meta embedding_dim is 999, expected 384" in problems
+
+    def test_outdated_schema_version_is_reported(self, db: Database) -> None:
+        db.connection().execute("PRAGMA user_version = 1")
+        assert db.integrity_problems() == ["schema version is 1, expected 2"]
+
+
+class TestReindexScript:
+    def run(self, *arguments: str, db: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/reindex_docs.py"), *arguments,
+             "--db", str(db), "--embedder", "bge-small"],
+            capture_output=True, text=True, timeout=600,
+        )  # fmt: skip
+
+    @pytest.mark.embedding
+    def test_forced_reindex_re_embeds_unchanged_files_and_verifies(self, tmp_path: Path) -> None:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n\n## Child\n\n- one\n- two\n")
+        database = tmp_path / "index.db"
+        first = self.run(str(docs), db=database)
+        assert first.returncode == 0, first.stdout + first.stderr
+        assert "1 (re)indexed, 0 unchanged" in first.stdout
+        incremental = self.run(str(docs), db=database)
+        assert "0 (re)indexed, 1 unchanged" in incremental.stdout
+        forced = self.run(str(docs), "--force", db=database)
+        assert forced.returncode == 0, forced.stdout + forced.stderr
+        assert "--force  : dropped 1 indexed document(s)" in forced.stdout
+        assert "1 (re)indexed, 0 unchanged" in forced.stdout
+        assert "384 dimensions (meta: 384" in forced.stdout
+        assert "integrity: ok" in forced.stdout
+        assert "INTEGRITY PROBLEM" not in forced.stdout

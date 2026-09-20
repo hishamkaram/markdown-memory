@@ -1,0 +1,845 @@
+"""SQLite storage: connection factory, migrations, and the section repository.
+
+The store combines three indexes over the same ``sections`` rows:
+
+* ``sections``      - canonical relational data (cascade-deleted with its document)
+* ``sections_fts``  - FTS5 external-content index (BM25 keyword search)
+* ``sections_vec``  - sqlite-vec ``vec0`` index, one vector per section with a body
+* ``units`` / ``units_vec`` - the section's passages (paragraph, list item, table row,
+  code block) and one vector for each; a section is ranked by its best passage
+
+Triggers keep both virtual tables in lock-step with ``sections``, including rows
+removed by ``ON DELETE CASCADE``, so callers only ever write to ``sections``.
+
+Connections are per-thread (MCP tool handlers run in worker threads and hybrid
+search queries both indexes concurrently); WAL mode lets readers proceed while
+an indexing transaction is open.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import os
+import sqlite3
+import struct
+import threading
+import time
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from types import TracebackType
+from typing import Self
+
+import sqlite_vec
+
+from markdown_memory.exceptions import DatabaseError
+from markdown_memory.models import (
+    Document,
+    DocumentSummary,
+    Section,
+    SectionDraft,
+    SectionVectors,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_EMBEDDING_DIM = 384
+SCHEMA_VERSION = 2
+_BUSY_TIMEOUT_MS = 10_000
+_WAL_ATTEMPTS = 40
+_WAL_RETRY_SECONDS = 0.05
+_SQL_VARIABLE_BATCH = 500
+
+_SECTION_COLUMNS = (
+    "id, doc_id, heading_title, heading_level, heading_path, content, "
+    "start_line, end_line, part_index"
+)
+
+
+def _schema_v1(embedding_dim: int) -> tuple[str, ...]:
+    return (
+        """
+        CREATE TABLE meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE documents (
+            id            INTEGER PRIMARY KEY,
+            file_path     TEXT NOT NULL UNIQUE,
+            title         TEXT NOT NULL,
+            content_hash  TEXT NOT NULL,
+            last_modified INTEGER NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE sections (
+            id            INTEGER PRIMARY KEY,
+            doc_id        INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            heading_title TEXT NOT NULL,
+            heading_level INTEGER NOT NULL,
+            heading_path  TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            start_line    INTEGER NOT NULL,
+            end_line      INTEGER NOT NULL,
+            part_index    INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX idx_sections_doc ON sections(doc_id, id)",
+        """
+        CREATE VIRTUAL TABLE sections_fts USING fts5(
+            heading_title,
+            heading_path,
+            content,
+            content='sections',
+            content_rowid='id',
+            tokenize='porter unicode61 remove_diacritics 2'
+        )
+        """,
+        # Headings are short and highly descriptive: weight them above body text.
+        "INSERT INTO sections_fts(sections_fts, rank) VALUES ('rank', 'bm25(5.0, 3.0, 1.0)')",
+        _vector_tables(embedding_dim)[0],
+        """
+        CREATE TRIGGER sections_after_insert AFTER INSERT ON sections BEGIN
+            INSERT INTO sections_fts(rowid, heading_title, heading_path, content)
+            VALUES (new.id, new.heading_title, new.heading_path, new.content);
+        END
+        """,
+        """
+        CREATE TRIGGER sections_after_delete AFTER DELETE ON sections BEGIN
+            INSERT INTO sections_fts(sections_fts, rowid, heading_title, heading_path, content)
+            VALUES ('delete', old.id, old.heading_title, old.heading_path, old.content);
+            DELETE FROM sections_vec WHERE section_id = old.id;
+        END
+        """,
+        """
+        CREATE TRIGGER sections_after_update AFTER UPDATE ON sections BEGIN
+            INSERT INTO sections_fts(sections_fts, rowid, heading_title, heading_path, content)
+            VALUES ('delete', old.id, old.heading_title, old.heading_path, old.content);
+            INSERT INTO sections_fts(rowid, heading_title, heading_path, content)
+            VALUES (new.id, new.heading_title, new.heading_path, new.content);
+        END
+        """,
+    )
+
+
+def _vector_tables(embedding_dim: int) -> tuple[str, ...]:
+    return (
+        f"""
+        CREATE VIRTUAL TABLE sections_vec USING vec0(
+            section_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{embedding_dim}] distance_metric=cosine
+        )
+        """,
+        f"""
+        CREATE VIRTUAL TABLE units_vec USING vec0(
+            unit_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{embedding_dim}] distance_metric=cosine
+        )
+        """,
+    )
+
+
+def _schema_v2(embedding_dim: int) -> tuple[str, ...]:
+    """Passage-level vectors: ``units`` rows cascade with their section."""
+    return (
+        """
+        CREATE TABLE units (
+            id         INTEGER PRIMARY KEY,
+            section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+            ordinal    INTEGER NOT NULL,
+            content    TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_units_section ON units(section_id, ordinal)",
+        _vector_tables(embedding_dim)[1],
+        """
+        CREATE TRIGGER units_after_delete AFTER DELETE ON units BEGIN
+            DELETE FROM units_vec WHERE unit_id = old.id;
+        END
+        """,
+    )
+
+
+def serialize_embedding(embedding: Sequence[float]) -> bytes:
+    """Pack a vector into the little-endian float32 blob format sqlite-vec expects."""
+    return struct.pack(f"<{len(embedding)}f", *embedding)
+
+
+def _is_usable_vector(embedding: Sequence[float]) -> bool:
+    """Cosine distance is undefined (NaN) for non-finite or zero-length vectors."""
+    return all(math.isfinite(value) for value in embedding) and any(embedding)
+
+
+def _directory_prefix(directory: str) -> str:
+    return directory if directory.endswith(os.sep) else directory + os.sep
+
+
+class Database:
+    """Thread-safe SQLite client and repository for documents and sections.
+
+    Use as a context manager to guarantee every per-thread connection is closed::
+
+        with Database(path) as db:
+            with db.transaction() as conn:
+                ...
+    """
+
+    def __init__(self, path: str | Path, *, embedding_dim: int = DEFAULT_EMBEDDING_DIM) -> None:
+        if str(path) == ":memory:" or str(path).startswith("file::memory:"):
+            raise DatabaseError(
+                "In-memory databases are not supported: connections are per-thread "
+                "and would each see an empty database. Use a file path."
+            )
+        if embedding_dim <= 0:
+            raise DatabaseError(f"embedding_dim must be positive, got {embedding_dim}")
+        self._path = Path(path).expanduser()
+        self._embedding_dim = embedding_dim
+        self._local = threading.local()
+        self._connections: list[tuple[threading.Thread, sqlite3.Connection]] = []
+        self._lock = threading.Lock()
+        self._closed = False
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DatabaseError(f"Cannot create database directory {self._path.parent}") from exc
+        self._migrate()
+
+    # ------------------------------------------------------------------ lifecycle
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._embedding_dim
+
+    def close(self) -> None:
+        """Close every connection opened by any thread. Idempotent."""
+        with self._lock:
+            self._closed = True
+            connections, self._connections = self._connections, []
+        for _, conn in connections:
+            _close_quietly(conn)
+
+    @property
+    def open_connection_count(self) -> int:
+        """Connections currently held open across all threads (diagnostics)."""
+        with self._lock:
+            return len(self._connections)
+
+    def connection(self) -> sqlite3.Connection:
+        """Return this thread's connection, opening and configuring it on first use.
+
+        Tool handlers run on pooled worker threads that the runtime retires when idle,
+        so opening a connection is also the moment the connections of threads that have
+        since exited are closed; otherwise a long-lived server leaks file descriptors.
+        """
+        if self._closed:
+            raise DatabaseError("Database is closed")
+        existing: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if existing is not None:
+            return existing
+        conn = self._open()
+        abandoned: list[sqlite3.Connection] = []
+        with self._lock:
+            if self._closed:
+                conn.close()
+                raise DatabaseError("Database is closed")
+            alive: list[tuple[threading.Thread, sqlite3.Connection]] = []
+            for thread, other in self._connections:
+                if thread.is_alive():
+                    alive.append((thread, other))
+                else:
+                    abandoned.append(other)
+            alive.append((threading.current_thread(), conn))
+            self._connections = alive
+        self._local.conn = conn
+        for other in abandoned:
+            _close_quietly(other)
+        return conn
+
+    def _open(self) -> sqlite3.Connection:
+        try:
+            # isolation_level=None: autocommit; transactions are explicit (see transaction()).
+            # check_same_thread=False only so close() may run from another thread;
+            # each connection is otherwise used exclusively by the thread that opened it.
+            conn = sqlite3.connect(
+                self._path,
+                isolation_level=None,
+                check_same_thread=False,
+                timeout=_BUSY_TIMEOUT_MS / 1000,
+            )
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Cannot open database at {self._path}: {exc}") from exc
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except (sqlite3.Error, AttributeError) as exc:
+            conn.close()
+            raise DatabaseError(
+                "Cannot load the sqlite-vec extension. This Python build's sqlite3 module "
+                f"must support loadable extensions: {exc}"
+            ) from exc
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+            _enable_wal(conn)
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA foreign_keys = ON")
+        except sqlite3.Error as exc:
+            conn.close()
+            raise DatabaseError(f"Cannot configure database connection: {exc}") from exc
+        return conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run a write transaction: commit on success, roll back on any exception."""
+        conn = self.connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Cannot begin transaction: {exc}") from exc
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException as exc:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:  # pragma: no cover - rollback is best effort
+                    logger.exception("Rollback failed")
+            if isinstance(exc, sqlite3.Error):
+                raise DatabaseError(f"Transaction failed: {exc}") from exc
+            raise
+
+    @contextmanager
+    def _reading(self) -> Iterator[sqlite3.Connection]:
+        """Yield the connection for reads, translating driver errors."""
+        conn = self.connection()
+        try:
+            yield conn
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Query failed: {exc}") from exc
+
+    # ------------------------------------------------------------------ migrations
+
+    def _migrate(self) -> None:
+        conn = self.connection()
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Cannot read schema version: {exc}") from exc
+        if version > SCHEMA_VERSION:
+            raise DatabaseError(
+                f"Database schema v{version} is newer than this build supports "
+                f"(v{SCHEMA_VERSION}); upgrade markdown-memory."
+            )
+        if version < SCHEMA_VERSION:
+            applied: list[int] = []
+            with self.transaction() as tx:
+                # Re-check under the write lock: another process starting at the same
+                # moment may have migrated the schema while this one waited for it.
+                current = int(tx.execute("PRAGMA user_version").fetchone()[0])
+                if current < 1:
+                    for statement in _schema_v1(self._embedding_dim):
+                        tx.execute(statement)
+                    tx.execute(
+                        "INSERT INTO meta(key, value) VALUES ('embedding_dim', ?)",
+                        (str(self._embedding_dim),),
+                    )
+                    applied.append(1)
+                if current < 2:
+                    stored = tx.execute(
+                        "SELECT value FROM meta WHERE key = 'embedding_dim'"
+                    ).fetchone()
+                    for statement in _schema_v2(int(stored[0])):
+                        tx.execute(statement)
+                    applied.append(2)
+                tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if applied:
+                logger.info("Applied schema migration(s) %s at %s", applied, self._path)
+        stored_dim = self.get_meta("embedding_dim")
+        if stored_dim is not None and int(stored_dim) != self._embedding_dim:
+            self._rebuild_for_dimension(int(stored_dim))
+
+    def _rebuild_for_dimension(self, stored_dim: int) -> None:
+        """Re-create the vector tables for a model with a different output size.
+
+        The index is a cache of the Markdown files: vectors of another dimensionality
+        are useless, so everything is dropped and the next ``index_directory`` rebuilds it.
+        """
+        logger.warning(
+            "Embedding size changed (%d -> %d): discarding the index at %s; re-run "
+            "index_directory to rebuild it",
+            stored_dim,
+            self._embedding_dim,
+            self._path,
+        )
+        with self.transaction() as tx:
+            tx.execute("DELETE FROM documents")
+            tx.execute("DROP TABLE sections_vec")
+            tx.execute("DROP TABLE units_vec")
+            for statement in _vector_tables(self._embedding_dim):
+                tx.execute(statement)
+            tx.execute(
+                "UPDATE meta SET value = ? WHERE key = 'embedding_dim'",
+                (str(self._embedding_dim),),
+            )
+
+    # ------------------------------------------------------------------ meta / pragmas
+
+    def get_meta(self, key: str) -> str | None:
+        with self._reading() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def pragma(self, name: str) -> str:
+        """Return a PRAGMA's current value on this thread's connection."""
+        if not name.isidentifier():
+            raise DatabaseError(f"Invalid pragma name: {name!r}")
+        with self._reading() as conn:
+            row = conn.execute(f"PRAGMA {name}").fetchone()
+        return "" if row is None else str(row[0])
+
+    # ------------------------------------------------------------------ documents
+
+    def get_document(self, file_path: str) -> Document | None:
+        with self._reading() as conn:
+            row = conn.execute(
+                "SELECT id, file_path, title, content_hash, last_modified "
+                "FROM documents WHERE file_path = ?",
+                (file_path,),
+            ).fetchone()
+        return None if row is None else _document_from_row(row)
+
+    def find_documents_by_suffix(self, relative_path: str) -> list[Document]:
+        """Documents whose stored path ends with ``/<relative_path>``."""
+        suffix = os.sep + relative_path.lstrip("/\\")
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT id, file_path, title, content_hash, last_modified FROM documents "
+                "WHERE substr(file_path, -length(?)) = ? ORDER BY file_path",
+                (suffix, suffix),
+            ).fetchall()
+        return [_document_from_row(row) for row in rows]
+
+    def document_hashes(self, directory: str) -> dict[str, str]:
+        """Map ``file_path -> content_hash`` for every document under ``directory``."""
+        prefix = _directory_prefix(directory)
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT file_path, content_hash FROM documents "
+                "WHERE substr(file_path, 1, length(?)) = ?",
+                (prefix, prefix),
+            ).fetchall()
+        return {str(path): str(content_hash) for path, content_hash in rows}
+
+    def list_documents(self, directory: str = "") -> list[DocumentSummary]:
+        """All documents (optionally restricted to ``directory``) with section counts."""
+        sql = (
+            "SELECT d.file_path, d.title, COUNT(s.id), d.last_modified "
+            "FROM documents d LEFT JOIN sections s ON s.doc_id = d.id "
+        )
+        params: tuple[str, ...] = ()
+        if directory:
+            prefix = _directory_prefix(directory)
+            sql += "WHERE substr(d.file_path, 1, length(?)) = ? "
+            params = (prefix, prefix)
+        sql += "GROUP BY d.id ORDER BY d.file_path"
+        with self._reading() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            DocumentSummary(
+                file_path=str(path),
+                title=str(title),
+                section_count=int(count),
+                last_modified=int(modified),
+            )
+            for path, title, count, modified in rows
+        ]
+
+    def replace_document(
+        self,
+        *,
+        file_path: str,
+        title: str,
+        content_hash: str,
+        last_modified: int,
+        sections: Sequence[SectionDraft],
+        vectors: Sequence[SectionVectors],
+    ) -> Document:
+        """Atomically insert or fully replace one document, its sections and vectors."""
+        if len(sections) != len(vectors):
+            raise DatabaseError(
+                f"Got {len(sections)} sections but {len(vectors)} vector sets for {file_path}"
+            )
+        for section, vector in zip(sections, vectors, strict=True):
+            if len(vector.units) != len(section.units):
+                raise DatabaseError(
+                    f"Section '{section.heading_path}' of {file_path} has {len(section.units)} "
+                    f"passages but {len(vector.units)} passage vectors"
+                )
+            if (vector.section is None) != (not section.units):
+                raise DatabaseError(
+                    f"Section '{section.heading_path}' of {file_path}: a section vector is "
+                    "required exactly when the section has passages"
+                )
+            present = [] if vector.section is None else [vector.section]
+            for embedding in (*present, *vector.units):
+                self._check_vector(embedding, f"Embedding for {file_path}")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT id FROM documents WHERE file_path = ?", (file_path,)
+            ).fetchone()
+            if row is None:
+                cursor = conn.execute(
+                    "INSERT INTO documents(file_path, title, content_hash, last_modified) "
+                    "VALUES (?, ?, ?, ?)",
+                    (file_path, title, content_hash, last_modified),
+                )
+                if cursor.lastrowid is None:  # pragma: no cover - sqlite always sets it
+                    raise DatabaseError("INSERT INTO documents returned no rowid")
+                doc_id = cursor.lastrowid
+            else:
+                doc_id = int(row[0])
+                conn.execute(
+                    "UPDATE documents SET title = ?, content_hash = ?, last_modified = ? "
+                    "WHERE id = ?",
+                    (title, content_hash, last_modified, doc_id),
+                )
+                conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
+            for section, vector in zip(sections, vectors, strict=True):
+                section_id = conn.execute(
+                    "INSERT INTO sections(doc_id, heading_title, heading_level, heading_path, "
+                    "content, start_line, end_line, part_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        doc_id,
+                        section.heading_title,
+                        section.heading_level,
+                        section.heading_path,
+                        section.content,
+                        section.start_line,
+                        section.end_line,
+                        section.part_index,
+                    ),
+                ).lastrowid
+                if vector.section is not None:
+                    conn.execute(
+                        "INSERT INTO sections_vec(section_id, embedding) VALUES (?, ?)",
+                        (section_id, serialize_embedding(vector.section)),
+                    )
+                for ordinal, (text, embedding) in enumerate(
+                    zip(section.units, vector.units, strict=True)
+                ):
+                    unit_id = conn.execute(
+                        "INSERT INTO units(section_id, ordinal, content) VALUES (?, ?, ?)",
+                        (section_id, ordinal, text),
+                    ).lastrowid
+                    conn.execute(
+                        "INSERT INTO units_vec(unit_id, embedding) VALUES (?, ?)",
+                        (unit_id, serialize_embedding(embedding)),
+                    )
+        return Document(
+            id=doc_id,
+            file_path=file_path,
+            title=title,
+            content_hash=content_hash,
+            last_modified=last_modified,
+        )
+
+    def _check_vector(self, embedding: Sequence[float], what: str) -> None:
+        if len(embedding) != self._embedding_dim:
+            raise DatabaseError(
+                f"{what} has {len(embedding)} dimensions, expected {self._embedding_dim}"
+            )
+        if not _is_usable_vector(embedding):
+            raise DatabaseError(f"{what} is all zeros or contains NaN/inf values")
+
+    def delete_documents(self, file_paths: Iterable[str]) -> int:
+        """Delete documents by path; sections, FTS rows and vectors cascade. Returns count."""
+        paths = list(file_paths)
+        if not paths:
+            return 0
+        deleted = 0
+        with self.transaction() as conn:
+            for path in paths:
+                deleted += conn.execute(
+                    "DELETE FROM documents WHERE file_path = ?", (path,)
+                ).rowcount
+        return deleted
+
+    def clear(self) -> int:
+        """Delete every document (and, by cascade, every section and vector)."""
+        with self.transaction() as conn:
+            return conn.execute("DELETE FROM documents").rowcount
+
+    # ------------------------------------------------------------------ sections
+
+    def get_sections(self, doc_id: int) -> list[Section]:
+        """Every section of a document in source order."""
+        with self._reading() as conn:
+            rows = conn.execute(
+                f"SELECT {_SECTION_COLUMNS} FROM sections WHERE doc_id = ? ORDER BY id",
+                (doc_id,),
+            ).fetchall()
+        return [_section_from_row(row) for row in rows]
+
+    def get_sections_with_documents(
+        self, section_ids: Sequence[int]
+    ) -> dict[int, tuple[Section, Document]]:
+        """Hydrate section ids into ``(Section, Document)`` pairs."""
+        hydrated: dict[int, tuple[Section, Document]] = {}
+        columns = ", ".join(f"s.{name.strip()}" for name in _SECTION_COLUMNS.split(","))
+        with self._reading() as conn:
+            for start in range(0, len(section_ids), _SQL_VARIABLE_BATCH):
+                batch = section_ids[start : start + _SQL_VARIABLE_BATCH]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT {columns}, d.id, d.file_path, d.title, d.content_hash, "
+                    "d.last_modified FROM sections s JOIN documents d ON d.id = s.doc_id "
+                    f"WHERE s.id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                for row in rows:
+                    section = _section_from_row(row[:9])
+                    hydrated[section.id] = (section, _document_from_row(row[9:]))
+        return hydrated
+
+    # ------------------------------------------------------------------ search primitives
+
+    def fts_search(self, match_query: str, limit: int) -> list[int]:
+        """Section ids matching an FTS5 query, best BM25 rank first."""
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT rowid FROM sections_fts WHERE sections_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match_query, limit),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def vec_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float]]:
+        """``(section_id, cosine_distance)`` for the nearest section vectors, closest first."""
+        self._check_vector(embedding, "Query embedding")
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT section_id, distance FROM sections_vec "
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (serialize_embedding(embedding), limit),
+            ).fetchall()
+        return [
+            (int(section_id), float(distance))
+            for section_id, distance in rows
+            if distance is not None  # defensive: NaN distances surface as NULL
+        ]
+
+    def unit_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float, str]]:
+        """``(section_id, cosine_distance, passage)`` for the nearest passages, closest first.
+
+        A section appears once per matching passage; callers keep its best one.
+        """
+        self._check_vector(embedding, "Query embedding")
+        with self._reading() as conn:
+            rows = conn.execute(
+                "WITH nearest AS (SELECT unit_id, distance FROM units_vec "
+                "WHERE embedding MATCH ? AND k = ?) "
+                "SELECT u.section_id, nearest.distance, u.content FROM nearest "
+                "JOIN units u ON u.id = nearest.unit_id ORDER BY nearest.distance",
+                (serialize_embedding(embedding), limit),
+            ).fetchall()
+        return [
+            (int(section_id), float(distance), str(content))
+            for section_id, distance, content in rows
+            if distance is not None
+        ]
+
+    def fts_matching(self, term: str, within: Sequence[int]) -> set[int]:
+        """Which of the sections ``within`` match the single FTS5 ``term``."""
+        if not within:
+            return set()
+        placeholders = ", ".join("?" for _ in within)
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT rowid FROM sections_fts WHERE sections_fts MATCH ? "
+                f"AND rowid IN ({placeholders})",
+                (term, *within),
+            ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def fts_document_frequency(self, term: str) -> int:
+        """Number of sections matching the single FTS5 ``term``."""
+        with self._reading() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sections_fts WHERE sections_fts MATCH ?", (term,)
+            ).fetchone()
+        return int(row[0])
+
+    def sections_with_passages(self, section_ids: Sequence[int]) -> set[int]:
+        """The subset of ``section_ids`` that has a body (heading-only sections have none)."""
+        if not section_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in section_ids)
+        with self._reading() as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT section_id FROM units WHERE section_id IN ({placeholders})",
+                tuple(section_ids),
+            ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def integrity_problems(self) -> list[str]:
+        """Everything that is wrong with the store; an empty list means it is sound.
+
+        Covers SQLite's own page and foreign-key checks, the FTS5 index against the
+        ``sections`` table, and the invariants the triggers exist to uphold: one FTS row
+        per section, one vector per passage, a section vector exactly for the sections
+        that have passages, and every stored vector of the configured dimension.
+        """
+        problems: list[str] = []
+        blob_bytes = self._embedding_dim * 4
+        with self._reading() as conn:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version != SCHEMA_VERSION:
+                problems.append(f"schema version is {version}, expected {SCHEMA_VERSION}")
+            pages = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+            if pages != ["ok"]:
+                problems.append("PRAGMA integrity_check: " + "; ".join(pages[:5]))
+            orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if orphans:
+                problems.append(f"PRAGMA foreign_key_check: {len(orphans)} orphaned row(s)")
+            try:
+                # rank = 1 makes FTS5 compare the index with the external content table;
+                # the plain form only checks the index's internal consistency.
+                conn.execute(
+                    "INSERT INTO sections_fts(sections_fts, rank) VALUES ('integrity-check', 1)"
+                )
+            except sqlite3.Error as exc:
+                problems.append(f"FTS5 index does not match the sections table: {exc}")
+            with_passages = int(
+                conn.execute("SELECT COUNT(DISTINCT section_id) FROM units").fetchone()[0]
+            )
+            wrong_size = sum(
+                int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE length(embedding) != ?",
+                                 (blob_bytes,)).fetchone()[0])
+                for table in ("sections_vec", "units_vec")
+            )  # fmt: skip
+        counts = {
+            table: self.count_rows(table)
+            for table in ("sections", "sections_fts", "sections_vec", "units", "units_vec")
+        }
+        if counts["sections"] != counts["sections_fts"]:
+            problems.append(f"{counts['sections']} sections but {counts['sections_fts']} FTS rows")
+        if counts["units"] != counts["units_vec"]:
+            problems.append(f"{counts['units']} passages but {counts['units_vec']} passage vectors")
+        if counts["sections_vec"] != with_passages:
+            problems.append(
+                f"{counts['sections_vec']} section vectors but "
+                f"{with_passages} sections with passages"
+            )
+        if wrong_size:
+            problems.append(
+                f"{wrong_size} stored vector(s) are not {self._embedding_dim}-dimensional"
+            )
+        stored_dim = self.get_meta("embedding_dim")
+        if stored_dim != str(self._embedding_dim):
+            problems.append(f"meta embedding_dim is {stored_dim}, expected {self._embedding_dim}")
+        return problems
+
+    def count_rows(self, table: str) -> int:
+        """Row count of one of the known tables (diagnostics and integrity tests)."""
+        if table not in {
+            "documents", "sections", "sections_fts", "sections_vec", "units", "units_vec",
+        }:  # fmt: skip
+            raise DatabaseError(f"Unknown table: {table!r}")
+        # COUNT(*) on an external-content FTS5 table is answered from `sections`; the
+        # docsize shadow table has one row per entry actually present in the index.
+        source = "sections_fts_docsize" if table == "sections_fts" else table
+        with self._reading() as conn:
+            row = conn.execute(f"SELECT COUNT(*) FROM {source}").fetchone()
+        return int(row[0])
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    try:
+        conn.close()
+    except sqlite3.Error:  # pragma: no cover - best effort
+        logger.warning("Failed to close a SQLite connection", exc_info=True)
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """Switch to WAL, retrying while another process holds the lock.
+
+    Changing the journal mode needs an exclusive lock and SQLite reports contention
+    on it immediately instead of honouring the busy timeout.
+    """
+    for attempt in range(_WAL_ATTEMPTS):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if attempt == _WAL_ATTEMPTS - 1 or not ("locked" in message or "busy" in message):
+                raise
+            time.sleep(_WAL_RETRY_SECONDS * (attempt + 1))
+
+
+def _document_from_row(row: Sequence[object]) -> Document:
+    doc_id, file_path, title, content_hash, last_modified = row
+    return Document(
+        id=_as_int(doc_id),
+        file_path=str(file_path),
+        title=str(title),
+        content_hash=str(content_hash),
+        last_modified=_as_int(last_modified),
+    )
+
+
+def _section_from_row(row: Sequence[object]) -> Section:
+    (
+        section_id,
+        doc_id,
+        heading_title,
+        heading_level,
+        heading_path,
+        content,
+        start_line,
+        end_line,
+        part_index,
+    ) = row
+    return Section(
+        id=_as_int(section_id),
+        doc_id=_as_int(doc_id),
+        heading_title=str(heading_title),
+        heading_level=_as_int(heading_level),
+        heading_path=str(heading_path),
+        content=str(content),
+        start_line=_as_int(start_line),
+        end_line=_as_int(end_line),
+        part_index=_as_int(part_index),
+    )
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, int):
+        return value
+    raise DatabaseError(f"Expected an integer column value, got {type(value).__name__}")

@@ -1,0 +1,246 @@
+"""Indexer tests: scanning, SHA-256 change detection, purging, failure isolation."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+from fakes import FakeEmbedder
+
+from markdown_memory.db import Database
+from markdown_memory.exceptions import EmbeddingError, IndexingError
+from markdown_memory.indexer import Indexer, hash_bytes, iter_markdown_files
+
+
+@pytest.fixture
+def docs(tmp_path: Path) -> Path:
+    root = tmp_path / "docs"
+    (root / "guides" / "deep").mkdir(parents=True)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / "README.md").write_text("# Readme\n\nhello\n\n## Usage\n\nrun it\n")
+    (root / "guides" / "setup.md").write_text("# Setup\n\nsteps\n")
+    (root / "guides" / "deep" / "NOTES.MD").write_text("# Notes\n\nupper-case suffix\n")
+    (root / "guides" / "legacy.markdown").write_text("# Legacy\n\nold suffix\n")
+    (root / "guides" / "image.png").write_bytes(b"\x89PNG")
+    (root / "notes.txt").write_text("# not markdown\n")
+    (root / "node_modules" / "pkg" / "README.md").write_text("# Vendored\n")
+    (root / ".git" / "description.md").write_text("# Git internals\n")
+    return root
+
+
+def indexed_paths(db: Database) -> list[str]:
+    return [summary.file_path for summary in db.list_documents()]
+
+
+class TestScanning:
+    def test_finds_markdown_recursively_and_prunes_vendored_trees(self, docs: Path) -> None:
+        found = [str(path.relative_to(docs)) for path in iter_markdown_files(docs)]
+        assert found == [
+            "README.md",
+            "guides/legacy.markdown",
+            "guides/setup.md",
+            "guides/deep/NOTES.MD",
+        ]
+
+    def test_missing_directory(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        with pytest.raises(IndexingError, match="does not exist"):
+            Indexer(db, fake_embedder).index_directory(tmp_path / "nope")
+
+    def test_file_instead_of_directory(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        with pytest.raises(IndexingError, match="Not a directory"):
+            Indexer(db, fake_embedder).index_directory(docs / "README.md")
+
+    def test_dimension_mismatch_is_detected_up_front(self, db: Database) -> None:
+        with pytest.raises(IndexingError, match="dimensional"):
+            Indexer(db, FakeEmbedder(dimension=8))
+
+
+class TestIncrementalIndexing:
+    def test_first_run_indexes_everything(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        report = Indexer(db, fake_embedder).index_directory(docs)
+        assert (report.files_scanned, report.files_indexed) == (4, 4)
+        assert (report.files_unchanged, report.files_purged) == (0, 0)
+        assert report.sections_indexed == db.count_rows("sections") == 5
+        assert db.count_rows("sections_vec") == 5
+        assert report.errors == ()
+        assert report.elapsed_seconds >= 0
+        assert "4 scanned, 4 (re)indexed" in report.summary()
+
+    def test_stored_hash_is_the_files_sha256(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        Indexer(db, fake_embedder).index_directory(docs)
+        document = db.get_document(str(docs / "README.md"))
+        assert document is not None
+        expected = hashlib.sha256((docs / "README.md").read_bytes()).hexdigest()
+        assert document.content_hash == expected == hash_bytes((docs / "README.md").read_bytes())
+        assert document.title == "Readme"
+        assert document.last_modified == int((docs / "README.md").stat().st_mtime)
+
+    def test_breadcrumb_is_prepended_to_the_embedded_text(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        Indexer(db, fake_embedder).index_directory(docs)
+        embedded = [text for call in fake_embedder.document_calls for text in call]
+        assert "Readme > Usage\n\nrun it" in embedded  # section vector: breadcrumb + plain body
+        assert "Readme > Usage: run it" in embedded  # passage vector
+
+    def test_unchanged_files_are_skipped_without_embedding(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(docs)
+        calls_after_first_run = len(fake_embedder.document_calls)
+        report = indexer.index_directory(docs)
+        assert (report.files_indexed, report.files_unchanged) == (0, 4)
+        assert report.sections_indexed == 0
+        assert len(fake_embedder.document_calls) == calls_after_first_run
+
+    def test_touching_a_file_without_changing_bytes_does_not_reindex(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(docs)
+        (docs / "README.md").touch()
+        assert indexer.index_directory(docs).files_indexed == 0
+
+    def test_only_the_modified_file_is_reindexed(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(docs)
+        before = db.get_document(str(docs / "guides" / "setup.md"))
+        (docs / "guides" / "setup.md").write_text("# Setup\n\nnew steps\n\n## Extra\n\nmore\n")
+        report = indexer.index_directory(docs)
+        assert (report.files_indexed, report.files_unchanged) == (1, 3)
+        after = db.get_document(str(docs / "guides" / "setup.md"))
+        assert before is not None and after is not None
+        assert after.id == before.id
+        assert after.content_hash != before.content_hash
+        assert [s.heading_path for s in db.get_sections(after.id)] == ["Setup", "Setup > Extra"]
+        assert db.fts_search('"steps"', 5) != []
+        assert db.count_rows("sections") == db.count_rows("sections_vec") == 6
+
+    def test_deleted_files_are_purged_with_their_sections_and_vectors(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(docs)
+        (docs / "README.md").unlink()
+        report = indexer.index_directory(docs)
+        assert report.files_purged == 1
+        assert str(docs / "README.md") not in indexed_paths(db)
+        assert db.count_rows("sections") == db.count_rows("sections_vec") == 3
+        assert db.count_rows("sections_fts") == 3
+        assert db.fts_search('"hello"', 5) == []
+
+    def test_purge_is_scoped_to_the_indexed_directory(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "keep.md").write_text("# Keep\n")
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(other)
+        report = indexer.index_directory(docs)
+        assert report.files_purged == 0
+        assert str(other / "keep.md") in indexed_paths(db)
+
+    def test_indexing_a_subdirectory_leaves_siblings_alone(
+        self, db: Database, fake_embedder: FakeEmbedder, docs: Path
+    ) -> None:
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(docs)
+        report = indexer.index_directory(docs / "guides")
+        assert (report.files_scanned, report.files_unchanged, report.files_purged) == (3, 3, 0)
+        assert len(indexed_paths(db)) == 4
+
+    def test_empty_and_heading_less_files_are_indexed_without_error(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "edge"
+        root.mkdir()
+        (root / "empty.md").write_text("")
+        (root / "plain.md").write_text("no headings here\n")
+        report = Indexer(db, fake_embedder).index_directory(root)
+        assert report.errors == ()
+        counts = {Path(d.file_path).name: d.section_count for d in db.list_documents()}
+        assert counts == {"empty.md": 0, "plain.md": 1}
+        titles = {Path(d.file_path).name: d.title for d in db.list_documents()}
+        assert titles == {"empty.md": "empty", "plain.md": "plain"}
+        assert Indexer(db, fake_embedder).index_directory(root).files_unchanged == 2
+
+    def test_invalid_utf8_is_decoded_with_replacement(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "bytes"
+        root.mkdir()
+        (root / "latin.md").write_bytes(b"# Caf\xe9\n\nbody\n")
+        report = Indexer(db, fake_embedder).index_directory(root)
+        assert report.errors == ()
+        assert db.list_documents()[0].title == "Caf�"
+
+    def test_changing_the_embedding_model_discards_stale_vectors(
+        self, db: Database, docs: Path
+    ) -> None:
+        Indexer(db, FakeEmbedder(model_name="model-a")).index_directory(docs)
+        assert db.get_meta("embedding_model") == "model-a"
+        report = Indexer(db, FakeEmbedder(model_name="model-b")).index_directory(docs)
+        assert report.files_indexed == 4  # hashes matched, but every vector was stale
+        assert db.get_meta("embedding_model") == "model-b"
+        assert db.count_rows("sections_vec") == 5
+
+
+class TestFailureIsolation:
+    def test_one_bad_file_does_not_abort_the_run(self, db: Database, docs: Path) -> None:
+        class FlakyEmbedder(FakeEmbedder):
+            def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+                if any("steps" in text for text in texts):
+                    raise EmbeddingError("simulated model failure")
+                return super().embed_documents(texts)
+
+        report = Indexer(db, FlakyEmbedder()).index_directory(docs)
+        assert report.files_indexed == 3
+        assert [Path(e.file_path).name for e in report.errors] == ["setup.md"]
+        assert "simulated model failure" in report.errors[0].message
+        assert "ERROR" in report.summary()
+        assert str(docs / "guides" / "setup.md") not in indexed_paths(db)
+
+    def test_a_failing_file_is_retried_on_the_next_run(self, db: Database, docs: Path) -> None:
+        class FailsOnce(FakeEmbedder):
+            failed = False
+
+            def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+                if not self.failed and any("steps" in text for text in texts):
+                    self.failed = True
+                    raise EmbeddingError("transient")
+                return super().embed_documents(texts)
+
+        indexer = Indexer(db, FailsOnce())
+        assert len(indexer.index_directory(docs).errors) == 1
+        second = indexer.index_directory(docs)
+        assert (second.files_indexed, second.files_unchanged, len(second.errors)) == (1, 3, 0)
+
+    def test_a_previously_indexed_file_that_now_fails_is_not_purged(
+        self, db: Database, docs: Path
+    ) -> None:
+        Indexer(db, FakeEmbedder()).index_directory(docs)
+        (docs / "guides" / "setup.md").write_text("# Setup\n\nchanged steps\n")
+
+        class AlwaysFails(FakeEmbedder):
+            def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+                raise EmbeddingError("down")
+
+        report = Indexer(db, AlwaysFails()).index_directory(docs)
+        assert report.files_purged == 0
+        assert len(report.errors) == 1
+        assert str(docs / "guides" / "setup.md") in indexed_paths(db)  # stale beats missing
