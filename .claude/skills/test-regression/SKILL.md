@@ -48,3 +48,7 @@ use the `run-eval` skill (`uv run python scripts/eval_retrieval.py`). It is sepa
 it measures search quality rather than correctness.
 
 Committing is a separate, explicit step: a green gate is not permission to commit.
+
+`.githooks/pre-push` runs this same gate on every push once the clone has been pointed at
+it (`git config core.hooksPath .githooks`), so a red gate cannot reach the remote. Running
+it by hand first is still faster than finding out at push time.

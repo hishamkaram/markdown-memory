@@ -22,7 +22,12 @@ uv run python scripts/eval_retrieval.py        # retrieval accuracy gate (see po
 uv run python scripts/live_test.py             # end-to-end: spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/reindex_docs.py DIR --force   # forced re-index + integrity verification
 scripts/check.sh                               # ruff + format + mypy + pytest + live test, fail-fast
+git config core.hooksPath .githooks             # once per clone: run that gate on every push
 ```
+
+`.githooks/pre-push` runs `scripts/check.sh` before anything leaves the machine; it is
+this project's CI, since the gate needs the local ONNX model. `git push --no-verify`
+skips it for a work-in-progress branch.
 
 The first run downloads the embedding model (~330 MB) into
 `$XDG_CACHE_HOME/markdown-memory/models`. Tests that need the real model are marked

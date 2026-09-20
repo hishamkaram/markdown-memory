@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs the full gate before anything leaves this machine: ruff, ruff format --check,
+# mypy --strict, pytest and the live end-to-end test. Enable it once with:
+#
+#     git config core.hooksPath .githooks
+#
+# It takes about two minutes, most of it loading the real embedding model. To push
+# without it - a work-in-progress branch, a docs-only fix you have already checked -
+# use `git push --no-verify`.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+if [ ! -x "$root/scripts/check.sh" ]; then
+    echo "pre-push: scripts/check.sh is missing or not executable" >&2
+    exit 1
+fi
+
+echo "pre-push: running scripts/check.sh"
+if ! "$root/scripts/check.sh"; then
+    echo >&2
+    echo "pre-push: the gate failed; push refused. Fix it, or use --no-verify." >&2
+    exit 1
+fi
