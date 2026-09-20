@@ -14,9 +14,15 @@ Defences against real-world documentation:
 * **Front matter** - a leading block that really is YAML is kept out of the AST
   (CommonMark would misread it as a thematic break plus a setext heading) and mined
   for ``title:``. A leading ``---`` rule followed by prose is left alone.
-* **Unclosed code fences** - CommonMark runs such a fence to EOF (or to the closing
-  marker of some *later* fence), swallowing the sections in between. The fence is
-  instead closed before the next plausible heading and parsing resumes there.
+* **Unclosed code fences** - CommonMark runs such a fence to EOF, swallowing every
+  heading after it. ``_resilient_fence`` replaces markdown-it's own fence rule and ends
+  the fence at the next plausible heading instead, in the same pass. A fence that
+  markdown-it closed normally is left exactly as CommonMark read it, unless it holds an
+  opening fence of its own (```` ```bash ```` around ```` ```python ````), which means the
+  markers were paired wrongly. Deciding on positive evidence only is what keeps a
+  well-formed document - one that simply shows headings inside a fence - untouched; the
+  cost is that a stray bare marker, which shifts every pairing after it, leaves the
+  headings inside those fences hidden.
 * **Oversized / heading-less text** - split on paragraph boundaries into
   ``Path (Part n)`` parts that reassemble byte-for-byte. A fenced block is only cut
   when it exceeds the limit on its own.
@@ -29,12 +35,15 @@ each paragraph, list item, table row and code block. They feed passage-level emb
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_block.fence import make_fence_rule
+from markdown_it.rules_block.state_block import StateBlock
 from markdown_it.token import Token
 
 from markdown_memory.exceptions import ASTParseError
@@ -48,18 +57,14 @@ from markdown_memory.models import (
 
 DEFAULT_MAX_SECTION_CHARS = 3200  # ~800 tokens
 MAX_UNITS_PER_SECTION = 64
-# Every fence repair re-tokenises the rest of the document. A budget keeps the worst case
-# linear: once it is spent, the remaining fences are left as markdown-it paired them.
-MAX_REPAIR_SCANS = 16
 MAX_UNIT_CHARS = 600
 UNTITLED_HEADING = "(untitled)"
 
 _FENCE_OPEN = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 _MAX_TOP_LEVEL_INDENT = 3
-# Fences whose purpose is to *show* Markdown: another fence inside them is sample text.
-_MARKUP_SAMPLE_LANGUAGES = frozenset(
-    {"", "markdown", "md", "mdx", "mdown", "text", "txt", "plain", "plaintext", "rst", "html"}
-)
+logger = logging.getLogger(__name__)
+
+_STOCK_FENCE = make_fence_rule()
 _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+\S")
 _FRONT_MATTER_TITLE = re.compile(r"^title\s*:\s*(.+?)\s*$", re.IGNORECASE)
 # An unquoted key starts with a letter of any script or "_" (`[^\W\d]`), never a digit.
@@ -106,46 +111,6 @@ class _Heading:
 
 
 @dataclass(slots=True, frozen=True)
-class _Fence:
-    """A top-level fenced block; line numbers are 0-based indexes into the document."""
-
-    start: int  # the opening fence line
-    stop: int  # exclusive: the line after the closing marker, or EOF when unclosed
-    marker: str
-    language: str
-    has_info: bool
-    closed: bool
-
-
-@dataclass(slots=True, frozen=True)
-class _Scan:
-    """What one tokenisation pass found from some line to the end of the document."""
-
-    headings: tuple[_Heading, ...]
-    fences: tuple[_Fence, ...]
-
-    @property
-    def trailing_open_fence(self) -> _Fence | None:
-        """An unclosed fence necessarily runs to EOF, so it can only be the last one."""
-        if self.fences and not self.fences[-1].closed:
-            return self.fences[-1]
-        return None
-
-
-@dataclass(slots=True)
-class _ScanBudget:
-    """How many more whole-document tokenisations fence repair may spend."""
-
-    remaining: int
-
-    def spend(self) -> bool:
-        if self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        return True
-
-
-@dataclass(slots=True, frozen=True)
 class _Block:
     """A blank-line-delimited run of text inside one section (character offsets)."""
 
@@ -162,6 +127,17 @@ class MarkdownParser:
             raise ValueError("max_section_chars must be positive")
         self._max_chars = max_section_chars
         self._md = MarkdownIt("commonmark").enable("table")
+        # The chain the stock rule is registered with. Dropping it would stop the fence rule
+        # being consulted inside list items and block quotes, so a fence in a list would be
+        # read as a paragraph and headings inside it would become real headings.
+        self._md.block.ruler.at(
+            "fence", _resilient_fence, {"alt": ["paragraph", "reference", "blockquote", "list"]}
+        )
+        # Passages are extracted with the stock rule. Fence recovery is there to rescue a
+        # document's structure; inside one section an unclosed fence is usually a fenced
+        # sample that oversized-section splitting cut in half, and reinterpreting its
+        # contents as prose would index the template rather than the documentation.
+        self._units_md = MarkdownIt("commonmark").enable("table")
 
     def parse(self, text: str, *, fallback_title: str = "Untitled") -> ParsedDocument:
         """Parse ``text``; never raises for malformed Markdown, only for tokeniser failure."""
@@ -236,128 +212,33 @@ class MarkdownParser:
 
     # ------------------------------------------------------------------ AST walk
 
-    def _tokenize(self, source: str) -> list[Token]:
+    def _tokenize(self, source: str, *, recover_fences: bool = True) -> list[Token]:
         try:
-            return self._md.parse(source)
+            return (self._md if recover_fences else self._units_md).parse(source)
         except Exception as exc:  # markdown-it has no dedicated error type
             raise ASTParseError(f"markdown-it failed to tokenise the document: {exc}") from exc
 
     def _find_headings(self, lines: Sequence[str], body_start: int) -> list[_Heading]:
-        """Collect top-level headings, re-scanning from wherever a broken fence is repaired."""
-        headings: list[_Heading] = []
-        offset = body_start
-        budget = _ScanBudget(MAX_REPAIR_SCANS)
-        while offset < len(lines):
-            scan = self._scan(lines, offset)
-            resume_at = self._resume_point(lines, scan, budget) if budget.spend() else None
-            headings.extend(
-                heading
-                for heading in scan.headings
-                if resume_at is None or heading.line < resume_at
-            )
-            if resume_at is None:
-                break
-            offset = resume_at  # always beyond `offset`: the loop terminates
-        return headings
+        """Collect the document's top-level headings in a single tokenisation pass.
 
-    def _scan(self, lines: Sequence[str], offset: int) -> _Scan:
-        chunk = lines[offset:]
-        tokens = self._tokenize("\n".join(chunk))
+        An unclosed fence no longer hides the rest of the document: ``_resilient_fence``
+        ends it at the first plausible heading while the block parser is running, so the
+        headings after it are simply there.
+        """
+        tokens = self._tokenize("\n".join(lines[body_start:]))
         headings: list[_Heading] = []
-        fences: list[_Fence] = []
         for position, token in enumerate(tokens):
-            if token.level != 0 or token.map is None:
+            if token.level != 0 or token.map is None or token.type != "heading_open":
                 continue
-            first, stop = token.map
-            if token.type == "heading_open":
-                inline = tokens[position + 1] if position + 1 < len(tokens) else None
-                headings.append(
-                    _Heading(
-                        line=offset + first, level=int(token.tag[1:]), title=_inline_text(inline)
-                    )
+            inline = tokens[position + 1] if position + 1 < len(tokens) else None
+            headings.append(
+                _Heading(
+                    line=body_start + token.map[0],
+                    level=int(token.tag[1:]),
+                    title=_inline_text(inline),
                 )
-            elif token.type == "fence":
-                info = token.info.strip()
-                closing = stop - 1
-                fences.append(
-                    _Fence(
-                        start=offset + first,
-                        stop=offset + stop,
-                        marker=token.markup,
-                        language=info.split(maxsplit=1)[0].lower() if info else "",
-                        has_info=bool(info),
-                        closed=closing > first
-                        and closing < len(chunk)
-                        and _is_closing_fence(chunk[closing], token.markup, _MAX_TOP_LEVEL_INDENT),
-                    )
-                )
-        return _Scan(headings=tuple(headings), fences=tuple(fences))
-
-    def _resume_point(self, lines: Sequence[str], scan: _Scan, budget: _ScanBudget) -> int | None:
-        """Line at which a mis-paired fence should be cut and scanning restarted.
-
-        Two symptoms give an unclosed fence away:
-
-        1. A *code* fence contains an opening marker with an info string (a ``bash`` block
-           holding a line `` ```python ``) of the same kind and at least the same length.
-           That line cannot close the outer fence and is not code, so the outer fence was
-           never closed and merely ended at the inner block's closing marker. Fences that
-           exist to show Markdown (``markdown``, ``md``, ``text``, no language ...) are
-           exempt: there an inner fence is the sample itself.
-        2. The document ends inside a fence. If that last fence carries an info string it
-           is the culprit. If it is a bare marker it is more likely the orphaned *closer*
-           of an earlier block whose opener got paired with the wrong marker; the earliest
-           fence whose repair makes the rest of the document well formed is then cut.
-
-        Cutting a fence that merely *looks* closed re-pairs every later marker, which can
-        turn real headings into code. Such a cut is therefore only accepted when it keeps
-        every heading the unrepaired scan already found (``_keeps_headings``), and for
-        symptom 2 only at a line followed by a blank line, as headings are and code
-        comments are not.
-        """
-        for fence in scan.fences:
-            if fence.language in _MARKUP_SAMPLE_LANGUAGES:
-                continue
-            nested = _nested_opener(lines, fence)
-            if nested is not None:
-                resume_at = _recovery_line(lines, fence, nested)
-                if resume_at is not None and self._keeps_headings(lines, scan, resume_at, budget):
-                    return resume_at
-        last = scan.trailing_open_fence
-        if last is None:
-            return None
-        if not last.has_info:
-            for fence in scan.fences[:-1]:
-                if fence.language in _MARKUP_SAMPLE_LANGUAGES:
-                    continue  # a heading inside a Markdown sample is the sample, not a symptom
-                resume_at = _recovery_line(lines, fence, fence.stop - 1, strict=True)
-                if resume_at is not None and self._keeps_headings(
-                    lines, scan, resume_at, budget, must_end_closed=True
-                ):
-                    return resume_at
-        return _recovery_line(lines, last, len(lines))
-
-    def _keeps_headings(
-        self,
-        lines: Sequence[str],
-        scan: _Scan,
-        resume_at: int,
-        budget: _ScanBudget,
-        *,
-        must_end_closed: bool = False,
-    ) -> bool:
-        """True when re-scanning from ``resume_at`` loses no heading ``scan`` reported.
-
-        Each call tokenises the rest of the document, so it draws on ``budget``; with the
-        budget spent the candidate is rejected unchecked (no repair beats a wrong one).
-        """
-        if not budget.spend():
-            return False
-        repaired = self._scan(lines, resume_at)
-        if must_end_closed and repaired.trailing_open_fence is not None:
-            return False
-        found = {heading.line for heading in repaired.headings}
-        return all(heading.line in found for heading in scan.headings if heading.line >= resume_at)
+            )
+        return headings
 
     # ------------------------------------------------------------------ sections
 
@@ -438,7 +319,7 @@ class MarkdownParser:
         meaning without the rest of the table. ``skip_heading`` drops the section's own
         heading (its text already lives in the breadcrumb).
         """
-        tokens = self._tokenize(content)
+        tokens = self._tokenize(content, recover_fences=False)
         units: list[str] = []
         index = 0
         heading_skipped = not skip_heading
@@ -679,42 +560,103 @@ def _opening_fence(line: str) -> tuple[int, str, str] | None:
     return indent, marker, info
 
 
-def _nested_opener(lines: Sequence[str], fence: _Fence) -> int | None:
-    """First line inside ``fence`` that is itself an opening fence with an info string."""
-    last = fence.stop - 1 if fence.closed else fence.stop
-    for index in range(fence.start + 1, min(last, len(lines))):
-        opener = _opening_fence(lines[index])
+def _recovery_line(state: StateBlock, start: int, stop: int, language: str) -> int | None:
+    """First line in ``(start, stop)`` that should be read as a heading again.
+
+    A candidate is an ATX heading preceded by a blank line. A level-1 candidate is only
+    trusted when ``#`` cannot start a comment in the fence's language, because a lone
+    ``# comment`` is far more common inside shell or Python than a heading is.
+    """
+    for index in range(start + 2, min(stop, len(state.bMarks) - 1)):
+        line = state.src[state.bMarks[index] : state.eMarks[index]]
+        previous = state.src[state.bMarks[index - 1] : state.eMarks[index - 1]]
+        match = _ATX_HEADING.match(line)
+        if match is None or previous.strip():
+            continue
+        if len(match.group(1)) >= 2 or language in _HASH_IS_NOT_COMMENT:
+            return index
+    return None
+
+
+# Fences whose purpose is to *show* Markdown: a fence inside them is sample text, and a
+# heading inside them is part of the sample, never a symptom of a broken document.
+_MARKUP_SAMPLE_LANGUAGES = frozenset(
+    {"", "markdown", "md", "mdx", "mdown", "text", "txt", "plain", "plaintext", "rst", "html"}
+)
+
+
+def _has_nested_opener(state: StateBlock, start: int, stop: int, markup: str) -> bool:
+    """True when this fence contains a line that opens a fence of its own.
+
+    ``` ```bash ... ```python ``` pairs the wrong markers: CommonMark reads the inner
+    opener as body text and closes the outer fence somewhere later, hiding whatever lies
+    between. An opener with an info string is the giveaway - a bare marker is ambiguous.
+    """
+    for index in range(start + 1, min(stop, len(state.bMarks) - 1)):
+        opener = _opening_fence(state.src[state.bMarks[index] : state.eMarks[index]])
         if opener is None:
             continue
-        indent, marker, info = opener
+        indent, inner, info = opener
         if (
             indent <= _MAX_TOP_LEVEL_INDENT
             and info
-            and marker[0] == fence.marker[0]
-            and len(marker) >= len(fence.marker)
+            and inner[0] == markup[0]
+            and len(inner) >= len(markup)
         ):
-            return index
-    return None
+            return True
+    return False
 
 
-def _recovery_line(
-    lines: Sequence[str], fence: _Fence, stop: int, *, strict: bool = False
-) -> int | None:
-    """First line in ``(fence.start, stop)`` that should be read as a heading again.
+def _resilient_fence(state: StateBlock, start_line: int, end_line: int, silent: bool) -> bool:
+    """markdown-it's fence rule, but an unclosed fence stops at the next heading.
 
-    A candidate is an ATX heading preceded by a blank line. A level-1 candidate is
-    only trusted when ``#`` cannot start a comment in the fence's language. ``strict``
-    additionally requires a blank line (or EOF) after it.
+    CommonMark runs an unclosed fence to the end of the document, so a single stray
+    ``` in a long runbook deletes every heading after it from the outline - the document
+    becomes one code block and search can never return those sections. Closing the fence
+    at the first plausible heading costs a stray code block at worst; not closing it
+    costs the whole tail of the document.
+
+    A fence that markdown-it closed normally is never touched, so a well-formed document
+    parses exactly as CommonMark says it should.
     """
-    for index in range(fence.start + 2, min(stop, len(lines))):
-        match = _ATX_HEADING.match(lines[index])
-        if match is None or lines[index - 1].strip():
-            continue
-        if strict and index + 1 < len(lines) and lines[index + 1].strip():
-            continue
-        if len(match.group(1)) >= 2 or fence.language in _HASH_IS_NOT_COMMENT:
-            return index
-    return None
+    if not _STOCK_FENCE(state, start_line, end_line, silent):
+        return False
+    if silent:
+        return True
+    # Recovery is a top-level concern: resuming inside a list item or block quote would
+    # hand the block parser a heading that does not belong to that container. A container
+    # rewrites the line start past its own marker ("> ", list indent), so a line whose
+    # parsed start is not its physical start is nested. `parentType` is no help here: it
+    # is "paragraph" for an ordinary fence that ends a paragraph.
+    physical_start = state.src.rfind("\n", 0, state.bMarks[start_line]) + 1
+    if state.blkIndent > 0 or physical_start != state.bMarks[start_line]:
+        return True
+    token = state.tokens[-1]
+    info = token.info.strip()
+    language = info.split(maxsplit=1)[0].lower() if info else ""
+    closing = state.src[state.bMarks[state.line - 1] : state.eMarks[state.line - 1]]
+    if closing.strip().startswith(token.markup[0] * len(token.markup)):
+        # This fence was closed. Its pairing is still suspect when it holds an opener of
+        # its own: ```bash ... ```python pairs the wrong markers, so the closing marker
+        # found somewhere later hides everything in between. Never suspect a fence that is
+        # showing Markdown, where an inner fence is exactly what the sample is about.
+        if language in _MARKUP_SAMPLE_LANGUAGES:
+            return True
+        if not _has_nested_opener(state, start_line, state.line, token.markup):
+            return True
+    cut = _recovery_line(state, start_line, state.line, language)
+    if cut is None or cut <= start_line + 1:
+        return True
+    logger.warning(
+        "Unclosed %s fence at line %d: closing it before the heading at line %d",
+        language or "code",
+        start_line + 1,
+        cut + 1,
+    )
+    token.content = state.getLines(start_line + 1, cut, state.sCount[start_line], True)
+    token.map = [start_line, cut]
+    state.line = cut
+    return True
 
 
 # ---------------------------------------------------------------------- sub-chunker

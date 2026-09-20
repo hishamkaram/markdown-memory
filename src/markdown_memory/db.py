@@ -400,9 +400,7 @@ class Database:
         if self.get_meta(_SECTION_ID_META_KEY) is not None:
             return
         with self.transaction() as tx:
-            if tx.execute(
-                "SELECT 1 FROM meta WHERE key = ?", (_SECTION_ID_META_KEY,)
-            ).fetchone():
+            if tx.execute("SELECT 1 FROM meta WHERE key = ?", (_SECTION_ID_META_KEY,)).fetchone():
                 return  # another process seeded it while this one waited for the lock
             tx.execute(
                 "INSERT INTO meta(key, value) "

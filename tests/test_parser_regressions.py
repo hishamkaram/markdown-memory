@@ -105,12 +105,21 @@ class TestUnclosedFenceBeforeLaterFences:
         assert paths(document) == ["A", "A > B", "A > C"]
         assert "```python\nx = 1\n```" in document.sections[1].content
 
-    def test_bare_later_fences_flip_parity_and_everything_is_recovered(self) -> None:
+    def test_bare_later_fences_flip_parity_and_only_the_open_tail_is_recovered(self) -> None:
+        """An accepted limit: a stray bare marker shifts every pairing after it.
+
+        Each fence here is closed as far as CommonMark is concerned, just not where the
+        author meant, so headings B and C stay inside code. Only the final fence - left
+        open to the end of the document - is positive evidence of damage, and the heading
+        after it is recovered. Overriding a *closed* fence on nothing but a parity count
+        would also cut every well-formed document that shows a heading inside a fence,
+        which is what the tests below guard.
+        """
         text = (
             "# A\n\n```bash\nls\n\n## B\n\nB text\n\n```\nx = 1\n```\n\n## C\n\nmore\n\n"
             "```\ny\n```\n\n## D\n\nend\n"
         )
-        assert paths(parse(text)) == ["A", "A > B", "A > C", "A > D"]
+        assert paths(parse(text)) == ["A", "A > D"]
 
     def test_longer_outer_fence_with_an_inner_example_is_left_alone(self) -> None:
         text = "# Doc\n\n````md\n\n## Example\n\n```python\nx = 1\n```\n\n````\n\n## Real\n"
@@ -325,10 +334,10 @@ class TestRepairCostIsBounded:
         calls = 0
         real = MarkdownParser._tokenize
 
-        def counting(self: MarkdownParser, source: str) -> list[object]:
+        def counting(self: MarkdownParser, source: str, **options: object) -> list[object]:
             nonlocal calls
             calls += 1
-            return real(self, source)  # type: ignore[return-value]
+            return real(self, source, **options)  # type: ignore[arg-type, return-value]
 
         monkeypatch.setattr(MarkdownParser, "_tokenize", counting)
         document = MarkdownParser().parse(self.style_guide(300, language))
@@ -336,8 +345,8 @@ class TestRepairCostIsBounded:
         assert headings[:2] == ["Style Guide", "Style Guide > Rule 0"]
         assert "Style Guide > Rule 299" in headings  # nothing lost, nothing invented
         assert not any("Example heading" in heading for heading in headings)
-        # section building tokenises each section once for its units; repair adds a constant
-        assert calls <= len(document.sections) + 40  # a literal: must not track the constant
+        # The document is tokenised once; each section is tokenised once more for its units.
+        assert calls == len(document.sections) + 1
 
 
 class TestUnitsInsideContainers:
