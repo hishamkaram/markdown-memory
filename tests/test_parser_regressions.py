@@ -21,6 +21,7 @@ from markdown_memory.models import (
 from markdown_memory.parser import (
     DEFAULT_MAX_SECTION_CHARS,
     MAX_UNIT_CHARS,
+    MAX_UNITS_PER_SECTION,
     MarkdownParser,
     _windows,
     join_parts,
@@ -552,6 +553,24 @@ class TestLongBlocksKeepTheirTail:
             assert piece[-1].isspace() or following[0].isspace(), (
                 f"cut mid-word: ...{piece[-20:]!r} | {following[:20]!r}..."
             )
+
+    def test_windows_never_push_a_section_past_the_passage_cap(self) -> None:
+        """Splitting must not trade one silent loss for another.
+
+        63 short list items and a long 64th: the windows of that last item would overrun
+        MAX_UNITS_PER_SECTION if the cap were only checked between blocks.
+        """
+        items = "\n".join(f"- item {n}" for n in range(63)) + "\n- " + "x " * 400
+        units = MarkdownParser().extract_units(f"## List\n\n{items}\n", skip_heading=True)
+        assert len(units) <= MAX_UNITS_PER_SECTION
+
+    def test_a_run_broken_only_by_tabs_breaks_there(self) -> None:
+        """A table of tab-separated columns has no literal space to cut on."""
+        text = "longword\t" * 100
+        pieces = _windows(text)
+        assert "".join(pieces) == text
+        for piece, following in zip(pieces, pieces[1:], strict=False):
+            assert piece[-1].isspace() or following[0].isspace()
 
     def test_a_run_with_no_boundary_is_still_split_rather_than_lost(self) -> None:
         """An unbroken 2,000-character token has nowhere to break; it must not vanish."""

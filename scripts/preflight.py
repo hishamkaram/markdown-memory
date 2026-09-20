@@ -80,7 +80,14 @@ def _text_of(message: object) -> str:
 
 
 def read_session(path: Path) -> tuple[list[miner.Call], dict[int, str]]:
-    """Every tool call in a transcript, plus the user request in force at each one."""
+    """Every tool call in a transcript, plus the user request in force at each one.
+
+    Calls and requests are counted in the same pass, in the same order the miner uses,
+    because two loops with slightly different rules drift: the miner takes a tool call
+    from any message, so counting only assistant messages here would shift every request
+    by one and attribute each query to the wrong task - silently, and worse than not
+    attributing it at all.
+    """
     calls = miner.calls_in(path)
     requests: dict[int, str] = {}
     try:
@@ -99,15 +106,15 @@ def read_session(path: Path) -> tuple[list[miner.Call], dict[int, str]]:
         message = record.get("message")
         if not isinstance(message, dict):
             continue
+        content = message.get("content")
         if message.get("role") == "user" and record.get("type") != "tool_result":
             text = _text_of(message)
             if text and not text.startswith("<"):  # skip system-injected blocks
                 recent.append(text)
                 recent[:] = recent[-CONTEXT_TURNS:]
+        if not isinstance(content, list):
             continue
-        if message.get("role") != "assistant":
-            continue
-        for part in message.get("content") or []:
+        for part in content:
             if isinstance(part, dict) and part.get("type") == "tool_use":
                 requests[index] = recent[-1][:CONTEXT_CHARS] if recent else ""
                 index += 1

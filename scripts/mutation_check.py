@@ -381,9 +381,37 @@ MUTATIONS = (
     Mutation(
         name="units: cut a window mid-word instead of at a boundary",
         module="parser.py",
-        old='        cut = max(head.rfind("\\n"), head.rfind(". "), head.rfind(" "))',
+        old='        cut = max(head.rfind("\\n"), head.rfind(". "), _last_space(head))',
         new="        cut = MAX_UNIT_CHARS",
         tests="test_a_window_does_not_end_mid_word",
+    ),
+    Mutation(
+        name="preflight: count requests only in assistant turns, shifting every task",
+        module="preflight.py",
+        area="scripts",
+        old="        if not isinstance(content, list):\n            continue",
+        new=(
+            '        if not isinstance(content, list) or message.get("role") != "assistant":\n'
+            "            continue"
+        ),
+        tests="test_a_tool_call_outside_an_assistant_turn_does_not_shift_attribution",
+    ),
+    Mutation(
+        name="units: let a long final block overrun the passage cap",
+        module="parser.py",
+        old=(
+            "                if len(passages) >= MAX_UNITS_PER_SECTION:\n"
+            "                    return tuple(passages)"
+        ),
+        new="                if False:\n                    return tuple(passages)",
+        tests="test_windows_never_push_a_section_past_the_passage_cap",
+    ),
+    Mutation(
+        name="units: break only on a literal space, never on a tab",
+        module="parser.py",
+        old="        if text[index].isspace():",
+        new='        if text[index] == " ":',
+        tests="test_a_run_broken_only_by_tabs_breaks_there",
     ),
 )
 

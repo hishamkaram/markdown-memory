@@ -98,6 +98,50 @@ class TestCollecting:
         record = preflight.collect(tmp_path, None)[0]
         assert record.occurrences[0].task == "third task"
 
+    def test_a_tool_call_outside_an_assistant_turn_does_not_shift_attribution(
+        self, preflight: Any, tmp_path: Path
+    ) -> None:
+        """The miner counts a tool call in any message; this must count the same ones.
+
+        Counting only assistant turns here shifted every request by one, so each query
+        was filed under someone else's task - silently, which is worse than filing it
+        under nothing.
+        """
+        import json
+
+        path = tmp_path / "p" / "a.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"message": {"role": "user", "content": [{"type": "text", "text": "the real task"}]}},
+            {
+                "message": {
+                    "role": "system",
+                    "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {}}],
+                }
+            },
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "2",
+                            "name": SEARCH,
+                            "input": {"query": "retry policy"},
+                        }
+                    ],
+                }
+            },
+        ]
+        path.write_text(
+            "\n".join(
+                json.dumps(row | {"sessionId": "s", "cwd": "/p", "timestamp": "t"}) for row in rows
+            ),
+            encoding="utf-8",
+        )
+        record = preflight.collect(tmp_path, None)[0]
+        assert record.occurrences[0].task == "the real task"
+
     def test_what_the_agent_did_next_is_recorded(self, preflight: Any, tmp_path: Path) -> None:
         session(
             tmp_path / "p" / "a.jsonl",

@@ -343,9 +343,9 @@ class MarkdownParser:
             index = end + 1
         passages: list[str] = []
         for unit in units:
-            if len(passages) >= MAX_UNITS_PER_SECTION:
-                break
             for window in _windows(unit):
+                if len(passages) >= MAX_UNITS_PER_SECTION:
+                    return tuple(passages)
                 cleaned = _WHITESPACE.sub(" ", window.replace("|", " ")).strip()
                 if cleaned:
                     passages.append(cleaned)
@@ -353,6 +353,15 @@ class MarkdownParser:
 
 
 # ---------------------------------------------------------------------- helpers
+
+
+def _last_space(text: str) -> int:
+    """Index just past the last whitespace run, or -1. Any whitespace, not just a space:
+    a line of tab-separated columns has no literal space to break on."""
+    for index in range(len(text) - 1, -1, -1):
+        if text[index].isspace():
+            return index
+    return -1
 
 
 def _windows(text: str) -> list[str]:
@@ -374,7 +383,7 @@ def _windows(text: str) -> list[str]:
     remaining = text
     while len(remaining) > MAX_UNIT_CHARS:
         head = remaining[:MAX_UNIT_CHARS]
-        cut = max(head.rfind("\n"), head.rfind(". "), head.rfind(" "))
+        cut = max(head.rfind("\n"), head.rfind(". "), _last_space(head))
         # A cut in the first half would make a window mostly empty; a hard cut keeps the
         # windows even, and no character is lost either way.
         if cut < MAX_UNIT_CHARS // 2:

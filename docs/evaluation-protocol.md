@@ -63,6 +63,22 @@ does not exist. Returning nothing is the correct response; a confident wrong sec
 failure. Real use contains these, and a benchmark without them measures a world where
 every question has an answer.
 
+Recall@5 cannot express that, and saying so afterwards would be too late: on a no-answer
+query, a system that abstains and a system that returns five irrelevant sections both
+score zero. So these queries are scored by their own metric, declared here:
+
+- **abstention accuracy** = the fraction of no-answer queries answered with an empty
+  result. Reported separately from Recall@5 and never averaged into it.
+- **Margin: -10pp**, paired and bootstrapped the same way. Wider than the Recall@5 margin
+  because the no-answer stratum is 20-40 queries, not 400, and a tighter number would be
+  a claim the sample cannot support.
+- **nDCG convention** for a query with no relevant section: 1.0 when nothing is returned,
+  0.0 otherwise. Without this, nDCG is undefined on exactly the queries that need it.
+- A regression here does **not** fail the gate on its own - the sample is too small - but
+  it is reported beside the verdict, and a change that improves Recall@5 while making the
+  system answer confidently where it should stay silent is a trade-off to argue, not a
+  pass.
+
 **Strata.** Heading-derived queries are **one** stratum, not the substrate: BM25 weights
 headings 5.0 and every passage vector carries its breadcrumb, so a set generated from
 heading paths flatters the exact heuristics under test. The remaining families come from
