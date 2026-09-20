@@ -61,6 +61,32 @@ Claude Desktop has no meaningful working directory, so set the root explicitly:
 }
 ```
 
+### One index per project
+
+Drop a `.mcp.json` like this into any repository whose documentation you want searchable.
+Each project then owns its index: its own database inside the project, its own exclusions,
+and no chance of another project's sections appearing in its results.
+
+```json
+{
+  "mcpServers": {
+    "markdown-memory": {
+      "command": "uv",
+      "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
+      "env": {
+        "MARKDOWN_MEMORY_DOCS_DIR": "${workspaceFolder}",
+        "MARKDOWN_MEMORY_DB": "${workspaceFolder}/.markdown-memory/index.db",
+        "MARKDOWN_MEMORY_EXCLUDE": "vendor,third_party,tests/fixtures"
+      }
+    }
+  }
+}
+```
+
+Add `.markdown-memory/` to that repository's `.gitignore`: the index is a cache of the
+Markdown files and is rebuilt from them. This repository ships exactly such a file, which
+indexes its own six documentation files and keeps the vendored evaluation corpus out.
+
 ## Configuration
 
 | Environment variable | CLI flag | Default |
@@ -68,11 +94,18 @@ Claude Desktop has no meaningful working directory, so set the root explicitly:
 | `MARKDOWN_MEMORY_DOCS_DIR` | `--docs-dir` | current working directory |
 | `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/index.db` (`~/.local/share/...`) |
 | `MARKDOWN_MEMORY_MODEL_CACHE` | - | `$XDG_CACHE_HOME/markdown-memory/models` (`~/.cache/...`) |
+| `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | nothing excluded |
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 
-Documents are stored under their absolute path, so one database can hold several
-projects. Switching to a different model discards the whole index (vectors from two
+`MARKDOWN_MEMORY_EXCLUDE` takes glob patterns, comma or colon separated, matched against
+each path relative to the documentation root (`vendor`, `tests/fixtures`, `**/generated/*`).
+A matching directory is pruned, so its subtree costs nothing. Without it, a repository that
+keeps fixtures, vendored documentation or a test corpus in-tree indexes them as if they
+were its own docs.
+
+Documents are stored under their absolute path, so one database *can* hold several
+projects - though one index per project is usually what you want. Switching to a different model discards the whole index (vectors from two
 models cannot be compared); `index_directory` reports that and every root must be
 indexed again.
 

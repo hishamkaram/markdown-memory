@@ -24,7 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 import markdown_memory.indexer as indexer_module
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
-from markdown_memory.indexer import Indexer
+from markdown_memory.indexer import Indexer, iter_markdown_files
 from markdown_memory.models import (
     SectionVectors,
 )
@@ -669,3 +669,76 @@ class TestMigratingARealOldDatabase:
             assert database.count_rows("documents") == 2
             assert database.count_rows("sections") == 4
             assert database.pending_notices() == {}
+
+
+class TestExcludedPaths:
+    """A repository's fixtures and vendored docs are not its documentation.
+
+    Found by pointing the server at this repository: it would have indexed the 1,682
+    sections of vendored evaluation corpus under scripts/eval_data as if they were the
+    project's own docs.
+    """
+
+    @staticmethod
+    def tree(root: Path) -> None:
+        (root / "guide.md").write_text("# Guide\n\nreal documentation\n")
+        for relative in ("fixtures/sample.md", "vendor/upstream/readme.md", "notes/keep.md"):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {path.stem}\n\nbody of {relative}\n")
+
+    def indexed(self, db: Database, embedder: FakeEmbedder, root: Path, *exclude: str) -> set[str]:
+        Indexer(db, embedder, exclude=exclude).index_directory(root)
+        return {str(Path(document.file_path).relative_to(root)) for document in db.list_documents()}
+
+    def test_nothing_is_excluded_by_default(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        self.tree(tmp_path)
+        assert self.indexed(db, fake_embedder, tmp_path) == {
+            "guide.md",
+            "fixtures/sample.md",
+            "vendor/upstream/readme.md",
+            "notes/keep.md",
+        }
+
+    @pytest.mark.parametrize(
+        ("patterns", "expected"),
+        [
+            (("fixtures",), {"guide.md", "vendor/upstream/readme.md", "notes/keep.md"}),
+            (("fixtures/*",), {"guide.md", "vendor/upstream/readme.md", "notes/keep.md"}),
+            (("vendor",), {"guide.md", "fixtures/sample.md", "notes/keep.md"}),
+            (("fixtures", "vendor"), {"guide.md", "notes/keep.md"}),
+            (("guide.md",), {"fixtures/sample.md", "vendor/upstream/readme.md", "notes/keep.md"}),
+            (("*/sample.md",), {"guide.md", "vendor/upstream/readme.md", "notes/keep.md"}),
+        ],
+    )
+    def test_patterns_match_paths_relative_to_the_docs_root(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        patterns: tuple[str, ...],
+        expected: set[str],
+    ) -> None:
+        self.tree(tmp_path)
+        assert self.indexed(db, fake_embedder, tmp_path, *patterns) == expected
+
+    def test_an_excluded_directory_is_never_walked(self, tmp_path: Path) -> None:
+        self.tree(tmp_path)
+        walked = list(iter_markdown_files(tmp_path, None, ("vendor",)))
+        assert all("vendor" not in path.parts for path in walked)
+
+    def test_the_eval_corpus_can_be_kept_out_of_this_repository(self, db: Database) -> None:
+        # The case that prompted the feature, run against the real tree.
+        root = Path(__file__).parent.parent
+        found = list(iter_markdown_files(root, None, ("scripts/eval_data", ".venv")))
+        assert not any("eval_data" in path.parts for path in found)
+        assert any(path.name == "CLAUDE.md" for path in found)
+
+    def test_configuration_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", " fixtures , vendor/** :notes ")
+        monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(tmp_path))
+        assert ServerConfig.from_env().exclude == ("fixtures", "vendor/**", "notes")

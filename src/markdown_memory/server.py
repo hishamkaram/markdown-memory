@@ -36,6 +36,7 @@ from markdown_memory.indexer import (
     FastEmbedEmbedder,
     Indexer,
     create_embedder,
+    parse_exclusions,
 )
 from markdown_memory.models import (
     PATH_SEPARATOR,
@@ -58,6 +59,7 @@ ENV_DOCS_DIR = "MARKDOWN_MEMORY_DOCS_DIR"
 ENV_MODEL_CACHE = "MARKDOWN_MEMORY_MODEL_CACHE"
 ENV_EMBEDDER = "MARKDOWN_MEMORY_EMBEDDER"
 ENV_LOG_LEVEL = "MARKDOWN_MEMORY_LOG_LEVEL"
+ENV_EXCLUDE = "MARKDOWN_MEMORY_EXCLUDE"
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -85,6 +87,9 @@ class ServerConfig:
     docs_dir: Path
     embedder: str = DEFAULT_EMBEDDER
     model_cache_dir: Path | None = None
+    # Glob patterns, relative to the docs root, that indexing must not descend into: a
+    # repository's own fixtures, vendored documentation or test corpus are not its docs.
+    exclude: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -104,6 +109,7 @@ class ServerConfig:
                 if model_cache
                 else _xdg_dir("XDG_CACHE_HOME", ".cache") / "markdown-memory" / "models"
             ),
+            exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
         )
 
 
@@ -116,7 +122,7 @@ class MarkdownMemoryService:
             config.embedder, cache_dir=config.model_cache_dir
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
-        self._indexer = Indexer(self._db, self._embedder)
+        self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
         self._searcher = HybridSearcher(self._db, self._embedder)
 
     @property
@@ -499,6 +505,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--docs-dir", type=Path, help=f"Default docs root (env {ENV_DOCS_DIR})")
     parser.add_argument("--log-level", help=f"Logging level (env {ENV_LOG_LEVEL})")
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=f"Skip paths matching this glob, relative to the docs root; repeatable "
+        f"(env {ENV_EXCLUDE}, comma or colon separated)",
+    )
+    parser.add_argument(
         "--embedder",
         choices=("embeddinggemma", "bge-small"),
         help=f"Embedding model preset (env {ENV_EMBEDDER}; default {DEFAULT_EMBEDDER})",
@@ -514,6 +528,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         docs_dir=docs_dir.expanduser() if docs_dir else base.docs_dir,
         embedder=arguments.embedder or base.embedder,
         model_cache_dir=base.model_cache_dir,
+        exclude=tuple(arguments.exclude) or base.exclude,
     )
     try:
         service = MarkdownMemoryService(config)

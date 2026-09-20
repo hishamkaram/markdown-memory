@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -327,18 +329,54 @@ def hash_bytes(data: bytes) -> str:
 
 
 def iter_markdown_files(
-    directory: Path, on_error: Callable[[OSError], None] | None = None
+    directory: Path,
+    on_error: Callable[[OSError], None] | None = None,
+    exclude: Sequence[str] = (),
 ) -> Iterator[Path]:
     """Yield Markdown files beneath ``directory`` in a stable order, pruning vendored trees.
 
     ``on_error`` receives the ``OSError`` for every sub-directory that cannot be listed
     (``os.walk`` would otherwise skip it silently).
+
+    ``exclude`` holds glob patterns matched against each path *relative to* ``directory``
+    (``scripts/eval_data/*``, ``**/vendor/**``, ``CHANGELOG.md``). A repository that keeps
+    fixtures, vendored documentation or a test corpus in-tree would otherwise index them
+    as if they were its own documentation. A matching directory is pruned, so its subtree
+    costs nothing to skip.
     """
     for root, dirnames, filenames in os.walk(directory, followlinks=False, onerror=on_error):
-        dirnames[:] = sorted(name for name in dirnames if name not in _SKIPPED_DIRECTORIES)
+        here = Path(root)
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _SKIPPED_DIRECTORIES
+            and not _is_excluded(here / name, directory, exclude)
+        )
         for filename in sorted(filenames):
-            if Path(filename).suffix.lower() in MARKDOWN_SUFFIXES:
-                yield Path(root, filename)
+            path = here / filename
+            if path.suffix.lower() in MARKDOWN_SUFFIXES and not _is_excluded(
+                path, directory, exclude
+            ):
+                yield path
+
+
+def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
+    """True when ``path`` matches a pattern, tested against its path relative to ``root``."""
+    if not patterns:
+        return False
+    try:
+        relative = path.relative_to(root)
+    except ValueError:  # outside the root: nothing to match against
+        return False
+    text = relative.as_posix()
+    return any(
+        fnmatch(text, pattern) or fnmatch(text, pattern.rstrip("/") + "/*") for pattern in patterns
+    )
+
+
+def parse_exclusions(value: str) -> tuple[str, ...]:
+    """Split a configured exclusion list: commas or colons, blanks dropped."""
+    return tuple(part.strip() for part in re.split(r"[,:]", value) if part.strip())
 
 
 def _printable(path: str) -> str:
@@ -358,6 +396,7 @@ class Indexer:
         db: Database,
         embedder: Embedder,
         parser: MarkdownParser | None = None,
+        exclude: Sequence[str] = (),
     ) -> None:
         if embedder.dimension != db.embedding_dim:
             raise IndexingError(
@@ -367,6 +406,7 @@ class Indexer:
         self._db = db
         self._embedder = embedder
         self._parser = parser or MarkdownParser()
+        self._exclude = tuple(exclude)
         self._run_lock = threading.Lock()
 
     def index_directory(self, directory: Path) -> IndexReport:
@@ -424,7 +464,7 @@ class Indexer:
                     )
                 )
 
-            for path in iter_markdown_files(root, record_unreadable):
+            for path in iter_markdown_files(root, record_unreadable, self._exclude):
                 file_path = str(path)
                 seen.add(file_path)
                 try:
