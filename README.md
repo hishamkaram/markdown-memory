@@ -118,9 +118,11 @@ Without it, a repository that keeps fixtures, vendored documentation or a test c
 in-tree indexes them as if they were its own docs.
 
 Documents are stored under their absolute path, so one database *can* hold several
-projects - though one index per project is usually what you want. Switching to a different model discards the whole index (vectors from two
-models cannot be compared); `index_directory` reports that and every root must be
-indexed again.
+projects - but **search only ever answers from the root this server was started with**,
+and `list_documents` shows only that root. A second project in the same file is indexed,
+invisible, and paying for itself in disk; give each project its own database. Switching to
+a different model discards the whole index (vectors from two models cannot be compared);
+`index_directory` reports that and every root must be indexed again.
 
 ### Embedding models
 
