@@ -40,37 +40,37 @@
   "embeddinggemma": {
     "dev/identifier": {
       "any_valid_top1": 1.0,
-      "median_ms": 317.4959,
+      "median_ms": 758.9403,
       "ndcg5": 1.0,
-      "p95_ms": 467.5774,
+      "p95_ms": 996.6003,
       "top1": 1.0,
       "top3": 1.0,
       "top5": 1.0
     },
     "dev/paraphrase": {
-      "any_valid_top1": 0.7941,
-      "median_ms": 345.2338,
-      "ndcg5": 0.8319,
-      "p95_ms": 502.0669,
+      "any_valid_top1": 0.8235,
+      "median_ms": 570.1536,
+      "ndcg5": 0.8439,
+      "p95_ms": 948.9584,
       "top1": 0.7059,
       "top3": 0.8824,
       "top5": 0.9118
     },
     "held_out/identifier": {
       "any_valid_top1": 1.0,
-      "median_ms": 319.715,
+      "median_ms": 678.0266,
       "ndcg5": 1.0,
-      "p95_ms": 383.4228,
+      "p95_ms": 997.7282,
       "top1": 1.0,
       "top3": 1.0,
       "top5": 1.0
     },
     "held_out/paraphrase": {
-      "any_valid_top1": 0.9118,
-      "median_ms": 407.8564,
-      "ndcg5": 0.934,
-      "p95_ms": 788.6401,
-      "top1": 0.8824,
+      "any_valid_top1": 0.8824,
+      "median_ms": 754.5136,
+      "ndcg5": 0.924,
+      "p95_ms": 1905.5487,
+      "top1": 0.8529,
       "top3": 0.9706,
       "top5": 0.9706
     }

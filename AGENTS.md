@@ -43,7 +43,7 @@ Work in this order:
    `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
    `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
-   Top-1 ~88%). When `index_status.coverage` is `"unknown"`, the documentation you just
+   Top-1 ~85%). When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it.
 2. **`get_document_outline(file_path)`** - only when you need the structure of a document:

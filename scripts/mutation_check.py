@@ -75,11 +75,19 @@ MUTATIONS = (
         tests="test_a_scan_after_a_retarget_stays_with_the_root_it_serves",
     ),
     Mutation(
-        name="config: keep the launcher's database when --docs-dir names another project",
+        name="config: keep the launcher's database when another project's root is named",
         module="server.py",
-        old="            else _project_database(docs_dir)",
-        new="            else base.db_path",
-        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database",
+        old=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else _project_database(root)"
+        ),
+        new=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else base.db_path"
+        ),
+        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database "
+        "or test_naming_a_directory_rekeys_the_database "
+        "or test_the_script_resolves_its_configuration_the_same_way",
     ),
     Mutation(
         name="config: put every project's index back in one shared database",
@@ -192,6 +200,31 @@ MUTATIONS = (
         old="    if stored != expected_fingerprint:\n        raise StaleCacheError(",
         new="    if False:\n        raise StaleCacheError(",
         tests="test_a_cache_built_from_another_corpus_is_refused",
+    ),
+    Mutation(
+        name="diagram: print a token count the files stopped matching",
+        module="make_diagram.py",
+        area="scripts",
+        old='    ("README.md", 5424),',
+        new='    ("README.md", 5062),',
+        tests="test_every_file_on_the_diagram_still_costs_what_it_says "
+        "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
+    ),
+    Mutation(
+        name="diagram: let a machine with no browser report a half-redrawn picture as done",
+        module="make_diagram.py",
+        area="scripts",
+        old="    if missing:",
+        new="    if False:",
+        tests="test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning",
+    ),
+    Mutation(
+        name="diagram: stop drawing the token count beside each returned section",
+        module="make_diagram.py",
+        area="scripts",
+        old='        o.append(text(776, y + 10, f"{tokens}", fill=c["muted"], size=11, anchor="end", font=MONO))\n',  # noqa: E501
+        new="",
+        tests="test_the_committed_drawing_is_the_one_the_generator_draws",
     ),
     Mutation(
         name="cache: fingerprint the passages but not the section around them",
@@ -820,6 +853,24 @@ MUTATIONS = (
         old="        verified = certificate is not None and bool(certificate[0]) and whole",
         new="        verified = (certificate is None or bool(certificate[0])) and whole",
         tests="test_a_root_nobody_indexed_does_not_claim_to_be_whole",
+    ),
+    Mutation(
+        name="config: overrule a database that was configured on purpose",
+        module="server.py",
+        old=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else _project_database(root)"
+        ),
+        new=("            configured_db if configured_db else _project_database(root)"),
+        tests="test_an_explicitly_configured_database_still_wins",
+    ),
+    Mutation(
+        name="config: index the trees the operator excluded",
+        module="server.py",
+        old="        exclude=tuple(exclude) or base.exclude,",
+        new="        exclude=tuple(exclude),",
+        tests="test_exclusions_are_inherited_rather_than_dropped "
+        "or test_the_script_resolves_its_configuration_the_same_way",
     ),
 )
 

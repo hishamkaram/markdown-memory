@@ -41,7 +41,7 @@ CORPUS = DATA / "corpus"
 BASELINE = DATA / "baseline.json"
 ACCURACY_FIELDS = ("top1", "top3", "top5", "any_valid_top1")
 PRIMARY_GRADE = 3
-# Floors for the default embedder on the held-out set (measured: 88% / 97% / 100%).
+# Floors for the default embedder on the held-out set (measured: 85% / 97% / 100%).
 FLOOR_PARAPHRASE_TOP1 = 0.80
 FLOOR_PARAPHRASE_TOP5 = 0.90
 FLOOR_IDENTIFIER_TOP1 = 1.00
@@ -273,7 +273,7 @@ def main() -> int:
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="discard the cached index and build it again (~25 min on the v2 corpus)",
+        help="discard the cached index and build it again (about a minute on this corpus)",
     )
     parser.add_argument(
         "--update-baseline",

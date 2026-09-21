@@ -1,7 +1,8 @@
 """Reuse one evaluation index across runs, and keep two evaluations off the same machine.
 
-Building the index for the v2 corpus costs ~25 minutes and 1.6 GB of resident memory;
-the queries it answers take seconds. This module keeps the built database under
+Building the index costs about a minute on the 54-section corpus the gate scores, and
+~25 minutes and 1.6 GB of resident memory on the v2 corpus; the queries it answers take
+seconds. This module keeps the built database under
 ``$XDG_CACHE_HOME/markdown-memory/eval/`` keyed on everything that can change a stored
 vector, so a repeat run of the gate is index-free.
 

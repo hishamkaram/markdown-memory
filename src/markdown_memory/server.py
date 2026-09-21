@@ -155,31 +155,49 @@ class ServerConfig:
         )
 
 
-def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
-    """Environment configuration with the command line laid over it.
+def resolve_config(
+    *,
+    db: Path | None = None,
+    docs_dir: Path | None = None,
+    embedder: str | None = None,
+    exclude: Sequence[str] = (),
+) -> ServerConfig:
+    """Environment configuration with explicit overrides laid over it.
 
-    `--docs-dir` names a different documentation root, and the default database is keyed on
-    that root, so it has to re-key: taking `ServerConfig.from_env().db_path` as the fallback
-    reads a path derived from the *environment's* root, and two servers launched from one
-    directory with different `--docs-dir` would land in the launcher's single database -
-    exactly the cross-project leak keying was added to close. An explicitly configured
-    database still wins, from the flag or the environment, in that order.
+    Naming a different documentation root re-keys the database, because the default is
+    keyed on that root: taking `ServerConfig.from_env().db_path` as the fallback reads a
+    path derived from the *environment's* root, and two callers pointed at different roots
+    from one directory would land in the launcher's single database - exactly the
+    cross-project leak keying was added to close. An explicitly configured database still
+    wins, from the argument or the environment, in that order.
+
+    Every entry point that takes overrides resolves them here - the server's own flags
+    and the scripts alike - so that precedence is written once and cannot drift between
+    them. The paths that accept none (the in-process service, `eval_retrieval.py`) go
+    straight to `ServerConfig.from_env`, which is the same answer with nothing laid over
+    it.
     """
     base = ServerConfig.from_env()
-    docs_dir = arguments.docs_dir.expanduser() if arguments.docs_dir else base.docs_dir
+    root = docs_dir.expanduser() if docs_dir else base.docs_dir
     configured_db = _configured_path(ENV_DB_PATH, _project_root())
     return ServerConfig(
         db_path=(
-            arguments.db.expanduser()
-            if arguments.db
-            else configured_db
-            if configured_db
-            else _project_database(docs_dir)
+            db.expanduser() if db else configured_db if configured_db else _project_database(root)
         ),
-        docs_dir=docs_dir,
-        embedder=arguments.embedder or base.embedder,
+        docs_dir=root,
+        embedder=embedder or base.embedder,
         model_cache_dir=base.model_cache_dir,
-        exclude=tuple(arguments.exclude) or base.exclude,
+        exclude=tuple(exclude) or base.exclude,
+    )
+
+
+def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
+    """The command line laid over the environment."""
+    return resolve_config(
+        db=arguments.db,
+        docs_dir=arguments.docs_dir,
+        embedder=arguments.embedder,
+        exclude=arguments.exclude,
     )
 
 
@@ -254,8 +272,9 @@ class MarkdownMemoryService:
         return self._indexer.index_directory(self._resolve_directory(directory))
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
-        # An empty argument means "this project", not "everything this database holds":
-        # the default database is shared by every project on the machine.
+        # An empty argument means "this project", not "everything this database holds".
+        # The default database is per-root now, but a configured MARKDOWN_MEMORY_DB can
+        # still be shared, and a database outlives the root it was first keyed to.
         scope = self._resolve_directory(directory or None)
         return self._db.list_documents(str(self._within_root(scope, IndexingError)))
 
@@ -696,7 +715,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=[],
         metavar="GLOB",
         help=f"Skip paths matching this glob, relative to the docs root; repeatable "
-        f"(env {ENV_EXCLUDE}, comma or colon separated)",
+        f"(env {ENV_EXCLUDE}, comma separated)",
     )
     parser.add_argument(
         "--embedder",

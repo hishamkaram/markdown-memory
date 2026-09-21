@@ -25,7 +25,7 @@ from markdown_memory.models import (
     IndexReport,
     SearchResult,
 )
-from markdown_memory.server import MarkdownMemoryService, ServerConfig
+from markdown_memory.server import MarkdownMemoryService, ServerConfig, resolve_config
 
 
 class TestEvalScript:
@@ -500,3 +500,86 @@ class TestEveryMutationStillPointsAtCode:
             and f"class {name}" not in suite
         ]
         assert missing == [], "these mutations select no test: " + "; ".join(missing)
+
+
+class TestTheReindexScriptTargetsTheDirectoryItWasGiven:
+    """It verified one project's index while writing to another's.
+
+    `ServerConfig.from_env()` derives the default database from the *environment's*
+    documentation root. The script replaced `docs_dir` with the directory on its command
+    line and kept that `db_path`, so `reindex_docs.py /other/docs` re-indexed one tree into
+    another tree's database - the exact failure its own skill warns about ("use the same
+    database the MCP server uses, or you will verify a different index than the one being
+    searched"), committed by the tool meant to prevent it.
+    """
+
+    @pytest.fixture
+    def roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+        alpha, beta = tmp_path / "alpha" / "docs", tmp_path / "beta" / "docs"
+        for root in (alpha, beta):
+            root.mkdir(parents=True)
+        monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(alpha))
+        monkeypatch.delenv("MARKDOWN_MEMORY_DB", raising=False)
+        monkeypatch.delenv("MARKDOWN_MEMORY_EXCLUDE", raising=False)
+        return alpha, beta
+
+    def test_naming_a_directory_rekeys_the_database(self, roots: tuple[Path, Path]) -> None:
+        alpha, beta = roots
+        assert resolve_config(docs_dir=beta).db_path != ServerConfig.from_env().db_path
+        assert resolve_config(docs_dir=alpha).db_path == ServerConfig.from_env().db_path
+
+    def test_an_explicitly_configured_database_still_wins(
+        self, roots: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-keying must not overrule a database someone named on purpose."""
+        _, beta = roots
+        chosen = tmp_path / "chosen.db"
+        monkeypatch.setenv("MARKDOWN_MEMORY_DB", str(chosen))
+        assert resolve_config(docs_dir=beta).db_path == chosen
+        flag = tmp_path / "flag.db"
+        assert resolve_config(db=flag, docs_dir=beta).db_path == flag
+
+    def test_exclusions_are_inherited_rather_than_dropped(
+        self, roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A forced re-index used to pull in trees the server itself never indexes.
+
+        The script built its own `ServerConfig` without `exclude`, which defaults to empty,
+        so it wrote documents the running server would never have written - and then
+        pronounced that index verified.
+        """
+        _, beta = roots
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", "vendor,tests/fixtures")
+        assert resolve_config(docs_dir=beta).exclude == ("vendor", "tests/fixtures")
+
+    def test_the_script_resolves_its_configuration_the_same_way(
+        self, roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The script under test, not a re-statement of it: run `main` with the model stubbed."""
+        import importlib.util
+
+        _, beta = roots
+        monkeypatch.setenv("MARKDOWN_MEMORY_EXCLUDE", "vendor")
+        path = Path(__file__).parent.parent / "scripts" / "reindex_docs.py"
+        spec = importlib.util.spec_from_file_location("reindex_docs_under_test", path)
+        assert spec is not None and spec.loader is not None
+        script = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = script
+        spec.loader.exec_module(script)
+
+        seen: list[ServerConfig] = []
+
+        class _StopError(Exception):
+            pass
+
+        def _capture(config: ServerConfig) -> object:
+            seen.append(config)
+            raise _StopError
+
+        monkeypatch.setattr(script, "MarkdownMemoryService", _capture)
+        monkeypatch.setattr(sys, "argv", ["reindex_docs.py", str(beta)])
+        with pytest.raises(_StopError):
+            script.main()
+        assert seen[0].db_path == resolve_config(docs_dir=beta).db_path
+        assert seen[0].db_path != ServerConfig.from_env().db_path
+        assert seen[0].exclude == ("vendor",)

@@ -53,6 +53,10 @@
       "doc/book/src/commands/report-commands.md": "ceff5e075485b5b7"
     },
     "kind": "cli-reference",
+    "legal": {
+      "LICENSE-APACHE": "8ada45cd9f843acf",
+      "LICENSE-MIT": "23f18e03dc49df91"
+    },
     "licence": "MIT OR Apache-2.0",
     "note": "Man-page style command reference: SYNOPSIS/OPTIONS sections that repeat across dozens of commands, which is exactly the near-duplicate case. The reference chapter is left out to stop one source dominating the corpus.",
     "repo": "rust-lang/cargo"
@@ -66,6 +70,10 @@
       "spec.md": "29c51d6f55b345c5"
     },
     "kind": "config-reference",
+    "legal": {
+      "LICENSE": "df2620afda09a963",
+      "NOTICE": "b81015606d10bb86"
+    },
     "licence": "Apache-2.0",
     "note": "Deeply nested declarative keys whose meaning is inherited from parents - the case that flatters passage vectors least.",
     "repo": "compose-spec/compose-spec"
@@ -101,6 +109,9 @@
       "docs/working-with-us.md": "3db5a34c179a32f8"
     },
     "kind": "cli-guide",
+    "legal": {
+      "LICENSE": "6da4adc42392c848"
+    },
     "licence": "MIT",
     "note": "Task-oriented guides and environment variables.",
     "repo": "cli/cli"
@@ -126,6 +137,10 @@
       "docs/querying/remote_read_api.md": "3559f828ebf46d43"
     },
     "kind": "config-reference",
+    "legal": {
+      "LICENSE": "c71d239df91726fc",
+      "NOTICE": "ac9e304462a58a4d"
+    },
     "licence": "Apache-2.0",
     "note": "Configuration blocks and query-language reference: long YAML samples with '#' comments inside fences, which must never be read as headings.",
     "repo": "prometheus/prometheus"
@@ -138,6 +153,11 @@
       "GUIDE.md": "156337b59d9813be"
     },
     "kind": "cli-guide",
+    "legal": {
+      "COPYING": "01c266bced4a434d",
+      "LICENSE-MIT": "0f96a83840e146e4",
+      "UNLICENSE": "7e12e5df4bae12cb"
+    },
     "licence": "Unlicense OR MIT",
     "note": "Dense flag prose and a changelog; the flags collide (-C, --context).",
     "repo": "BurntSushi/ripgrep"

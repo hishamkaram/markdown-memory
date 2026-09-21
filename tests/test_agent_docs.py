@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -14,13 +15,23 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 
 from markdown_memory.db import Database
-from markdown_memory.indexer import Embedder
+from markdown_memory.indexer import GEMMA_REVISION, Embedder
 from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
 
 ROOT = Path(__file__).parent.parent
 AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules")
 SKILLS = ("run-eval", "reindex-docs", "test-regression")
+# The gate, in order. `scripts/check.sh` runs it locally and `.github/workflows/gate.yml`
+# runs the same list in CI; the tests below hold both to this one definition.
+GATE_STEPS = (
+    "uv run python scripts/fetch_eval_corpus.py --check",
+    "uv run ruff check .",
+    "uv run ruff format --check .",
+    "uv run mypy --strict src/",
+    "uv run pytest -q",
+    "uv run python scripts/live_test.py",
+)
 NAVIGATION_BLOCK = re.compile(
     r"<!-- markdown-memory:navigation-rules:start -->.*?"
     r"<!-- markdown-memory:navigation-rules:end -->",
@@ -126,6 +137,35 @@ class TestDocsMatchTheCode:
         for name in ("CLAUDE.md", ".claude/skills/run-eval/SKILL.md"):
             text = all_agent_text()[name]
             assert f"| {quoted[0]} |" in text and f"| {quoted[1]} |" in text, (name, quoted)
+
+        # Two gate tables are not all of it. The number is printed in five first-party
+        # places, and checking only the two that happen to use a table cell is how it went
+        # three merges out of date: the README preset row, the navigation block that is
+        # byte-identical across the three agent files, and the floors comment beside the
+        # thresholds themselves all quote it too.
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert f"| {quoted[0]} / {quoted[1]} /" in readme, ("README.md preset row", quoted)
+        block = NAVIGATION_BLOCK.search(all_agent_text()["CLAUDE.md"])
+        assert block is not None
+        assert f"Top-1 ~{quoted[0]}" in block.group(0), ("navigation block", quoted)
+        assert f"~{quoted[1]} reliable" in block.group(0), ("navigation block", quoted)
+        floors = (ROOT / "scripts/eval_retrieval.py").read_text(encoding="utf-8")
+        assert f"measured: {quoted[0]} / {quoted[1]} /" in floors, ("eval_retrieval.py", quoted)
+
+        # The README prints a full row per preset, not just the default's two headline
+        # figures, and the light preset drifts by the same mechanism as the default did.
+        # Read each row by its preset name: looking the triple up anywhere in the file
+        # passes just as happily when the two rows have been swapped, which is a table that
+        # recommends the wrong model.
+        for preset in ("embeddinggemma", "bge-small"):
+            row = baseline[preset]["held_out/paraphrase"]
+            printed = " / ".join(f"{row[key]:.0%}" for key in ("top1", "top3", "top5"))
+            line = re.search(rf"^\| `{re.escape(preset)}`.*$", readme, re.M)
+            assert line, f"README.md has no preset row for {preset}"
+            assert f"| {printed} |" in line.group(0), (
+                f"README.md's `{preset}` row reads {line.group(0)!r}, "
+                f"but the baseline says {printed}"
+            )
         for preset in baseline.values():
             assert set(preset) == {
                 "dev/paraphrase",
@@ -161,17 +201,51 @@ class TestDocsMatchTheCode:
 
     def test_check_script_runs_the_documented_steps_in_order(self) -> None:
         script = (ROOT / "scripts/check.sh").read_text(encoding="utf-8")
-        steps = [
-            "step uv run ruff check .",
-            "step uv run ruff format --check .",
-            "step uv run mypy --strict src/",
-            "step uv run pytest -q",
-            "step uv run python scripts/live_test.py",
-        ]
-        positions = [script.index(step) for step in steps]
+        positions = [script.index(f"step {step}") for step in GATE_STEPS]
         assert positions == sorted(positions)
         assert "set -euo pipefail" in script
         assert (ROOT / "scripts/check.sh").stat().st_mode & 0o111, "check.sh is not executable"
+
+    def test_ci_runs_the_same_steps_in_the_same_order(self) -> None:
+        """Two gates that disagree are worse than one: the local hook is authoritative.
+
+        The workflow lists the steps one by one so each is annotated in the Actions log,
+        which is exactly the shape that drifts - a step added to `check.sh` and forgotten
+        in CI passes on the laptop and nowhere else, or the reverse.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        positions = [workflow.index(f"- run: {step}") for step in GATE_STEPS]
+        assert positions == sorted(positions), "CI runs the gate's steps out of order"
+
+    def test_ci_loads_the_model_before_the_tests_that_would_skip_without_it(self) -> None:
+        """A cache miss must fail the job, not quietly skip fifteen behaviours.
+
+        The `embedding` fixture turns a model that will not load into `pytest.skip`, so
+        without this step a broken cache leaves CI green over everything the real model
+        covers - including the whole of `live_test.py`'s reason to exist.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        assert "warm_up()" in workflow
+        assert workflow.index("warm_up()") < workflow.index("- run: uv run pytest -q")
+
+    def test_ci_caches_the_model_revision_the_code_pins(self) -> None:
+        """The cache key is the pin, so moving the pin cannot serve the old weights."""
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        assert f"mdmem-model-{GEMMA_REVISION[:12]}" in workflow
+
+    def test_ci_tests_every_python_version_the_metadata_claims(self) -> None:
+        """`requires-python` and the classifiers are promises; this is what keeps them."""
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        claimed = {
+            line.rsplit(" :: ", 1)[1]
+            for line in metadata["project"]["classifiers"]
+            if line.startswith("Programming Language :: Python :: 3.")
+        }
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        matrix = re.search(r"python: \[(.+?)\]", workflow)
+        assert matrix is not None, "the workflow has no python matrix"
+        tested = set(re.findall(r'"([0-9.]+)"', matrix.group(1)))
+        assert claimed == tested, f"classifiers claim {sorted(claimed)}, CI runs {sorted(tested)}"
 
 
 class TestSkills:
@@ -269,3 +343,249 @@ class TestReindexScript:
         assert "768 dimensions (meta: 768" in forced.stdout
         assert "integrity: ok" in forced.stdout
         assert "INTEGRITY PROBLEM" not in forced.stdout
+
+
+class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
+    """The README's picture prints token counts for four real files.
+
+    They were measured, not invented - which means editing any of those files makes the
+    picture false, silently, because nothing reads an SVG. The sweep that produced this
+    branch did exactly that: it rewrote README.md after the diagram had been drawn, and the
+    printed total was 319 tokens short of the truth until this test existed.
+    """
+
+    def _figures(self) -> list[tuple[str, int]]:
+        """The (file, tokens) pairs the generator draws on the left-hand side.
+
+        Imported rather than read off disk, so that mutating the generator mutates what
+        this test measures - a test that re-read the checked-in file would score a
+        falsified figure green.
+        """
+        import make_diagram
+
+        figures = list(make_diagram.LEFT_FILES)
+        assert len(figures) == 4, figures
+        return figures
+
+    def test_every_file_on_the_diagram_still_costs_what_it_says(self) -> None:
+        from markdown_memory.models import estimate_tokens
+
+        # The generator names them by basename; evaluation-protocol.md lives under docs/.
+        roots = {"evaluation-protocol.md": ROOT / "docs"}
+        for name, printed in self._figures():
+            path = roots.get(name, ROOT) / name
+            actual = estimate_tokens(path.read_text(encoding="utf-8"))
+            assert actual == printed, (
+                f"{name} is {actual} tokens, the diagram says {printed}. "
+                f"Re-measure and re-run scripts/make_diagram.py."
+            )
+
+    def test_the_totals_the_readme_prints_are_the_sum_of_those_files(self) -> None:
+        import make_diagram
+
+        total = sum(tokens for _, tokens in self._figures())
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert f"{total:,}" in readme, f"README does not print the {total:,}-token total"
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            assert f"{total:,} tokens" in rendered, f"{svg} prints a stale total"
+
+        # The <img> alt text repeats what comes back as well as what went in, and only the
+        # left-hand total was pinned - so a re-measurement of RIGHT_HITS could redraw the
+        # picture correctly and leave the sentence beside it describing the old one.
+        assert total == make_diagram.TOTAL_TOKENS
+        for figure in (f"{make_diagram.RETURNED_TOKENS:,}", str(make_diagram.BEST_HIT)):
+            assert figure in readme, (
+                f"README does not print {figure!r}, which the drawing beside it does"
+            )
+
+    def test_the_committed_drawing_is_the_one_the_generator_draws(self) -> None:
+        """Byte for byte, so no edit to the picture can skip being redrawn.
+
+        The figure checks below say what the drawing must contain; this says it contains
+        nothing else either. It is what catches an element deleted from the generator whose
+        text happens to be repeated somewhere - removing the 181 beside its bar still left
+        a 181 in the caption underneath, and a search for the figure passed.
+        """
+        import make_diagram
+
+        for theme, colours in make_diagram.THEMES.items():
+            path = ROOT / "docs/assets" / f"how-it-works-{theme}.svg"
+            assert path.read_text(encoding="utf-8") == make_diagram.draw(colours), (
+                f"{path.name} is not what scripts/make_diagram.py draws today; re-run it"
+            )
+
+    def test_the_committed_drawing_prints_every_figure_the_generator_holds(self) -> None:
+        """A correct total is not a correct picture.
+
+        The committed SVGs once carried a per-file number 348 tokens below the bar beside
+        it, with the right total printed underneath - the mutation sweep had written a
+        falsified figure straight into `docs/assets/`, because the generator drew at import
+        time. Checking the total alone let that through.
+        """
+        import make_diagram
+
+        expected = [f"{tokens:,}" for _, tokens in make_diagram.LEFT_FILES]
+        expected += [str(tokens) for tokens, _, _ in make_diagram.RIGHT_HITS]
+        expected.append(f"answers is {make_diagram.BEST_HIT}")
+        expected.append(f"{make_diagram.TOTAL_TOKENS:,} tokens")
+        expected.append(f"{make_diagram.RETURNED_TOKENS:,} tokens")
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            # Only what the <text> elements draw. Searching the whole file would score the
+            # aria-label, which carries the same sentence - so deleting the visible caption
+            # and leaving the alt text behind would have passed.
+            drawn = "\n".join(re.findall(r"<text[^>]*>(.*?)</text>", rendered, re.DOTALL))
+            assert drawn, f"{svg} draws no text at all"
+            for figure in expected:
+                assert figure in drawn, (
+                    f"{svg} does not draw {figure!r}; re-run scripts/make_diagram.py"
+                )
+
+    def test_the_drawing_says_the_same_thing_to_a_reader_who_cannot_see_it(self) -> None:
+        """The aria-label is the picture, for anyone not looking at it.
+
+        It used to spell its three figures out by hand while the caption beside them was
+        derived, so a re-measurement moved the caption and left the alt text describing the
+        previous one.
+        """
+        import make_diagram
+
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            label = re.search(r'aria-label="([^"]*)"', rendered)
+            assert label, f"{svg} has no aria-label"
+            for figure in (
+                f"{make_diagram.TOTAL_TOKENS:,}",
+                f"{make_diagram.RETURNED_TOKENS:,}",
+                str(make_diagram.BEST_HIT),
+            ):
+                assert figure in label.group(1), (
+                    f"{svg}'s aria-label does not carry {figure!r}: it describes a "
+                    f"different picture than the one it labels"
+                )
+
+    def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
+        """Browsers get the vector; anything that ignores <picture> gets a raster.
+
+        The GitHub mobile app draws neither today, and that is not something this markup can
+        fix. The app renders a relative image path perfectly well - hishamkaram/delegation-
+        layer does exactly that, in raw HTML, and it draws - but that repository is public
+        and this one is not. Images in a private repository need an authenticated fetch the
+        app does not make for them, which is why the format was changed twice here to no
+        effect. The fix is publishing the repository, not editing this markup; the raster
+        below stays regardless, for clients that do not implement <picture>.
+        """
+        import make_diagram
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        picture = re.search(r"<picture>(.*?)</picture>", readme, re.DOTALL)
+        assert picture, "the README no longer shows the diagram in a <picture>"
+        block = picture.group(1)
+        img = re.search(r'<img src="([^"]+)"', block)
+        assert img and img.group(1).endswith(".png"), (
+            "the <img> fallback must be a raster: it is what a client that ignores "
+            "<picture> falls back to"
+        )
+        # Follow the path the README actually gives, rather than checking a name this test
+        # chose: a fallback that ends in .png and points at nothing renders as the same
+        # broken-image mark it exists to prevent.
+        fallback = ROOT / img.group(1)
+        assert fallback.is_file(), f"the README's fallback {img.group(1)} does not exist"
+        for theme in ("dark", "light"):
+            source = f"docs/assets/how-it-works-{theme}.svg"
+            assert f'srcset="{source}"' in block, theme
+            assert (ROOT / source).is_file(), f"{source} is offered but not committed"
+        assert "prefers-color-scheme: dark" in block, "nothing selects the dark drawing"
+        assert fallback == ROOT / "docs/assets/how-it-works-light.png", (
+            f"the fallback is {img.group(1)}; the checks below measure the light raster"
+        )
+
+        # A fallback nothing regenerates is a fallback that goes stale, so hold its size to
+        # the drawing's own, at the scale the generator rasterises. Read straight out of the
+        # PNG header rather than through an imaging library: Pillow is here only as
+        # somebody else's transitive dependency, and a test should not rest on that.
+        expected = (
+            make_diagram.W * make_diagram.PNG_SCALE,
+            make_diagram.H * make_diagram.PNG_SCALE,
+        )
+        blobs: dict[str, bytes] = {}
+        for theme in ("light", "dark"):
+            png = ROOT / "docs/assets" / f"how-it-works-{theme}.png"
+            assert png.exists(), f"{png.name} is missing; run scripts/make_diagram.py"
+            blobs[theme] = png.read_bytes()
+            header = blobs[theme][:24]
+            assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{png.name} is not a PNG"
+            assert header[12:16] == b"IHDR", f"{png.name} has no image header"
+            size = (int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big"))
+            assert size == expected, (png.name, size, expected)
+            # A blank canvas of the right dimensions would satisfy everything above. The
+            # drawing is several hundred glyphs on a flat background, which does not
+            # compress anywhere near this small; an empty one lands in the low tens of KB.
+            assert len(blobs[theme]) > 60_000, (
+                f"{png.name} is {len(blobs[theme])} bytes - too little to be the drawing"
+            )
+        assert blobs["light"] != blobs["dark"], (
+            "the two rasters are byte-identical, so at least one was not drawn from its own theme"
+        )
+
+    def test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The generator rewrites the SVG before it rasterises the PNG.
+
+        So a machine with no headless browser regenerates the vector, leaves the raster at
+        the previous figures, and used to exit 0 over two images that now disagree. Run it
+        against a scratch directory rather than the repository: the point is the exit code,
+        and a test that redrew `docs/assets` would be a test that edits tracked files.
+        """
+        import make_diagram
+
+        (tmp_path / "docs/assets").mkdir(parents=True)
+        monkeypatch.setattr(make_diagram, "ROOT", tmp_path)
+        monkeypatch.setattr(make_diagram, "rasterise", lambda svg, png: False)
+
+        # `!= 0` would be satisfied by None, which SystemExit reads as success.
+        assert make_diagram.main() == 1, (
+            "main() reported success while the PNGs the README falls back to went stale"
+        )
+        drawn = sorted(p.name for p in (tmp_path / "docs/assets").iterdir())
+        assert drawn == ["how-it-works-dark.svg", "how-it-works-light.svg"], drawn
+
+    def test_the_sections_the_worked_example_returns_are_the_size_it_claims(self) -> None:
+        """Ranking needs the model; a section's token estimate does not, so pin that."""
+        from markdown_memory.models import estimate_tokens
+        from markdown_memory.parser import MarkdownParser
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
+        assert example, "the README no longer shows a worked example this test can read"
+        listed = re.findall(r"\s*(\d+) tok\s+(\S+)\s+(.+?)\s*$", example.group(1), re.M)
+        assert len(listed) == 5, listed
+
+        parser = MarkdownParser()
+        cache: dict[str, dict[str, int]] = {}
+        for printed, filename, heading_path in listed:
+            if filename not in cache:
+                parsed = parser.parse((ROOT / filename).read_text(encoding="utf-8"))
+                cache[filename] = {
+                    section.heading_path: estimate_tokens(section.content)
+                    for section in parsed.sections
+                }
+            sizes = cache[filename]
+            assert heading_path in sizes, (
+                f"{filename} has no section '{heading_path}'; the example is stale"
+            )
+            assert sizes[heading_path] == int(printed), (
+                f"{filename} '{heading_path}' is {sizes[heading_path]} tokens, "
+                f"the README says {printed}"
+            )
+
+    def test_the_worked_example_adds_up_to_the_total_it_prints(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
+        assert example
+        returned = sum(int(n) for n in re.findall(r"(\d+) tok", example.group(1)))
+        assert f"**{returned:,} tokens instead of" in readme, (
+            f"the five hits total {returned:,}, which is not what the README claims"
+        )

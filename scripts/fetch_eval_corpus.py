@@ -33,6 +33,7 @@ from pathlib import Path
 EVAL_DATA = Path(__file__).resolve().parent / "eval_data"
 CORPUS = EVAL_DATA / "corpus_v2"
 MANIFEST = EVAL_DATA / "corpus_v2_sources.json"
+LICENCES = EVAL_DATA / "corpus_v2_licenses"
 # Anchored at the start of a line: a bare ":::" also appears inside IPv6 addresses, and
 # "{{" inside shell or template samples that are themselves the documentation.
 DIALECT_MARKERS = (
@@ -56,6 +57,11 @@ class Source:
     kind: str
     include: tuple[str, ...]
     note: str
+    # The upstream's own licence files, vendored beside the documentation they cover.
+    # Apache-2.0 requires that a NOTICE travel with anything redistributed from a tree
+    # that has one, and that a copy of the licence itself go with the copy - naming the
+    # licence in a table is not the same as carrying it.
+    legal: tuple[str, ...]
 
 
 SOURCES = (
@@ -67,6 +73,7 @@ SOURCES = (
         kind="cli-guide",
         include=("GUIDE.md", "FAQ.md", "CHANGELOG.md"),
         note="Dense flag prose and a changelog; the flags collide (-C, --context).",
+        legal=("COPYING", "LICENSE-MIT", "UNLICENSE"),
     ),
     Source(
         name="cargo",
@@ -78,6 +85,7 @@ SOURCES = (
         note="Man-page style command reference: SYNOPSIS/OPTIONS sections that repeat "
         "across dozens of commands, which is exactly the near-duplicate case. The "
         "reference chapter is left out to stop one source dominating the corpus.",
+        legal=("LICENSE-APACHE", "LICENSE-MIT"),
     ),
     Source(
         name="gh",
@@ -87,6 +95,7 @@ SOURCES = (
         kind="cli-guide",
         include=("docs/",),
         note="Task-oriented guides and environment variables.",
+        legal=("LICENSE",),
     ),
     Source(
         name="compose-spec",
@@ -97,6 +106,7 @@ SOURCES = (
         include=("spec.md", "build.md", "deploy.md", "service.md", "05-services.md"),
         note="Deeply nested declarative keys whose meaning is inherited from parents - "
         "the case that flatters passage vectors least.",
+        legal=("LICENSE", "NOTICE"),
     ),
     Source(
         name="prometheus",
@@ -107,6 +117,7 @@ SOURCES = (
         include=("docs/configuration/", "docs/querying/"),
         note="Configuration blocks and query-language reference: long YAML samples with "
         "'#' comments inside fences, which must never be read as headings.",
+        legal=("LICENSE", "NOTICE"),
     ),
 )
 
@@ -122,15 +133,36 @@ def wanted(source: Source, relative: str) -> bool:
     )
 
 
-def documents(source: Source) -> Iterator[tuple[str, str]]:
-    """Yield ``(relative path, text)`` for the Markdown this source contributes."""
+def fetch(source: Source) -> bytes:
+    """The upstream tarball, read once and extracted twice: documentation and licences."""
     with urllib.request.urlopen(archive_url(source), timeout=180) as response:  # noqa: S310
-        payload = response.read()
+        payload: bytes = response.read()
+    return payload
+
+
+def documents(source: Source, payload: bytes) -> Iterator[tuple[str, str]]:
+    """Yield ``(relative path, text)`` for the Markdown this source contributes."""
+    yield from _extract(source, payload, legal=False)
+
+
+def legal_files(source: Source, payload: bytes) -> Iterator[tuple[str, str]]:
+    """Yield ``(name, text)`` for the upstream's own licence and NOTICE files."""
+    yield from _extract(source, payload, legal=True)
+
+
+def _extract(source: Source, payload: bytes, *, legal: bool) -> Iterator[tuple[str, str]]:
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         for member in archive.getmembers():
             if not member.isfile() or member.size > MAX_FILE_BYTES:
                 continue
             relative = member.name.split("/", 1)[1] if "/" in member.name else member.name
+            if legal:
+                if relative not in source.legal:
+                    continue
+                handle = archive.extractfile(member)
+                if handle is not None:
+                    yield relative, handle.read().decode("utf-8", errors="replace")
+                continue
             if not wanted(source, relative):
                 continue
             handle = archive.extractfile(member)
@@ -155,8 +187,9 @@ def vendor() -> int:
     }
     for source in SOURCES:
         print(f"{source.name}: {source.repo}@{source.commit[:8]}")
+        payload = fetch(source)
         files: dict[str, str] = {}
-        for relative, text in documents(source):
+        for relative, text in documents(source, payload):
             destination = CORPUS / source.name / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(text, encoding="utf-8")
@@ -164,7 +197,19 @@ def vendor() -> int:
         if not files:
             print(f"  ERROR: {source.name} contributed no files")
             return 1
-        print(f"  {len(files)} file(s)")
+        legal: dict[str, str] = {}
+        for name, text in legal_files(source, payload):
+            destination = LICENCES / source.name / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text, encoding="utf-8")
+            legal[name] = digest(text)
+        missing = [name for name in source.legal if name not in legal]
+        if missing:
+            # Silence here would be the whole risk: the obligation is carried by files
+            # that are present, so a rename upstream must fail the refresh, not pass it.
+            print(f"  ERROR: {source.name} is missing {', '.join(missing)}")
+            return 1
+        print(f"  {len(files)} file(s), {len(legal)} licence file(s)")
         manifest[source.name] = {
             "repo": source.repo,
             "commit": source.commit,
@@ -172,6 +217,7 @@ def vendor() -> int:
             "kind": source.kind,
             "note": source.note,
             "files": files,
+            "legal": legal,
         }
     MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (EVAL_DATA / "corpus_v2_LICENSES.md").write_text(licences(), encoding="utf-8")
@@ -184,16 +230,26 @@ def licences() -> str:
         "# Vendored documentation",
         "",
         "The evaluation corpus is third-party documentation, copied verbatim at the commit",
-        "recorded in `sources.json` and used here only to measure retrieval accuracy.",
-        "Each set keeps its own licence; none of it is part of the markdown-memory package.",
+        "recorded in `corpus_v2_sources.json` and used here only to measure retrieval",
+        "accuracy. Each set keeps its own licence; none of it is part of the",
+        "markdown-memory package, which is MIT (see `LICENSE` at the repository root).",
         "",
-        "| Set | Upstream | Commit | Licence | Why it is here |",
-        "| --- | --- | --- | --- | --- |",
+        "Each upstream's own licence files - and its NOTICE, where it has one - are",
+        "vendored verbatim beside this table in `corpus_v2_licenses/<set>/`, taken from",
+        "the same pinned commit as the documentation. Apache-2.0 asks that the licence",
+        "travel with the copy and that a NOTICE be carried into anything redistributed",
+        "from a tree that has one; naming the licence in a table is not that.",
+        "",
+        "| Set | Upstream | Commit | Licence | Carried verbatim | Why it is here |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for source in SOURCES:
+        carried = ", ".join(
+            f"[{name}](corpus_v2_licenses/{source.name}/{name})" for name in source.legal
+        )
         lines.append(
             f"| `{source.name}` | {source.repo} | `{source.commit[:12]}` | {source.licence} "
-            f"| {source.note} |"
+            f"| {carried} | {source.note} |"
         )
     lines.append("")
     lines.append("Refresh with `uv run python scripts/fetch_eval_corpus.py`. Moving a commit")
@@ -221,6 +277,55 @@ def check() -> int:
             elif digest(path.read_text(encoding="utf-8")) != expected:
                 print(f"{source.name}/{relative}: edited since it was vendored")
                 problems += 1
+        for name, expected in recorded.get("legal", {}).items():
+            path = LICENCES / source.name / name
+            if not path.exists():
+                print(f"{source.name}/{name}: licence file missing")
+                problems += 1
+            elif digest(path.read_text(encoding="utf-8")) != expected:
+                print(f"{source.name}/{name}: licence file edited since it was vendored")
+                problems += 1
+        for name in source.legal:
+            if name not in recorded.get("legal", {}):
+                print(f"{source.name}/{name}: not vendored; re-run without --check")
+                problems += 1
+
+        # A file the manifest does not mention is one nothing verifies: it survives an
+        # upstream deletion, keeps being indexed, and would be redistributed with the rest.
+        for tree, expected in (
+            (CORPUS / source.name, set(recorded["files"])),
+            (LICENCES / source.name, set(recorded.get("legal", {}))),
+        ):
+            if not tree.is_dir():
+                continue
+            found = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
+            for stray in sorted(found - expected):
+                print(f"{tree.name}/{stray}: not in the manifest; delete it or re-vendor")
+                problems += 1
+
+    # Walking each known set catches a stray inside one, but not a whole set that was
+    # retired from SOURCES: its directory is simply never visited, and everything under it
+    # keeps being indexed and redistributed. So sweep the two roots themselves.
+    known = {source.name for source in SOURCES}
+    for root in (CORPUS, LICENCES):
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            if entry.name not in known:
+                print(f"{root.name}/{entry.name}: not a set this script vendors; delete it")
+                problems += 1
+
+    # The attribution table is generated, so it can drift from the sources it describes -
+    # a wrong licence name or a dead link would otherwise pass every other check here.
+    # Compared as bytes: decoding would let a line-ending-only rewrite through.
+    attribution = EVAL_DATA / "corpus_v2_LICENSES.md"
+    if not attribution.exists():
+        print(f"{attribution.name}: missing; re-run without --check")
+        problems += 1
+    elif attribution.read_bytes() != licences().encode("utf-8"):
+        print(f"{attribution.name}: stale; re-run without --check to regenerate it")
+        problems += 1
+
     print("corpus matches the manifest" if not problems else f"{problems} problem(s)")
     return 1 if problems else 0
 
