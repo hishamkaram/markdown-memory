@@ -6,7 +6,29 @@ readme = "README.md"
 authors = [
     { name = "Hesham Karm", email = "24391550+hishamkaram@users.noreply.github.com" }
 ]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["mcp", "markdown", "documentation", "retrieval", "embeddings", "sqlite"]
+classifiers = [
+    # Every version CI runs, and CI runs every version listed: claiming one nothing
+    # tests is how a broken install gets discovered by its first user.
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+    # The repository is private and nothing here is meant for an index. Remove this line
+    # deliberately, with the rest of the release decision, rather than by accident.
+    "Private :: Do Not Upload",
+]
+
 dependencies = [
     "fastembed>=0.8.0",
     "huggingface-hub>=0.26",
@@ -18,6 +40,11 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "tokenizers>=0.20",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hishamkaram/markdown-memory"
+Repository = "https://github.com/hishamkaram/markdown-memory"
+Issues = "https://github.com/hishamkaram/markdown-memory/issues"
 
 [project.scripts]
 markdown-memory = "markdown_memory.server:main"
