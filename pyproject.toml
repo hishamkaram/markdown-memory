@@ -50,7 +50,7 @@ Issues = "https://github.com/hishamkaram/markdown-memory/issues"
 markdown-memory = "markdown_memory.server:main"
 
 [build-system]
-requires = ["uv_build>=0.11.3,<0.12.0"]
+requires = ["uv_build>=0.11.3,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
