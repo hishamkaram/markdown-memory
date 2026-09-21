@@ -401,11 +401,13 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 )
 
     def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
-        """GitHub's mobile app renders neither an SVG README image nor <picture>.
+        """GitHub's mobile app cannot draw an SVG in a README.
 
-        It draws a broken-image mark, which is what the repository shipped. The <img> - the
-        one element every client honours - therefore has to point at the PNG, with the SVGs
-        offered above it as <source>s for browsers that do understand them.
+        Pointing <img> at a PNG was not enough on its own: the app honours <source> far
+        enough to choose one, so an SVG offered there is still what it reaches for, and it
+        still drew a broken-image mark with the PNG sitting right underneath. No candidate
+        in this block may be an SVG. Dark mode survives as a second PNG, and the SVGs stay
+        the source of truth in docs/assets, which the PNGs are rasterised from.
         """
         import make_diagram
 
@@ -413,24 +415,30 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         picture = re.search(r"<picture>(.*?)</picture>", readme, re.DOTALL)
         assert picture, "the README no longer shows the diagram in a <picture>"
         block = picture.group(1)
-        img = re.search(r'<img src="([^"]+)"', block)
-        assert img and img.group(1).endswith(".png"), (
-            "the <img> fallback must be a PNG: an SVG there is what the mobile app cannot draw"
+        assert ".svg" not in block, (
+            "no candidate here may be an SVG: the mobile app picks one and cannot draw it"
         )
-        for theme in ("dark", "light"):
-            assert f'srcset="docs/assets/how-it-works-{theme}.svg"' in block, theme
+        img = re.search(r'<img src="([^"]+)"', block)
+        assert img and img.group(1).endswith(".png"), "the <img> fallback must be a PNG"
+        assert 'srcset="docs/assets/how-it-works-dark.png"' in block, "dark mode lost"
+        assert "prefers-color-scheme: dark" in block, "nothing selects the dark drawing"
 
         # A fallback nothing regenerates is a fallback that goes stale, so hold its size to
-        # the drawing's own, at the scale the generator rasterises.
-        from PIL import Image
-
+        # the drawing's own, at the scale the generator rasterises. Read straight out of the
+        # PNG header rather than through an imaging library: Pillow is here only as
+        # somebody else's transitive dependency, and a test should not rest on that.
+        expected = (
+            make_diagram.W * make_diagram.PNG_SCALE,
+            make_diagram.H * make_diagram.PNG_SCALE,
+        )
         for theme in ("light", "dark"):
             png = ROOT / "docs/assets" / f"how-it-works-{theme}.png"
             assert png.exists(), f"{png.name} is missing; run scripts/make_diagram.py"
-            with Image.open(png) as raster:
-                expected = (make_diagram.W * make_diagram.PNG_SCALE,
-                            make_diagram.H * make_diagram.PNG_SCALE)  # fmt: skip
-                assert raster.size == expected, (png.name, raster.size, expected)
+            header = png.read_bytes()[:24]
+            assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{png.name} is not a PNG"
+            assert header[12:16] == b"IHDR", f"{png.name} has no image header"
+            size = (int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big"))
+            assert size == expected, (png.name, size, expected)
 
     def test_the_sections_the_worked_example_returns_are_the_size_it_claims(self) -> None:
         """Ranking needs the model; a section's token estimate does not, so pin that."""

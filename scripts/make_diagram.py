@@ -66,7 +66,7 @@ W, H = 1120, 430
 # measured, never estimated: tests/test_agent_docs.py re-derives every number here from the
 # real files and fails when the documentation moves on without the picture.
 LEFT_FILES = [
-    ("README.md", 5424),
+    ("README.md", 5410),
     ("CLAUDE.md", 3034),
     ("evaluation-protocol.md", 1661),
     ("AGENTS.md", 981),
@@ -74,7 +74,7 @@ LEFT_FILES = [
 RIGHT_HITS = [
     (128, "Pre-download it, or install offline", False),
     (181, "What downloads, when, and where", True),
-    (590, "markdown-memory  (preamble)", False),
+    (577, "markdown-memory  (preamble)", False),
     (494, "Commands  (CLAUDE.md)", False),
     (283, "When it goes wrong", False),
 ]
@@ -115,7 +115,7 @@ def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading four whole files costs '
-        f"11,100 tokens; markdown-memory returns five sections totalling 1,676, and the one "
+        f"11,086 tokens; markdown-memory returns five sections totalling 1,663, and the one "
         f'that answers is 181 tokens.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
@@ -158,7 +158,7 @@ def draw(c: dict) -> str:
         )
         y += 46
     o.append(f'<path d="M62 318 L328 318" stroke="{c["coldEdge"]}" stroke-width="1"/>')
-    o.append(text(62, 338, "11,100 tokens", fill=c["cold"], size=14, weight=600))
+    o.append(text(62, 338, "11,086 tokens", fill=c["cold"], size=14, weight=600))
     o.append(text(62, 354, "most of it about something else", fill=c["muted"], size=11))
 
     # ---- middle: what it does with them ----
@@ -230,7 +230,7 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, "1,676 tokens", fill=c["warm"], size=14, weight=600))
+    o.append(text(732, 338, "1,663 tokens", fill=c["warm"], size=14, weight=600))
     o.append(
         text(
             732,
