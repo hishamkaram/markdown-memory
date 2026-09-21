@@ -10,10 +10,13 @@ wheels/
 .venv
 
 # Tool caches and per-user agent settings
+.hypothesis/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
 .claude/settings.local.json
 
-# Per-project index written by the MCP server
+# Not where the index goes any more - it is keyed on the documentation root and lives
+# under $XDG_DATA_HOME - but a relative MARKDOWN_MEMORY_DB still resolves inside the
+# repository, so this keeps a deliberately local database out of a commit.
 .markdown-memory/

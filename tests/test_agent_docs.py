@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -14,13 +15,22 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 
 from markdown_memory.db import Database
-from markdown_memory.indexer import Embedder
+from markdown_memory.indexer import GEMMA_REVISION, Embedder
 from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
 
 ROOT = Path(__file__).parent.parent
 AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules")
 SKILLS = ("run-eval", "reindex-docs", "test-regression")
+# The gate, in order. `scripts/check.sh` runs it locally and `.github/workflows/gate.yml`
+# runs the same list in CI; the tests below hold both to this one definition.
+GATE_STEPS = (
+    "uv run ruff check .",
+    "uv run ruff format --check .",
+    "uv run mypy --strict src/",
+    "uv run pytest -q",
+    "uv run python scripts/live_test.py",
+)
 NAVIGATION_BLOCK = re.compile(
     r"<!-- markdown-memory:navigation-rules:start -->.*?"
     r"<!-- markdown-memory:navigation-rules:end -->",
@@ -161,17 +171,51 @@ class TestDocsMatchTheCode:
 
     def test_check_script_runs_the_documented_steps_in_order(self) -> None:
         script = (ROOT / "scripts/check.sh").read_text(encoding="utf-8")
-        steps = [
-            "step uv run ruff check .",
-            "step uv run ruff format --check .",
-            "step uv run mypy --strict src/",
-            "step uv run pytest -q",
-            "step uv run python scripts/live_test.py",
-        ]
-        positions = [script.index(step) for step in steps]
+        positions = [script.index(f"step {step}") for step in GATE_STEPS]
         assert positions == sorted(positions)
         assert "set -euo pipefail" in script
         assert (ROOT / "scripts/check.sh").stat().st_mode & 0o111, "check.sh is not executable"
+
+    def test_ci_runs_the_same_steps_in_the_same_order(self) -> None:
+        """Two gates that disagree are worse than one: the local hook is authoritative.
+
+        The workflow lists the steps one by one so each is annotated in the Actions log,
+        which is exactly the shape that drifts - a step added to `check.sh` and forgotten
+        in CI passes on the laptop and nowhere else, or the reverse.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        positions = [workflow.index(f"- run: {step}") for step in GATE_STEPS]
+        assert positions == sorted(positions), "CI runs the gate's steps out of order"
+
+    def test_ci_loads_the_model_before_the_tests_that_would_skip_without_it(self) -> None:
+        """A cache miss must fail the job, not quietly skip fifteen behaviours.
+
+        The `embedding` fixture turns a model that will not load into `pytest.skip`, so
+        without this step a broken cache leaves CI green over everything the real model
+        covers - including the whole of `live_test.py`'s reason to exist.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        assert "warm_up()" in workflow
+        assert workflow.index("warm_up()") < workflow.index("- run: uv run pytest -q")
+
+    def test_ci_caches_the_model_revision_the_code_pins(self) -> None:
+        """The cache key is the pin, so moving the pin cannot serve the old weights."""
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        assert f"mdmem-model-{GEMMA_REVISION[:12]}" in workflow
+
+    def test_ci_tests_every_python_version_the_metadata_claims(self) -> None:
+        """`requires-python` and the classifiers are promises; this is what keeps them."""
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        claimed = {
+            line.rsplit(" :: ", 1)[1]
+            for line in metadata["project"]["classifiers"]
+            if line.startswith("Programming Language :: Python :: 3.")
+        }
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        matrix = re.search(r"python: \[(.+?)\]", workflow)
+        assert matrix is not None, "the workflow has no python matrix"
+        tested = set(re.findall(r'"([0-9.]+)"', matrix.group(1)))
+        assert claimed == tested, f"classifiers claim {sorted(claimed)}, CI runs {sorted(tested)}"
 
 
 class TestSkills:

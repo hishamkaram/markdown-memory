@@ -1,0 +1,108 @@
+# The gate `.githooks/pre-push` runs, run somewhere other than one laptop.
+#
+# The steps are `scripts/check.sh`'s, listed one by one so each is its own annotated
+# step in the log rather than a single opaque script. A test keeps the two lists in the
+# same order: tests/test_agent_docs.py::test_check_script_runs_the_documented_steps_in_order.
+#
+# The retrieval gate (scripts/eval_retrieval.py) is deliberately absent: it needs a
+# ~25-minute index build, takes an exclusive flock, and asserts on latency, which a
+# shared runner cannot hold still. It stays a local, deliberate step.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The embedder reads this; `live_test.py` takes it from ServerConfig rather than
+  # assuming a path. Setting it explicitly is what makes the cache below the directory
+  # the run actually uses.
+  MARKDOWN_MEMORY_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Pin the interpreter this leg claims to test
+        run: |
+          uv python install "${{ matrix.python }}"
+          echo "UV_PYTHON=${{ matrix.python }}" >> "$GITHUB_ENV"
+
+      - run: uv sync --locked
+
+      - name: Confirm the interpreter is the one this leg names
+        run: |
+          uv run python -c "import sys; print(sys.version)"
+          uv run python -c "import sys; assert sys.version_info[:2] == tuple(int(p) for p in '${{ matrix.python }}'.split('.')), sys.version"
+
+      # EmbeddingGemma is ~330 MB and pinned by revision, so the key is that revision:
+      # move the pin and the key moves with it. A warm cache means no download at all,
+      # because _download() returns early when all three files are already present.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
+          key: mdmem-model-5090578d9565
+
+      # The 15 tests that need the model SKIP rather than fail when it cannot load, so a
+      # cache miss would leave the job green over fifteen untested behaviours. Loading the
+      # model here turns that silence into a failure - and counting skips would not, since
+      # any unrelated skip would trip it and a file-existence check is weaker than a load.
+      - name: Load the embedding model before anything can skip over it
+        run: |
+          uv run python -c "
+          from markdown_memory.indexer import DEFAULT_EMBEDDER, create_embedder
+          from markdown_memory.server import ServerConfig
+          create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
+          print('embedding model loaded')
+          "
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy --strict src/
+      - run: uv run pytest -q
+      - run: uv run python scripts/live_test.py
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # The gate above never builds the artefact, so nothing checked that the console
+      # script starts from an installed wheel or that the licence travels inside it.
+      - name: Build, install and run the wheel
+        run: |
+          uv build
+          uv venv /tmp/packaging
+          VIRTUAL_ENV=/tmp/packaging uv pip install dist/*.whl
+          /tmp/packaging/bin/markdown-memory --help
+      - name: The wheel carries its licence
+        run: |
+          uv run python -c "
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()
+          assert any(n.endswith('.dist-info/licenses/LICENSE') for n in names), names
+          print('LICENSE is in the wheel')
+          "
