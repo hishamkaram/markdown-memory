@@ -16,7 +16,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.server as server_module
-from markdown_memory.exceptions import ConfigurationError, DatabaseError
+from markdown_memory.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    IndexingError,
+    SearchError,
+)
 from markdown_memory.models import (
     OutlineNode,
 )
@@ -758,5 +763,62 @@ class TestTheAnswerSaysWhenItIsIncomplete:
         try:
             service.index_directory()
             assert service.search_docs("retry backoff policy", 5)
+        finally:
+            service.close()
+
+
+class TestADirectoryArgumentCannotLeaveTheRoot:
+    """Search was scoped to the docs root; every other way in was not.
+
+    `search_docs` has filtered by the resolved root ever since it answered one project's
+    question out of another project's documentation. The `directory` argument reached past
+    it three ways - an absolute path, `..`, and a symlink pointing out of the tree - and
+    `list_documents` obeyed all three, handing back another project's file paths. The
+    status lookup was worse than a leak: coverage stayed the configured root's while the
+    failures came from wherever the symlink landed, so the envelope returned
+    `coverage: "verified"` beside a non-empty failure list and a null message, which its
+    own contract says cannot happen.
+    """
+
+    @staticmethod
+    def service(tmp_path: Path, embedder: FakeEmbedder) -> tuple[MarkdownMemoryService, Path]:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "good.md").write_text("# Good\n\nreadable\n")
+        outside = tmp_path / "other"
+        outside.mkdir()
+        (outside / "secret.md").write_text("# Secret\n\nanother project\n")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "index.db", docs_dir=docs), embedder
+        )
+        service.index_directory()
+        return service, outside
+
+    def test_every_spelling_of_outside_is_refused(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        service, outside = self.service(tmp_path, fake_embedder)
+        (tmp_path / "docs" / "api").symlink_to(outside)
+        try:
+            for spelling in ("api", str(outside), "../other"):
+                with pytest.raises(IndexingError, match="outside this server"):
+                    service.list_documents(spelling)
+            with pytest.raises(SearchError, match="outside this server"):
+                service.index_status("api")
+        finally:
+            service.close()
+
+    def test_a_directory_inside_the_root_still_answers(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The containment check must not cost the ordinary case its answer."""
+        service, _ = self.service(tmp_path, fake_embedder)
+        nested = tmp_path / "docs" / "api"
+        nested.mkdir()
+        (nested / "ref.md").write_text("# Ref\n\nbody\n")
+        try:
+            service.index_directory()
+            assert [d.file_path for d in service.list_documents("api")] == [str(nested / "ref.md")]
+            assert service.index_status("api").verified
         finally:
             service.close()

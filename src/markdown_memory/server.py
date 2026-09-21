@@ -196,7 +196,8 @@ class MarkdownMemoryService:
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         # An empty argument means "this project", not "everything this database holds":
         # the default database is shared by every project on the machine.
-        return self._db.list_documents(str(self._resolve_directory(directory or None)))
+        scope = self._resolve_directory(directory or None)
+        return self._db.list_documents(str(self._within_root(scope, IndexingError)))
 
     def get_document_outline(self, file_path: str) -> list[OutlineNode]:
         document = self._resolve_document(file_path)
@@ -231,7 +232,9 @@ class MarkdownMemoryService:
         # named are the ones that live here. Resolved against the root this service was
         # built for, never against the configured path again, or a retargeted symlink
         # pairs this root's certificate with another tree's failures.
-        scope = _absolute(Path(self._root) / directory.strip(), SearchError)
+        scope = self._within_root(
+            _absolute(Path(self._root) / directory.strip(), SearchError), SearchError
+        )
         return self._db.index_status(self._root, str(scope))
 
     # ------------------------------------------------------------------ resolution
@@ -243,6 +246,28 @@ class MarkdownMemoryService:
         if not path.is_absolute():
             path = self._config.docs_dir / path
         return _absolute(path, IndexingError)
+
+    def _within_root(self, resolved: Path, error: type[MarkdownMemoryError]) -> Path:
+        """Refuse to *answer about* a directory outside the tree this server serves.
+
+        `..`, an absolute path and a symlink each reach out of the root, and each was
+        obeyed: `list_documents` handed back another project's file paths, and a status
+        lookup paired this root's certificate with that tree's failures - `coverage:
+        verified` beside a non-empty failure list, which the envelope promises cannot
+        happen. Search has been scoped to the root ever since it answered one project's
+        question from another's documentation; these are the two other ways in.
+
+        `index_directory` is deliberately not scoped this way. It is an instruction rather
+        than a question - go and index that tree - and it keys the tree it walked under its
+        own root, so nothing it writes is attributed here.
+        """
+        root = Path(self._root)
+        if resolved != root and root not in resolved.parents:
+            raise error(
+                f"{str(resolved)!r} is outside this server's documentation root "
+                f"({self._root}); name a directory inside it."
+            )
+        return resolved
 
     def _resolve_document(self, file_path: str) -> Document:
         """Find an indexed document by absolute path, relative path, or unique path suffix."""

@@ -1523,6 +1523,89 @@ class TestOnlyAWholeWalkVouchesForATree:
         finally:
             locked.chmod(0o755)
 
+    def test_a_directory_replaced_by_a_broken_symlink_keeps_its_documents(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """`ENOENT` through a symlink is the link being broken, not the file being deleted.
+
+        The real directory is moved aside and a dangling link left in its place. Every
+        document under it now stats as absent, though the files are intact where they were
+        moved to. Purging them here would redo, through the new evidence, exactly the data
+        loss this branch fixed: a directory becoming a symlink deleting what was beneath it.
+        """
+        root = tmp_path / "root"
+        (root / "link").mkdir(parents=True)
+        (root / "good.md").write_text("# G\n\nbody\n")
+        (root / "link" / "inner.md").write_text("# I\n\nbody\n")
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(root)
+        assert len(db.document_hashes(str(root))) == 2
+
+        shutil.move(str(root / "link"), str(tmp_path / "moved"))
+        (root / "link").symlink_to(tmp_path / "nowhere")
+        report = indexer.index_directory(root)
+        assert report.files_purged == 0, "a broken link was read as a deletion"
+        assert len(db.document_hashes(str(root))) == 2
+
+    def test_a_failure_on_a_directory_that_became_a_symlink_outlives_the_swap(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """`_behind_symlink` tests the components before the last one, and this row IS the last.
+
+        The failure names the directory itself. Once that directory is a symlink the walk
+        lists its name and never enters, so nothing rechecks it - but asking whether the
+        path sits *behind* a symlink says no, and the row was cleared and the root
+        certified with a whole subtree unindexed.
+        """
+        root = tmp_path / "root"
+        vendor = root / "vendor"
+        vendor.mkdir(parents=True)
+        (root / "good.md").write_text("# G\n\nbody\n")
+        (vendor / "inner.md").write_text("# I\n\nbody\n")
+        vendor.chmod(0o000)
+        try:
+            Indexer(db, fake_embedder).index_directory(root)
+            assert db.failure_paths(str(root)) == [str(vendor)]
+        finally:
+            vendor.chmod(0o755)
+        shutil.move(str(vendor), str(tmp_path / "real_vendor"))
+        (root / "vendor").symlink_to(tmp_path / "real_vendor")
+
+        Indexer(db, fake_embedder).index_directory(root)
+        status = db.index_status(str(root))
+        assert len(status.failures) == 1, "a walk that stopped at the link spoke for it anyway"
+        assert not status.verified
+
+    def test_a_failure_whose_name_could_not_be_decoded_is_not_taken_for_deleted(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """The row spells the name with U+FFFD, so nothing is ever at the path it spells.
+
+        `_printable` substitutes for bytes it cannot decode, and the result is itself valid
+        UTF-8 - it survives a round trip through `_printable` unchanged, so only the
+        replacement character gives it away. Stat that rendering and it is always absent,
+        about a file that is still there and still broken.
+        """
+        root = tmp_path / "root"
+        venv = root / ".venv"
+        venv.mkdir(parents=True)
+        (root / "good.md").write_text("# G\n\nbody\n")
+        raw = os.path.join(os.fsdecode(bytes(venv)), os.fsdecode(b"caf\xe9.md"))
+        with open(os.fsencode(raw), "wb") as handle:
+            handle.write(b"# C\n\nbody\n")
+        os.chmod(os.fsencode(raw), 0o000)
+        try:
+            Indexer(db, fake_embedder).index_directory(venv)
+            assert len(db.failure_paths(str(venv))) == 1
+
+            Indexer(db, fake_embedder).index_directory(root)  # prunes .venv
+            assert os.path.exists(os.fsencode(raw))
+            assert len(db.index_status(str(root)).failures) == 1, (
+                "a name it could not read was taken for a file that is gone"
+            )
+        finally:
+            os.chmod(os.fsencode(raw), 0o644)
+
     def test_a_newly_excluded_document_leaves_the_index(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:

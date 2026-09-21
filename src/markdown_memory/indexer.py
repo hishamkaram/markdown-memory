@@ -68,6 +68,8 @@ _GEMMA_BATCH_SIZE = 4
 # physical cores and 16 is the one value that loses. Only a machine that disagrees with
 # the default needs MARKDOWN_MEMORY_THREADS.
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
+#: What ``_printable`` leaves where it could not decode a byte of a file name.
+_UNDECODABLE = "�"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 MAX_FILE_BYTES = 10 * 1024 * 1024
 # Below this the pooled direction is rounding noise rather than a direction. Unit vectors
@@ -418,7 +420,7 @@ def _behind_symlink(root: Path, path: str) -> bool:
     return False
 
 
-def _certainly_gone(path: str) -> bool:
+def _certainly_gone(root: Path, path: str) -> bool:
     """True when ``path`` is observably absent, rather than merely out of the walk's sight.
 
     Everything else here refuses to draw conclusions from what the walk did not visit, and
@@ -432,7 +434,21 @@ def _certainly_gone(path: str) -> bool:
     nothing here" (`ENOENT`) from "I am not allowed to know" (`EACCES`, a loop, a dead
     mount), and only the first retires anything. That is a direct observation of one name,
     not an inference from a walk's silence, which is why it is safe where the walk is not.
+
+    Two things make that observation worthless, and both answer `ENOENT` about a path that
+    was never the file's. A name that is not valid UTF-8 reached the row through
+    `_printable`, which substitutes U+FFFD for the bytes it could not decode - the stored
+    string is a rendering of the name, not the name, and nothing is at it. (Testing that
+    the string survives `_printable` does not find this: the replacement character is
+    itself valid UTF-8 and round-trips.) And a path reached through a symlink answers for
+    the link's target: replace a real directory with a broken link and every document under
+    it reports `ENOENT` while the files sit untouched wherever they were moved to. Neither
+    is evidence of a deletion.
     """
+    if _UNDECODABLE in path:
+        return False
+    if _behind_symlink(root, path) or os.path.islink(path):
+        return False
     try:
         os.lstat(path)
     except FileNotFoundError:
@@ -440,6 +456,19 @@ def _certainly_gone(path: str) -> bool:
     except OSError:  # no permission, symlink loop, unreachable mount: no evidence either way
         return False
     return False
+
+
+def _is_shadowing_symlink(path: str) -> bool:
+    """True when ``path`` is a symlink the walk sees the name of but never follows.
+
+    `os.walk(followlinks=False)` lists a symlinked directory among its parent's names and
+    stops there, so a failure recorded against that directory cannot be rechecked by any
+    walk of the tree above it. `_behind_symlink` cannot answer this: it tests the
+    components *before* the last one, which is right for a file inside a linked tree and
+    blind to the linked directory itself. A symlink to a *file* is walked and indexed like
+    any other file, so only one that does not resolve to a file is out of reach.
+    """
+    return os.path.islink(path) and not os.path.isfile(path)
 
 
 def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
@@ -717,7 +746,7 @@ class Indexer:
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         visitable = []
         for path in paths:
-            if self._walk_would_visit(root, path, blocked) or _certainly_gone(path):
+            if self._walk_would_visit(root, path, blocked) or _certainly_gone(root, path):
                 visitable.append(path)
         return visitable
 
@@ -727,7 +756,7 @@ class Indexer:
             return False
         if not _is_walkable(os.path.relpath(path, root).split(os.sep)):
             return False
-        if _behind_symlink(root, path):
+        if _behind_symlink(root, path) or _is_shadowing_symlink(path):
             return False
         return not (self._exclude and _is_excluded(Path(path), root, self._exclude))
 
@@ -753,7 +782,7 @@ class Indexer:
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         vanished: list[str] = []
         for file_path in sorted(set(known) - seen):
-            if _certainly_gone(file_path):
+            if _certainly_gone(root, file_path):
                 vanished.append(file_path)
                 continue
             if blocked and file_path.startswith(blocked):

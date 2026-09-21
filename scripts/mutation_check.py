@@ -325,8 +325,7 @@ MUTATIONS = (
         name="scope: list every project's documents, not this project's",
         module="server.py",
         old=(
-            "        return self._db.list_documents("
-            "str(self._resolve_directory(directory or None)))"
+            "        return self._db.list_documents(str(self._within_root(scope, IndexingError)))"
         ),
         new="        return self._db.list_documents()",
         tests="test_listing_documents_shows_this_project_only",
@@ -706,8 +705,8 @@ MUTATIONS = (
     Mutation(
         name="index: clear failures behind a symlink this walk never followed",
         module="indexer.py",
-        old="        if _behind_symlink(root, path):\n            return False",
-        new="        if False:\n            return False",
+        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
+        new="        if _is_shadowing_symlink(path):",
         tests="test_a_failure_behind_a_symlinked_directory_outlives_a_parent_scan",
     ),
     Mutation(
@@ -727,14 +726,17 @@ MUTATIONS = (
     Mutation(
         name="index: keep a failure standing for a file the walk could not see and that is gone",
         module="indexer.py",
-        old="            if self._walk_would_visit(root, path, blocked) or _certainly_gone(path):",
+        old=(
+            "            if self._walk_would_visit(root, path, blocked) "
+            "or _certainly_gone(root, path):"
+        ),
         new="            if self._walk_would_visit(root, path, blocked):",
         tests="test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does",
     ),
     Mutation(
         name="index: keep answering from a deleted file the walk could not see",
         module="indexer.py",
-        old="            if _certainly_gone(file_path):",
+        old="            if _certainly_gone(root, file_path):",
         new="            if False:",
         tests="test_a_deleted_document_inside_a_pruned_tree_stops_answering",
     ),
@@ -750,6 +752,34 @@ MUTATIONS = (
             "unreachable mount: no evidence either way\n        return True"
         ),
         tests="test_a_file_under_an_unreadable_directory_is_not_taken_for_deleted",
+    ),
+    Mutation(
+        name="index: read a broken symlink's target as a deletion",
+        module="indexer.py",
+        old="    if _behind_symlink(root, path) or os.path.islink(path):\n        return False",
+        new="    if False:\n        return False",
+        tests="test_a_directory_replaced_by_a_broken_symlink_keeps_its_documents",
+    ),
+    Mutation(
+        name="index: clear a failure on a directory the walk only saw the name of",
+        module="indexer.py",
+        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
+        new="        if _behind_symlink(root, path):",
+        tests="test_a_failure_on_a_directory_that_became_a_symlink_outlives_the_swap",
+    ),
+    Mutation(
+        name="index: take a name it could not decode for a file that is gone",
+        module="indexer.py",
+        old="    if _UNDECODABLE in path:\n        return False",
+        new="    if False:\n        return False",
+        tests="test_a_failure_whose_name_could_not_be_decoded_is_not_taken_for_deleted",
+    ),
+    Mutation(
+        name="scope: answer about a directory outside the root this server serves",
+        module="server.py",
+        old="        if resolved != root and root not in resolved.parents:",
+        new="        if False:",
+        tests="test_every_spelling_of_outside_is_refused",
     ),
     Mutation(
         name="answers: call a root nobody indexed complete",
