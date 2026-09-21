@@ -17,9 +17,12 @@ uv run python scripts/reindex_docs.py <directory> --force
 
 - `<directory>` defaults to the configured docs root (`MARKDOWN_MEMORY_DOCS_DIR`, else the
   current directory).
-- `--db PATH` targets a specific database (default `MARKDOWN_MEMORY_DB`, else
-  `$XDG_DATA_HOME/markdown-memory/index.db`). **Use the same database the MCP server uses**,
-  or you will verify a different index than the one being searched.
+- `--db PATH` targets a specific database. Without it the script resolves the same way the
+  server does: `MARKDOWN_MEMORY_DB` if it is set, else the index keyed on the directory
+  being re-indexed (`$XDG_DATA_HOME/markdown-memory/projects/<name>-<digest>/index.db`).
+  That keying is what makes this verify the index the server actually searches; it used to
+  take the database from the environment's root and silently re-index one project into
+  another's.
 - `--embedder {embeddinggemma,bge-small}` must match the server's. **Opening a database
   with the other embedder is destructive**: the vector size differs, so the whole index -
   every directory, not just this one - is discarded on open and must be rebuilt. The
@@ -29,8 +32,9 @@ uv run python scripts/reindex_docs.py <directory> --force
 - Without `--force` it is a normal incremental run followed by the same checks.
 
 Only documents under `<directory>` are dropped; other indexed directories are untouched.
-Expect 2.4-3.8 vectors per second with EmbeddingGemma on CPU (each section costs one
-vector plus one per paragraph, list item, table row and code block).
+Expect 2.4-3.8 vectors per second with EmbeddingGemma on CPU. A vector per paragraph, list
+item, table row and code block; a section costs none of its own, since its vector is pooled
+from its passages.
 
 ## What is verified
 
@@ -49,6 +53,9 @@ The script calls `Database.integrity_problems()` and exits non-zero if it return
 2. Row counts and the vector dimension line.
 3. `integrity: ok`, or every `INTEGRITY PROBLEM:` line verbatim.
 4. Any `ERROR <file>:` lines - those files were not indexed.
+5. The `INCOMPLETE: N file(s) could not be indexed` line, if it appears. It means the root
+   is not certified whole, so every answer drawn from it reports
+   `index_status.coverage: "unknown"` until a clean run finishes. Say which files.
 
 ## If it fails
 

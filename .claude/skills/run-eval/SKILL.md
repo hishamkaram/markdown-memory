@@ -31,7 +31,7 @@ means the gates passed - an exit code of 0 alone does not.
 
 | Gate (held-out set) | Floor | Frozen baseline |
 | --- | --- | --- |
-| Paraphrase Top-1 | >= 80% | 88% |
+| Paraphrase Top-1 | >= 80% | 85% |
 | Paraphrase Top-5 | >= 90% | 97% |
 | Identifier Top-1 (dev and held-out) | = 100% | 100% |
 

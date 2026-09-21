@@ -27,9 +27,13 @@ uv run python scripts/mutation_check.py        # delete guarded behaviours; a te
 git config core.hooksPath .githooks             # once per clone: run that gate on every push
 ```
 
-`.githooks/pre-push` runs `scripts/check.sh` before anything leaves the machine; it is
-this project's CI, since the gate needs the local ONNX model. `git push --no-verify`
-skips it for a work-in-progress branch.
+`.githooks/pre-push` runs `scripts/check.sh` before anything leaves the machine, and
+`.github/workflows/gate.yml` runs the same five steps on every push and pull request,
+across Python 3.11 to 3.14, with the ONNX model restored from a cache keyed on its pinned
+revision. The hook is the one to satisfy - it is what you can run - but `git push
+--no-verify` skips it, which is why CI also exists. `tests/test_agent_docs.py` holds the
+two step lists in the same order. The retrieval gate stays out of CI: it needs a ~25-minute
+index build, holds an exclusive lock, and asserts on latency.
 
 The first run downloads the embedding model (~330 MB) into
 `$XDG_CACHE_HOME/markdown-memory/models`. Tests that need the real model are marked
@@ -39,21 +43,24 @@ The first run downloads the embedding model (~330 MB) into
 
 | Path | Responsibility |
 | --- | --- |
-| `src/markdown_memory/models.py` | Frozen dataclasses: `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `OutlineNode`, `SearchResult`, `IndexReport` |
-| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
+| `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
+| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v4), repository methods, `integrity_problems()` |
 | `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, incremental `Indexer` |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
-| `src/markdown_memory/server.py` | `ServerConfig`, `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
+| `src/markdown_memory/server.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
 | `scripts/eval_data/` | Frozen eval corpus, labelled queries, `baseline.json` |
 
 Storage: `documents` -> `sections` (ON DELETE CASCADE) -> `units` (ON DELETE CASCADE).
 `sections_fts` is an FTS5 external-content table; `sections_vec` and `units_vec` are `vec0`
 tables. Triggers on `sections` and `units` keep all three in sync, including rows removed
-by cascade - application code writes only to `documents`, `sections`, `units` and the two
-vec tables inside `Database.replace_document`.
+by cascade - the content tables are written only through `Database.replace_document`, and
+never `sections_fts` directly. Two tables sit outside that path and carry the index's own
+account of itself: `index_failures` (one row per file that could not be read) and
+`index_coverage` (whether a full run of a root finished), written by `record_failures` and
+the scan bookkeeping in `db.py`.
 
 ## Code style and architecture rules
 
@@ -89,7 +96,7 @@ prompts **must pass** `uv run python scripts/eval_retrieval.py` on the held-out 
 
 | Gate | Floor | Frozen baseline (EmbeddingGemma) |
 | --- | --- | --- |
-| Paraphrase Top-1 | >= 80% | 88% |
+| Paraphrase Top-1 | >= 80% | 85% |
 | Paraphrase Top-5 | >= 90% | 97% |
 | Identifier Top-1 (dev and held-out) | = 100% | 100% |
 
@@ -133,7 +140,7 @@ Work in this order:
    `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
    `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
-   Top-1 ~88%). When `index_status.coverage` is `"unknown"`, the documentation you just
+   Top-1 ~85%). When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it.
 2. **`get_document_outline(file_path)`** - only when you need the structure of a document:

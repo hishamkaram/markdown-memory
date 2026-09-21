@@ -49,6 +49,11 @@ it measures search quality rather than correctness.
 
 Committing is a separate, explicit step: a green gate is not permission to commit.
 
-`.githooks/pre-push` runs this same gate on every push once the clone has been pointed at
-it (`git config core.hooksPath .githooks`), so a red gate cannot reach the remote. Running
-it by hand first is still faster than finding out at push time.
+Two places run this same gate. `.githooks/pre-push` runs it locally once the clone has been
+pointed at it (`git config core.hooksPath .githooks`), and `.github/workflows/gate.yml` runs
+the same five steps on every push and pull request, across Python 3.11 to 3.14. The hook is
+the authoritative one to satisfy - it is what you can run - but it is skippable with
+`--no-verify`, which is exactly why CI exists. A test holds the two step lists in the same
+order, so they cannot drift apart.
+
+Running it by hand first is still faster than finding out at push time.

@@ -269,8 +269,9 @@ class MarkdownMemoryService:
         return self._indexer.index_directory(self._resolve_directory(directory))
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
-        # An empty argument means "this project", not "everything this database holds":
-        # the default database is shared by every project on the machine.
+        # An empty argument means "this project", not "everything this database holds".
+        # The default database is per-root now, but a configured MARKDOWN_MEMORY_DB can
+        # still be shared, and a database outlives the root it was first keyed to.
         scope = self._resolve_directory(directory or None)
         return self._db.list_documents(str(self._within_root(scope, IndexingError)))
 
@@ -711,7 +712,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=[],
         metavar="GLOB",
         help=f"Skip paths matching this glob, relative to the docs root; repeatable "
-        f"(env {ENV_EXCLUDE}, comma or colon separated)",
+        f"(env {ENV_EXCLUDE}, comma separated)",
     )
     parser.add_argument(
         "--embedder",

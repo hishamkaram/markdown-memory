@@ -252,9 +252,10 @@ class HybridSearcher:
         self._embedder = embedder
         self._candidates = candidates_per_index
         self._rrf_k = rrf_k
-        # One database can hold several documentation roots - the default path is shared
-        # by every project on the machine. Without this, an agent working in one project
-        # gets confident answers out of another project's documentation.
+        # One database can hold several documentation roots: the default is keyed per root,
+        # but a configured MARKDOWN_MEMORY_DB can point two of them at one file. Without
+        # this, an agent working in one project gets confident answers out of another
+        # project's documentation.
         self._scope = scope
         # Two long-lived workers so each keeps its own (per-thread) SQLite connection.
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mdmem-search")

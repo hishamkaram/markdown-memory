@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Copy to .mcp.json and replace the path with your clone. It has to be absolute:",
+    "Claude Code does not expand ${workspaceFolder} or ${CLAUDE_PROJECT_DIR} inside",
+    "this file - it reports them as missing and passes them through literally - so a",
+    "variable here would be handed to uv as a directory name of that spelling.",
+    "MARKDOWN_MEMORY_EXCLUDE keeps this repository's own fixtures and vendored eval",
+    "corpus out of its index; set it to whatever is not documentation in yours."
+  ],
+  "mcpServers": {
+    "markdown-memory": {
+      "command": "uv",
+      "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
+      "env": {
+        "MARKDOWN_MEMORY_EXCLUDE": "vendor,third_party,tests/fixtures"
+      }
+    }
+  }
+}
