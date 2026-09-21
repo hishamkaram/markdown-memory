@@ -381,12 +381,39 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             )
 
     def test_the_totals_the_readme_prints_are_the_sum_of_those_files(self) -> None:
+        import make_diagram
+
         total = sum(tokens for _, tokens in self._figures())
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         assert f"{total:,}" in readme, f"README does not print the {total:,}-token total"
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
             assert f"{total:,} tokens" in rendered, f"{svg} prints a stale total"
+
+        # The <img> alt text repeats what comes back as well as what went in, and only the
+        # left-hand total was pinned - so a re-measurement of RIGHT_HITS could redraw the
+        # picture correctly and leave the sentence beside it describing the old one.
+        assert total == make_diagram.TOTAL_TOKENS
+        for figure in (f"{make_diagram.RETURNED_TOKENS:,}", str(make_diagram.BEST_HIT)):
+            assert figure in readme, (
+                f"README does not print {figure!r}, which the drawing beside it does"
+            )
+
+    def test_the_committed_drawing_is_the_one_the_generator_draws(self) -> None:
+        """Byte for byte, so no edit to the picture can skip being redrawn.
+
+        The figure checks below say what the drawing must contain; this says it contains
+        nothing else either. It is what catches an element deleted from the generator whose
+        text happens to be repeated somewhere - removing the 181 beside its bar still left
+        a 181 in the caption underneath, and a search for the figure passed.
+        """
+        import make_diagram
+
+        for theme, colours in make_diagram.THEMES.items():
+            path = ROOT / "docs/assets" / f"how-it-works-{theme}.svg"
+            assert path.read_text(encoding="utf-8") == make_diagram.draw(colours), (
+                f"{path.name} is not what scripts/make_diagram.py draws today; re-run it"
+            )
 
     def test_the_committed_drawing_prints_every_figure_the_generator_holds(self) -> None:
         """A correct total is not a correct picture.
@@ -460,9 +487,19 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             "the <img> fallback must be a raster: it is what a client that ignores "
             "<picture> falls back to"
         )
+        # Follow the path the README actually gives, rather than checking a name this test
+        # chose: a fallback that ends in .png and points at nothing renders as the same
+        # broken-image mark it exists to prevent.
+        fallback = ROOT / img.group(1)
+        assert fallback.is_file(), f"the README's fallback {img.group(1)} does not exist"
         for theme in ("dark", "light"):
-            assert f'srcset="docs/assets/how-it-works-{theme}.svg"' in block, theme
+            source = f"docs/assets/how-it-works-{theme}.svg"
+            assert f'srcset="{source}"' in block, theme
+            assert (ROOT / source).is_file(), f"{source} is offered but not committed"
         assert "prefers-color-scheme: dark" in block, "nothing selects the dark drawing"
+        assert fallback == ROOT / "docs/assets/how-it-works-light.png", (
+            f"the fallback is {img.group(1)}; the checks below measure the light raster"
+        )
 
         # A fallback nothing regenerates is a fallback that goes stale, so hold its size to
         # the drawing's own, at the scale the generator rasterises. Read straight out of the
@@ -508,7 +545,8 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         monkeypatch.setattr(make_diagram, "ROOT", tmp_path)
         monkeypatch.setattr(make_diagram, "rasterise", lambda svg, png: False)
 
-        assert make_diagram.main() != 0, (
+        # `!= 0` would be satisfied by None, which SystemExit reads as success.
+        assert make_diagram.main() == 1, (
             "main() reported success while the PNGs the README falls back to went stale"
         )
         drawn = sorted(p.name for p in (tmp_path / "docs/assets").iterdir())

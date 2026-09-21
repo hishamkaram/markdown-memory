@@ -219,6 +219,14 @@ MUTATIONS = (
         tests="test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning",
     ),
     Mutation(
+        name="diagram: stop drawing the token count beside each returned section",
+        module="make_diagram.py",
+        area="scripts",
+        old='        o.append(text(776, y + 10, f"{tokens}", fill=c["muted"], size=11, anchor="end", font=MONO))\n',  # noqa: E501
+        new="",
+        tests="test_the_committed_drawing_is_the_one_the_generator_draws",
+    ),
+    Mutation(
         name="cache: fingerprint the passages but not the section around them",
         module="eval_cache.py",
         area="scripts",

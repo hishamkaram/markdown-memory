@@ -88,7 +88,14 @@ TOTAL_TOKENS = sum(tokens for _, tokens in LEFT_FILES)
 RETURNED_TOKENS = sum(tokens for tokens, _, _ in RIGHT_HITS)
 BEST_HIT = next(tokens for tokens, _, best in RIGHT_HITS if best)
 # Counts read as words in prose, and prose is what the captions and the aria-label are.
-WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+
+def spell(n: int) -> str:
+    """`4` as "four". Past nine the digits read better anyway, and never raise."""
+    return _WORDS[n] if 0 <= n < len(_WORDS) else str(n)
+
+
 LEFT_BAR = 200.0
 RIGHT_BAR = 200.0
 
@@ -122,9 +129,9 @@ def arrow(x0, x1, y, colour):
 def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
-        f'height="{H}" role="img" aria-label="One question: reading {WORDS[len(LEFT_FILES)]} '
+        f'height="{H}" role="img" aria-label="One question: reading {spell(len(LEFT_FILES))} '
         f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns "
-        f"{WORDS[len(RIGHT_HITS)]} sections totalling {RETURNED_TOKENS:,}, and the one that "
+        f"{spell(len(RIGHT_HITS))} sections totalling {RETURNED_TOKENS:,}, and the one that "
         f'answers is {BEST_HIT} tokens.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
@@ -144,7 +151,7 @@ def draw(c: dict) -> str:
         text(
             40,
             64,
-            f"one question, asked of {WORDS[len(LEFT_FILES)]} documentation files",
+            f"one question, asked of {spell(len(LEFT_FILES))} documentation files",
             fill=c["muted"],
             size=12,
         )
@@ -216,7 +223,16 @@ def draw(c: dict) -> str:
 
     # ---- right: what comes back ----
     o.append(rect(710, 88, 370, 274, fill=c["warmWash"], stroke=c["warmEdge"]))
-    o.append(text(732, 116, "Five sections come back", fill=c["warm"], size=13, weight=600))
+    o.append(
+        text(
+            732,
+            116,
+            f"{spell(len(RIGHT_HITS)).capitalize()} sections come back",
+            fill=c["warm"],
+            size=13,
+            weight=600,
+        )
+    )
     hits = RIGHT_HITS
     y = 140
     for tokens, label, best in hits:
@@ -299,8 +315,15 @@ def rasterise(svg: Path, png: Path) -> bool:
             capture_output=True, text=True,
         )  # fmt: skip
     if done.returncode != 0:
-        # Chrome says why on stderr; swallowing it leaves "it did not work" and nothing else.
-        raise SystemExit(f"{browser} failed to rasterise {svg.name}:\n{done.stderr.strip()}")
+        # Report and carry on rather than exiting here: main() draws both themes, and dying
+        # inside the first one leaves the second theme's SVG and PNG disagreeing too - one
+        # stale pair turned into two. Chrome says why on stderr; swallowing it would leave
+        # "it did not work" and nothing else.
+        print(
+            f"{browser} failed to rasterise {svg.name}:\n{done.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
     return True
 
 
@@ -314,7 +337,7 @@ def main() -> int:
         if rasterise(path, png):
             print(png.relative_to(ROOT))
         else:
-            print(f"  no headless browser found; {png.name} was NOT redrawn", file=sys.stderr)
+            print(f"  {png.name} was NOT redrawn", file=sys.stderr)
             missing = True
     if missing:
         # The SVGs above have already been rewritten, so exiting 0 here would hand back a
@@ -322,7 +345,8 @@ def main() -> int:
         # disagreement between the two images that the fallback exists to avoid. Say so
         # loudly: the drawing is only half regenerated until a browser is installed.
         print(
-            "install chromium and re-run: the PNGs the README falls back to are now stale",
+            "install a headless chromium and re-run: the PNGs the README falls back to are "
+            "now stale",
             file=sys.stderr,
         )
         return 1
