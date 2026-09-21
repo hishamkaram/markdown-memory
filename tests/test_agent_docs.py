@@ -313,3 +313,85 @@ class TestReindexScript:
         assert "768 dimensions (meta: 768" in forced.stdout
         assert "integrity: ok" in forced.stdout
         assert "INTEGRITY PROBLEM" not in forced.stdout
+
+
+class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
+    """The README's picture prints token counts for four real files.
+
+    They were measured, not invented - which means editing any of those files makes the
+    picture false, silently, because nothing reads an SVG. The sweep that produced this
+    branch did exactly that: it rewrote README.md after the diagram had been drawn, and the
+    printed total was 319 tokens short of the truth until this test existed.
+    """
+
+    def _figures(self) -> list[tuple[str, int]]:
+        """The (file, tokens) pairs the generator draws on the left-hand side.
+
+        Imported rather than read off disk, so that mutating the generator mutates what
+        this test measures - a test that re-read the checked-in file would score a
+        falsified figure green.
+        """
+        import make_diagram
+
+        figures = list(make_diagram.LEFT_FILES)
+        assert len(figures) == 4, figures
+        return figures
+
+    def test_every_file_on_the_diagram_still_costs_what_it_says(self) -> None:
+        from markdown_memory.models import estimate_tokens
+
+        # The generator names them by basename; evaluation-protocol.md lives under docs/.
+        roots = {"evaluation-protocol.md": ROOT / "docs"}
+        for name, printed in self._figures():
+            path = roots.get(name, ROOT) / name
+            actual = estimate_tokens(path.read_text(encoding="utf-8"))
+            assert actual == printed, (
+                f"{name} is {actual} tokens, the diagram says {printed}. "
+                f"Re-measure and re-run scripts/make_diagram.py."
+            )
+
+    def test_the_totals_the_readme_prints_are_the_sum_of_those_files(self) -> None:
+        total = sum(tokens for _, tokens in self._figures())
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert f"{total:,}" in readme, f"README does not print the {total:,}-token total"
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            assert f"{total:,} tokens" in rendered, f"{svg} prints a stale total"
+
+    def test_the_sections_the_worked_example_returns_are_the_size_it_claims(self) -> None:
+        """Ranking needs the model; a section's token estimate does not, so pin that."""
+        from markdown_memory.models import estimate_tokens
+        from markdown_memory.parser import MarkdownParser
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
+        assert example, "the README no longer shows a worked example this test can read"
+        listed = re.findall(r"\s*(\d+) tok\s+(\S+)\s+(.+?)\s*$", example.group(1), re.M)
+        assert len(listed) == 5, listed
+
+        parser = MarkdownParser()
+        cache: dict[str, dict[str, int]] = {}
+        for printed, filename, heading_path in listed:
+            if filename not in cache:
+                parsed = parser.parse((ROOT / filename).read_text(encoding="utf-8"))
+                cache[filename] = {
+                    section.heading_path: estimate_tokens(section.content)
+                    for section in parsed.sections
+                }
+            sizes = cache[filename]
+            assert heading_path in sizes, (
+                f"{filename} has no section '{heading_path}'; the example is stale"
+            )
+            assert sizes[heading_path] == int(printed), (
+                f"{filename} '{heading_path}' is {sizes[heading_path]} tokens, "
+                f"the README says {printed}"
+            )
+
+    def test_the_worked_example_adds_up_to_the_total_it_prints(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
+        assert example
+        returned = sum(int(n) for n in re.findall(r"(\d+) tok", example.group(1)))
+        assert f"**{returned:,} tokens instead of" in readme, (
+            f"the five hits total {returned:,}, which is not what the README claims"
+        )

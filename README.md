@@ -11,27 +11,27 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <img src="docs/assets/how-it-works-light.svg" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 10,687
+       alt="One question asked of four documentation files. Reading them whole costs 10,997
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 1,652 tokens - the
+            vectors, fuses the two, and returns five sections totalling 1,663 tokens - the
             one that answers is 184.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 10,687 tokens in all:
+`docs/evaluation-protocol.md`, 10,997 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
-  184 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
   128 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  184 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+  577 tok  README.md  markdown-memory
+  491 tok  CLAUDE.md  markdown-memory > Commands
   283 tok  README.md  markdown-memory > The embedding model > When it goes wrong
-  489 tok  CLAUDE.md  markdown-memory > Commands
-  568 tok  README.md  markdown-memory > The embedding model > Presets
 ```
 
-**1,652 tokens instead of 10,687**, and the section that actually answers is 184 - a
-fifty-eighth of what reading the files costs. Every hit carries its full text, so a good
+**1,663 tokens instead of 10,997**, and the section that actually answers is 184 - a
+sixtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the

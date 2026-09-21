@@ -52,10 +52,27 @@ THEMES = {
 
 W, H = 1120, 430
 
-# Bars are to scale against the largest single thing on the page: README.md at 5,062
+# Bars are to scale against the largest single thing on the page: README.md at 5,368
 # tokens. One scale for both sides, or the comparison the picture exists to make would be
-# drawn dishonestly.
-MAX_TOKENS = 5062
+# drawn dishonestly. tests/test_agent_docs.py re-measures these against the real files:
+# edit the documentation and the figures below stop being true, which is a test failure.
+# What reading each file whole costs, and what the query gives back instead. Both are
+# measured, never estimated: tests/test_agent_docs.py re-derives every number here from the
+# real files and fails when the documentation moves on without the picture.
+LEFT_FILES = [
+    ("README.md", 5368),
+    ("CLAUDE.md", 2987),
+    ("evaluation-protocol.md", 1661),
+    ("AGENTS.md", 981),
+]
+RIGHT_HITS = [
+    (128, "Pre-download it, or install offline", False),
+    (184, "What downloads, when, and where", True),
+    (577, "markdown-memory  (preamble)", False),
+    (491, "Commands  (CLAUDE.md)", False),
+    (283, "When it goes wrong", False),
+]
+MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 LEFT_BAR = 200.0
 RIGHT_BAR = 200.0
 
@@ -90,7 +107,7 @@ def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading four whole files costs '
-        f"10,687 tokens; markdown-memory returns five sections totalling 1,652, and the one "
+        f"10,997 tokens; markdown-memory returns five sections totalling 1,663, and the one "
         f'that answers is 184 tokens.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
@@ -113,12 +130,7 @@ def draw(c: dict) -> str:
     # ---- left: reading the files whole ----
     o.append(rect(40, 88, 310, 274, fill=c["coldWash"], stroke=c["coldEdge"]))
     o.append(text(62, 116, "Read the files", fill=c["cold"], size=13, weight=600))
-    files = [
-        ("README.md", 5062),
-        ("CLAUDE.md", 2984),
-        ("evaluation-protocol.md", 1660),
-        ("AGENTS.md", 981),
-    ]
+    files = LEFT_FILES
     y = 138
     for name, tokens in files:
         o.append(text(62, y, name, fill=c["ink"], size=11, font=MONO))
@@ -138,7 +150,7 @@ def draw(c: dict) -> str:
         )
         y += 46
     o.append(f'<path d="M62 318 L328 318" stroke="{c["coldEdge"]}" stroke-width="1"/>')
-    o.append(text(62, 338, "10,687 tokens", fill=c["cold"], size=14, weight=600))
+    o.append(text(62, 338, "10,997 tokens", fill=c["cold"], size=14, weight=600))
     o.append(text(62, 354, "most of it about something else", fill=c["muted"], size=11))
 
     # ---- middle: what it does with them ----
@@ -182,13 +194,7 @@ def draw(c: dict) -> str:
     # ---- right: what comes back ----
     o.append(rect(710, 88, 370, 274, fill=c["warmWash"], stroke=c["warmEdge"]))
     o.append(text(732, 116, "Five sections come back", fill=c["warm"], size=13, weight=600))
-    hits = [
-        (184, "What downloads, when, and where", True),
-        (128, "Pre-download it, or install offline", False),
-        (283, "When it goes wrong", False),
-        (489, "Commands  (CLAUDE.md)", False),
-        (568, "Presets", False),
-    ]
+    hits = RIGHT_HITS
     y = 140
     for tokens, label, best in hits:
         o.append(
@@ -216,7 +222,7 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, "1,652 tokens", fill=c["warm"], size=14, weight=600))
+    o.append(text(732, 338, "1,663 tokens", fill=c["warm"], size=14, weight=600))
     o.append(
         text(732, 354, "and the one that answers is 184, quoted verbatim", fill=c["muted"], size=11)
     )

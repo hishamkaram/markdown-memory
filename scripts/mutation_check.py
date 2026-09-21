@@ -202,6 +202,15 @@ MUTATIONS = (
         tests="test_a_cache_built_from_another_corpus_is_refused",
     ),
     Mutation(
+        name="diagram: print a token count the files stopped matching",
+        module="make_diagram.py",
+        area="scripts",
+        old='    ("README.md", 5368),',
+        new='    ("README.md", 5062),',
+        tests="test_every_file_on_the_diagram_still_costs_what_it_says "
+        "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
+    ),
+    Mutation(
         name="cache: fingerprint the passages but not the section around them",
         module="eval_cache.py",
         area="scripts",
