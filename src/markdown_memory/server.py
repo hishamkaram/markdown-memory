@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import logging
 import os
 import re
@@ -88,6 +89,37 @@ def _xdg_dir(variable: str, fallback: str) -> Path:
     return Path(configured) if configured else Path.home() / fallback
 
 
+def _project_database(docs_dir: Path) -> Path:
+    """Where one documentation root's index lives when nothing configured it.
+
+    Keyed on the documentation root, never on the working directory. The working directory
+    belongs to whoever launched the server, so two servers started from one directory for
+    two different projects would share a database - which is the cross-project leak this
+    default exists to close, arrived at from the other side. Search is scoped to the docs
+    root, but a document stays resolvable across a whole database by path or unique suffix,
+    so sharing the file is enough to leak one project's documentation into another's answers.
+
+    Kept out of the project too. A database inside the repository is committed by accident,
+    deleted by `git clean -xdf`, rebuilt per worktree, unwritable when the checkout is
+    read-only, and - on a network share - sits where SQLite's WAL cannot take the locks it
+    needs. The name carries the root's own basename so a person can tell the indexes apart,
+    and a digest of its resolved path so two projects called `docs` cannot collide.
+    """
+    try:
+        resolved = docs_dir.expanduser().resolve()
+    except (OSError, RuntimeError):  # symlink loop, or a path the OS will not resolve
+        resolved = docs_dir.expanduser().absolute()
+    digest = hashlib.sha256(os.fsencode(str(resolved))).hexdigest()[:12]
+    label = re.sub(r"[^A-Za-z0-9_.-]", "-", resolved.name) or "root"
+    return (
+        _xdg_dir("XDG_DATA_HOME", ".local/share")
+        / "markdown-memory"
+        / "projects"
+        / f"{label}-{digest}"
+        / "index.db"
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class ServerConfig:
     """Runtime configuration, resolved from the environment (CLI flags override)."""
@@ -107,11 +139,11 @@ class ServerConfig:
         docs_dir = _configured_path(ENV_DOCS_DIR, root)
         model_cache = _configured_path(ENV_MODEL_CACHE, root)
         return cls(
-            db_path=(
-                db_path
-                if db_path
-                else _xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"
-            ),
+            # One index per documentation root, rather than one for the whole machine.
+            # Isolation should not depend on the user having set an environment variable.
+            # The model cache below stays shared on purpose: 330 MB of read-only weights,
+            # identical everywhere, and copying it per project would be pure waste.
+            db_path=(db_path if db_path else _project_database(docs_dir if docs_dir else root)),
             docs_dir=docs_dir if docs_dir else root,
             embedder=os.environ.get(ENV_EMBEDDER, "").strip() or DEFAULT_EMBEDDER,
             model_cache_dir=(
@@ -121,6 +153,34 @@ class ServerConfig:
             ),
             exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
         )
+
+
+def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
+    """Environment configuration with the command line laid over it.
+
+    `--docs-dir` names a different documentation root, and the default database is keyed on
+    that root, so it has to re-key: taking `ServerConfig.from_env().db_path` as the fallback
+    reads a path derived from the *environment's* root, and two servers launched from one
+    directory with different `--docs-dir` would land in the launcher's single database -
+    exactly the cross-project leak keying was added to close. An explicitly configured
+    database still wins, from the flag or the environment, in that order.
+    """
+    base = ServerConfig.from_env()
+    docs_dir = arguments.docs_dir.expanduser() if arguments.docs_dir else base.docs_dir
+    configured_db = _configured_path(ENV_DB_PATH, _project_root())
+    return ServerConfig(
+        db_path=(
+            arguments.db.expanduser()
+            if arguments.db
+            else configured_db
+            if configured_db
+            else _project_database(docs_dir)
+        ),
+        docs_dir=docs_dir,
+        embedder=arguments.embedder or base.embedder,
+        model_cache_dir=base.model_cache_dir,
+        exclude=tuple(arguments.exclude) or base.exclude,
+    )
 
 
 def _project_root() -> Path:
@@ -240,11 +300,20 @@ class MarkdownMemoryService:
     # ------------------------------------------------------------------ resolution
 
     def _resolve_directory(self, directory: str | None) -> Path:
+        """Resolve against the root this server settled on, never the configured spelling.
+
+        The docs root is resolved once at construction precisely so a retargeted symlink
+        cannot make the server answer from one tree while reporting on another. Resolving
+        the configured path again here reopened that door from the other side: indexing
+        followed the link to its new target and wrote rows the frozen root can never see,
+        `list_documents()` with no argument then resolved outside its own root and raised,
+        and a restart keyed a different database and read as never indexed.
+        """
         if directory is None or not directory.strip():
-            return _absolute(self._config.docs_dir, IndexingError)
+            return Path(self._root)
         path = _user_path(directory.strip(), IndexingError)
         if not path.is_absolute():
-            path = self._config.docs_dir / path
+            path = Path(self._root) / path
         return _absolute(path, IndexingError)
 
     def _within_root(self, resolved: Path, error: type[MarkdownMemoryError]) -> Path:
@@ -637,16 +706,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     arguments = parser.parse_args(argv)
 
     configure_logging(arguments.log_level)
-    base = ServerConfig.from_env()
-    db_path: Path | None = arguments.db
-    docs_dir: Path | None = arguments.docs_dir
-    config = ServerConfig(
-        db_path=db_path.expanduser() if db_path else base.db_path,
-        docs_dir=docs_dir.expanduser() if docs_dir else base.docs_dir,
-        embedder=arguments.embedder or base.embedder,
-        model_cache_dir=base.model_cache_dir,
-        exclude=tuple(arguments.exclude) or base.exclude,
-    )
+    config = _config_from_cli(arguments)
     try:
         service = MarkdownMemoryService(config)
     except MarkdownMemoryError:

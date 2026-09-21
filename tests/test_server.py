@@ -453,7 +453,12 @@ def test_config_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.chdir(tmp_path)
     defaults = ServerConfig.from_env()
-    assert defaults.db_path == tmp_path / "data" / "markdown-memory" / "index.db"
+    # One index per documentation root, under the shared data directory: keyed on the
+    # root it serves, never on the working directory of whoever launched the server.
+    shared = tmp_path / "data" / "markdown-memory" / "projects"
+    assert defaults.db_path.parent.parent == shared
+    assert defaults.db_path.name == "index.db"
+    assert defaults.db_path.parent.name.startswith(tmp_path.name + "-")
     assert defaults.docs_dir == tmp_path
 
 

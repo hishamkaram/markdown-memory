@@ -62,6 +62,39 @@ class Mutation:
 
 MUTATIONS = (
     Mutation(
+        name="scope: resolve the configured docs root again on every scan",
+        module="server.py",
+        old=(
+            "        if directory is None or not directory.strip():\n"
+            "            return Path(self._root)"
+        ),
+        new=(
+            "        if directory is None or not directory.strip():\n"
+            "            return _absolute(self._config.docs_dir, IndexingError)"
+        ),
+        tests="test_a_scan_after_a_retarget_stays_with_the_root_it_serves",
+    ),
+    Mutation(
+        name="config: keep the launcher's database when --docs-dir names another project",
+        module="server.py",
+        old="            else _project_database(docs_dir)",
+        new="            else base.db_path",
+        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database",
+    ),
+    Mutation(
+        name="config: put every project's index back in one shared database",
+        module="server.py",
+        old=(
+            "            db_path=(db_path if db_path else "
+            "_project_database(docs_dir if docs_dir else root)),"
+        ),
+        new=(
+            "            db_path=(db_path if db_path else "
+            '_xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"),'
+        ),
+        tests="test_one_working_directory_two_projects_two_databases",
+    ),
+    Mutation(
         name="max-sim: rank a section by its own vector, never by its best passage",
         module="search.py",
         old=(

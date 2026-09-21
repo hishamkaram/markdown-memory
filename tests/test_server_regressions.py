@@ -5,6 +5,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -19,6 +20,7 @@ import markdown_memory.server as server_module
 from markdown_memory.exceptions import (
     ConfigurationError,
     DatabaseError,
+    DocumentNotFoundError,
     IndexingError,
     SearchError,
 )
@@ -385,7 +387,12 @@ class TestProjectScopedConfiguration:
         config = json.loads((Path(__file__).parent.parent / ".mcp.json").read_text())
         environment = config["mcpServers"]["markdown-memory"]["env"]
         assert not any("${" in value for value in environment.values())
-        assert not Path(environment["MARKDOWN_MEMORY_DB"]).is_absolute()
+        # The database is keyed on the docs root now, so the shipped config sets no path at
+        # all. Any path it does set must stay relative: the server resolves one against the
+        # project root, and an absolute path in a committed config belongs to one machine.
+        for name in (server_module.ENV_DB_PATH, server_module.ENV_DOCS_DIR):
+            if name in environment:
+                assert not Path(environment[name]).is_absolute()
 
 
 class TestOneDatabaseManyProjects:
@@ -820,5 +827,182 @@ class TestADirectoryArgumentCannotLeaveTheRoot:
             service.index_directory()
             assert [d.file_path for d in service.list_documents("api")] == [str(nested / "ref.md")]
             assert service.index_status("api").verified
+        finally:
+            service.close()
+
+
+class TestEachProjectKeepsItsOwnIndex:
+    """The default database was shared by every project on the machine.
+
+    Search has been scoped to the docs root since it once answered one project's question
+    out of another's documentation, but scoping is a filter over a shared file, not
+    isolation: a document stays resolvable across the whole database by path or unique
+    suffix, and one project's failure rows and coverage certificate sat beside another's.
+    The safe arrangement existed - set MARKDOWN_MEMORY_DB - but it was opt-in, so anyone
+    who simply ran the server got the unsafe one.
+
+    The index is keyed on the documentation root, and the first attempt keyed it on the
+    working directory instead. That closed nothing for a launcher that starts both servers
+    from one directory - a CI runner, an editor daemon, a shell that never changed
+    directory - because both projects landed in one database again.
+    """
+
+    @staticmethod
+    def project(root: Path, name: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{name}.md").write_text(f"# {name}\n\n## Retry policy\n\n{name} body\n")
+        return root
+
+    def test_one_working_directory_two_projects_two_databases(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alpha = self.project(tmp_path / "alpha", "alpha")
+        beta = self.project(tmp_path / "beta", "beta")
+        launcher = tmp_path / "runner"
+        launcher.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        # Neither server is started from its own project: the cwd is the launcher's.
+        monkeypatch.chdir(launcher)
+
+        databases = []
+        for root in (alpha, beta):
+            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            config = ServerConfig.from_env()
+            databases.append(config.db_path)
+            service = MarkdownMemoryService(config, fake_embedder)
+            try:
+                service.index_directory()
+            finally:
+                service.close()
+
+        assert databases[0] != databases[1], "two projects shared one database"
+        assert not (launcher / ".markdown-memory").exists(), "an index was written to the cwd"
+        for root in (alpha, beta):
+            assert list(root.iterdir()) == [root / f"{root.name}.md"], (
+                "an index was written into the project"
+            )
+
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(beta))
+        service = MarkdownMemoryService(ServerConfig.from_env(), fake_embedder)
+        try:
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["beta.md"]
+            # Resolution by path or unique suffix is database-wide, so a shared file hands
+            # this over however search is scoped.
+            with pytest.raises(DocumentNotFoundError):
+                service.get_document_outline(str(alpha / "alpha.md"))
+        finally:
+            service.close()
+
+    def test_two_roots_of_the_same_name_do_not_collide(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The label is only for humans; the digest is what keeps them apart."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        first = tmp_path / "one" / "docs"
+        second = tmp_path / "two" / "docs"
+        paths = []
+        for root in (first, second):
+            root.mkdir(parents=True)
+            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            paths.append(ServerConfig.from_env().db_path)
+        assert paths[0] != paths[1], "two roots named 'docs' shared one index"
+        assert all(p.parent.name.startswith("docs-") for p in paths)
+
+
+class TestTheCommandLineRekeysTheDatabase:
+    """`--docs-dir` names a different project, so the default database must follow it.
+
+    The command line was laid over a configuration whose database path had already been
+    derived from the *environment's* docs root. Two servers launched from one directory
+    with different `--docs-dir` therefore shared the launcher's single database and could
+    resolve each other's documents - the cross-project leak that keying the database on
+    the documentation root exists to close, reached through the one path that skipped it.
+    """
+
+    @staticmethod
+    def config(docs: Path | None, db: Path | None = None) -> ServerConfig:
+        arguments = argparse.Namespace(docs_dir=docs, db=db, embedder=None, exclude=[])
+        return server_module._config_from_cli(arguments)
+
+    @pytest.fixture(autouse=True)
+    def _launcher(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        for name in (
+            server_module.ENV_DB_PATH,
+            server_module.ENV_DOCS_DIR,
+            server_module.ENV_PROJECT_DIR,
+        ):
+            monkeypatch.delenv(name, raising=False)
+        launcher = tmp_path / "launcher"
+        launcher.mkdir()
+        monkeypatch.chdir(launcher)
+        yield
+
+    def test_two_docs_dir_flags_do_not_share_the_launcher_s_database(self, tmp_path: Path) -> None:
+        alpha, beta = tmp_path / "alpha", tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+        assert self.config(alpha).db_path != self.config(beta).db_path, (
+            "two --docs-dir projects shared the launcher's database"
+        )
+
+    def test_an_explicit_database_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keying is the default, not a policy: whoever names a database gets it."""
+        alpha = tmp_path / "alpha"
+        alpha.mkdir()
+        flag = tmp_path / "flag.db"
+        assert self.config(alpha, flag).db_path == flag, "--db stopped winning"
+        monkeypatch.setenv(server_module.ENV_DB_PATH, str(tmp_path / "from_env.db"))
+        assert self.config(alpha).db_path == tmp_path / "from_env.db", (
+            "MARKDOWN_MEMORY_DB stopped winning"
+        )
+        assert self.config(alpha, flag).db_path == flag, "the flag lost to the environment"
+
+
+class TestARetargetedDocsSymlinkStrandsNothing:
+    """The docs root is resolved once; every question and every scan must use that answer.
+
+    Resolving it once was the fix for a retargeted symlink letting the server answer from
+    one tree while reporting on another. `_resolve_directory` kept resolving the configured
+    path again, which reopened the same hole from the indexing side: a scan followed the
+    link to its new target and wrote documents and coverage the frozen root could never
+    see, `list_documents()` with no argument resolved outside its own root and raised
+    outright, and the next start keyed a different database that read as never indexed.
+    """
+
+    def test_a_scan_after_a_retarget_stays_with_the_root_it_serves(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        first = tmp_path / "real-a"
+        first.mkdir()
+        (first / "alpha.md").write_text("# Alpha\n\n## Retry policy\n\nalpha body\n")
+        second = tmp_path / "real-b"
+        second.mkdir()
+        (second / "beta.md").write_text("# Beta\n\n## Retry policy\n\nbeta body\n")
+        link = tmp_path / "docs"
+        link.symlink_to(first)
+
+        config = ServerConfig(db_path=tmp_path / "index.db", docs_dir=link)
+        service = MarkdownMemoryService(config, fake_embedder)
+        try:
+            service.index_directory()
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["alpha.md"]
+
+            link.unlink()
+            link.symlink_to(second)
+
+            report = service.index_directory()
+            assert Path(report.directory) == first, "a scan followed the link off its own root"
+            # The question that used to raise: no argument at all.
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["alpha.md"]
+            assert service.index_status().verified, "the root lost the certificate it had"
         finally:
             service.close()

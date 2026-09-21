@@ -64,8 +64,10 @@ Claude Desktop has no meaningful working directory, so set the root explicitly:
 ### One index per project
 
 Drop a `.mcp.json` like this into any repository whose documentation you want searchable.
-Each project then owns its index: its own database inside the project, its own exclusions,
-and no chance of another project's sections appearing in its results.
+Each project owns its index without being told to: the database is keyed on the
+documentation root it serves, so a project gets its own exclusions and no chance of
+another project's sections - or another project's documents, which stay resolvable by
+path across any database they share - appearing in its results.
 
 ```json
 {
@@ -74,7 +76,6 @@ and no chance of another project's sections appearing in its results.
       "command": "uv",
       "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
       "env": {
-        "MARKDOWN_MEMORY_DB": ".markdown-memory/index.db",
         "MARKDOWN_MEMORY_EXCLUDE": "vendor,third_party,tests/fixtures"
       }
     }
@@ -82,25 +83,32 @@ and no chance of another project's sections appearing in its results.
 }
 ```
 
-The paths are relative on purpose. Claude Code expands only real environment variables in
-`.mcp.json`: `${workspaceFolder}` is a VS Code idea, and even `${CLAUDE_PROJECT_DIR}` is
-not set at expansion time - measured on Claude Code 2.1.278, both produce a *"Missing
-environment variables"* warning and are passed through as literal text, which would make
-the server index a directory named `${workspaceFolder}` and report success over zero
-files. The server refuses such a value outright, and resolves a relative path against
-`CLAUDE_PROJECT_DIR` (which Claude Code *does* export to the spawned server) or the
-working directory. The docs root defaults to that same project root, so it needs no entry.
+Any path you do add is written relative, on purpose. Claude Code expands only real
+environment variables in `.mcp.json`: `${workspaceFolder}` is a VS Code idea, and even
+`${CLAUDE_PROJECT_DIR}` is not set at expansion time - measured on Claude Code 2.1.278,
+both produce a *"Missing environment variables"* warning and are passed through as literal
+text, which would make the server index a directory named `${workspaceFolder}` and report
+success over zero files. The server refuses such a value outright, and resolves a relative
+path against `CLAUDE_PROJECT_DIR` (which Claude Code *does* export to the spawned server),
+falling back to the working directory only when that is not set. The docs root defaults to
+that same project root, so it needs no entry. Each worktree of a repository is its own
+directory, so each gets its own index.
 
-Add `.markdown-memory/` to that repository's `.gitignore`: the index is a cache of the
-Markdown files and is rebuilt from them. This repository ships exactly such a file, which
-indexes its own six documentation files and keeps the vendored evaluation corpus out.
+Nothing is written into the repository, so there is nothing to add to its `.gitignore`.
+The index lives under `$XDG_DATA_HOME/markdown-memory/projects/`, in a directory named for
+the documentation root and a digest of its resolved path - out of reach of `git clean
+-xdf`, writable when the checkout is not, and on local disk when the checkout is on a
+network share, where SQLite's write-ahead log cannot take the locks it needs. Set
+`MARKDOWN_MEMORY_DB` to override it; a relative value is resolved against the project
+root. The index is a cache of the Markdown files and is rebuilt from them, so deleting it
+costs only the time to index again.
 
 ## Configuration
 
 | Environment variable | CLI flag | Default |
 | --- | --- | --- |
 | `MARKDOWN_MEMORY_DOCS_DIR` | `--docs-dir` | current working directory |
-| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/index.db` (`~/.local/share/...`) |
+| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/projects/<root>-<digest>/index.db` — one index per docs root |
 | `MARKDOWN_MEMORY_MODEL_CACHE` | - | `$XDG_CACHE_HOME/markdown-memory/models` (`~/.cache/...`) |
 | `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | nothing excluded |
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
