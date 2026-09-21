@@ -18,6 +18,7 @@ an indexing transaction is open.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -172,6 +173,11 @@ def serialize_embedding(embedding: Sequence[float]) -> bytes:
 def _is_usable_vector(embedding: Sequence[float]) -> bool:
     """Cosine distance is undefined (NaN) for non-finite or zero-length vectors."""
     return all(math.isfinite(value) for value in embedding) and any(embedding)
+
+
+def _incomplete_key(root: str) -> str:
+    """A meta key naming one documentation root, hashed so any path is a valid key."""
+    return "incomplete:" + hashlib.sha256(root.encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
 def _directory_prefix(directory: str) -> str:
@@ -468,15 +474,25 @@ class Database:
             ).fetchall()
         return {str(key): str(value) for key, value in rows}
 
-    def record_notice(self, message: str) -> None:
-        """Leave a message for whoever next indexes this database.
+    def mark_incomplete(self, root: str, message: str) -> None:
+        """Remember that ``root`` is only partly indexed, until a clean run says otherwise.
 
-        Used when a run ends with files it could not read: the run itself reports them,
-        but the next one - possibly in another process, days later - would otherwise see
-        a complete-looking index with no sign that part of the tree is missing.
+        Deliberately *not* the notice queue: notices are database-wide and dismissed by
+        whoever reads them first, so one root's failure would be delivered to another
+        root's run and deleted there - leaving the affected root silent forever. One
+        database can hold several roots, and the default database holds every project on
+        the machine.
         """
+        self.set_meta(_incomplete_key(root), message)
+
+    def clear_incomplete(self, root: str) -> None:
+        """Forget it: this root indexed cleanly."""
         with self.transaction() as conn:
-            _add_notice(conn, message)
+            conn.execute("DELETE FROM meta WHERE key = ?", (_incomplete_key(root),))
+
+    def incomplete_note(self, root: str) -> str | None:
+        """Why ``root`` is partly indexed, or ``None`` when it is whole."""
+        return self.get_meta(_incomplete_key(root))
 
     def dismiss_notices(self, keys: Iterable[str]) -> None:
         """Forget the notices that have been delivered; any added since are kept."""

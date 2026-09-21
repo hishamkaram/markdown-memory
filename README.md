@@ -153,8 +153,11 @@ times faster at a real cost in accuracy - see the table above. EmbeddingGemma is
    identifier-like term - a stray match on "data" or "deploy" no longer outvotes the
    vector index.
 2. **Vectors.** Every paragraph, list item, table row (rendered as `Header: cell; ...`) and
-   code block - also inside block quotes and list items - is embedded separately, alongside
-   one vector for the section. A passage longer than 600 characters is split into
+   code block - also inside block quotes and list items - is embedded separately. The
+   section's own vector is the mean of those passage vectors, not a separate embedding of
+   the whole section: the model truncates at 512 tokens, which a long section exceeds. It
+   is an aggregate of the passages rather than independent evidence about the section, and
+   it finds no section that the passages do not. A passage longer than 600 characters is split into
    consecutive windows at line, sentence or word boundaries, so a long command list or
    configuration block keeps a vector for all of itself rather than for its first 600
    characters. A table split across `(Part n)` sections keeps its header for every part. A

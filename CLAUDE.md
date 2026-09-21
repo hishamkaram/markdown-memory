@@ -3,7 +3,8 @@
 Local MCP server that indexes Markdown documentation so coding agents fetch one heading's
 text instead of whole files. Markdown is parsed into an AST (`markdown-it-py`), cut into
 heading-delimited sections, and stored in a single SQLite file with three indexes: FTS5
-(BM25 keywords), `sqlite-vec` section vectors, and `sqlite-vec` passage vectors (one per
+(BM25 keywords), `sqlite-vec` section vectors (the mean of a section's passage vectors, since the
+embedder truncates at 512 tokens), and `sqlite-vec` passage vectors (one per
 paragraph, list item, table row, code block). Embeddings are local ONNX on CPU:
 EmbeddingGemma-300m by default (768 dims), `bge-small-en-v1.5` via fastembed as the light
 preset (384 dims). Search fuses keyword and vector rankings with Reciprocal Rank Fusion.

@@ -310,6 +310,34 @@ class TestSectionVectorsCoverTheWholeSection:
         nearest = db.vec_search(centroid, 1)
         assert nearest and nearest[0][1] < 1e-6, f"section vector is not the centroid: {nearest}"
 
+    def test_passages_that_cancel_produce_no_vector_rather_than_noise(self) -> None:
+        """`norm == 0.0` was the wrong test.
+
+        Opposing passages cancel to float residue near 1e-16, and dividing that by its
+        own magnitude yields a full-length vector pointing in an arbitrary direction -
+        which then answers arbitrary queries with this section.
+        """
+        from markdown_memory.indexer import _mean_vector
+
+        assert _mean_vector([[1.0, 0.0], [-1.0, 0.0]]) is None
+        assert _mean_vector([[1.0, 0.0], [-1.0, 1e-17]]) is None
+        assert _mean_vector([]) is None
+
+    def test_cancelling_passages_do_not_cost_the_file_its_place(self) -> None:
+        """Storage rejects a body-bearing section with no vector, and rejects the whole
+        file with it. Passages that cancel must not be able to do that."""
+        from markdown_memory.indexer import _section_vector
+
+        assert _section_vector([[1.0, 0.0], [-1.0, 0.0]]) == [1.0, 0.0]
+        assert _section_vector([]) is None
+
+    def test_a_single_passage_pools_to_itself(self) -> None:
+        from markdown_memory.indexer import _mean_vector
+
+        pooled = _mean_vector([[0.6, 0.8]])
+        assert pooled is not None
+        assert pooled == pytest.approx([0.6, 0.8])
+
     def test_a_section_with_no_body_still_has_no_vector(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:

@@ -67,6 +67,10 @@ _GEMMA_BATCH_SIZE = 4
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 MAX_FILE_BYTES = 10 * 1024 * 1024
+# Below this the pooled direction is rounding noise rather than a direction. Unit vectors
+# that genuinely cancel land near 1e-16; a real centroid of normalised passages is >= 1/n
+# of one passage, which for the 64-passage ceiling is ~0.015.
+_MIN_POOLED_NORM = 1e-6
 _EMBED_BATCH_SIZE = 32
 _MODEL_META_KEY = "embedding_model"
 _SKIPPED_DIRECTORIES = frozenset(
@@ -320,6 +324,20 @@ def _inference_threads() -> int:
     return int(override) if override.isdigit() and int(override) > 0 else 0
 
 
+def _section_vector(units: Sequence[Sequence[float]]) -> list[float] | None:
+    """The vector stored for a section: pooled, or one of its passages if pooling fails.
+
+    A section with passages must have a vector - the storage layer rejects the whole file
+    otherwise - so passages that cancel each other out cannot be allowed to cost the file
+    its place in the index. Falling back to the first passage keeps a direction that is
+    at least the section's own text.
+    """
+    if not units:
+        return None
+    pooled = _mean_vector(units)
+    return pooled if pooled is not None else list(units[0])
+
+
 def _mean_vector(vectors: Sequence[Sequence[float]]) -> list[float] | None:
     """The centroid of ``vectors``, renormalised, or ``None`` for a section with no body.
 
@@ -331,13 +349,12 @@ def _mean_vector(vectors: Sequence[Sequence[float]]) -> list[float] | None:
     """
     if not vectors:
         return None
-    dimension = len(vectors[0])
-    totals = [0.0] * dimension
-    for vector in vectors:
-        for index, value in enumerate(vector):
-            totals[index] += value
-    norm = math.sqrt(sum(value * value for value in totals))
-    if norm == 0.0:  # opposing passages that cancel out; no direction to report
+    totals = [math.fsum(values) for values in zip(*vectors, strict=True)]
+    norm = math.sqrt(math.fsum(value * value for value in totals))
+    # Not `== 0.0`: passages that point opposite ways cancel to float residue near 1e-16,
+    # and dividing that by its own magnitude turns rounding noise into a full-length
+    # vector aimed in an arbitrary direction, which then matches arbitrary queries.
+    if norm < _MIN_POOLED_NORM:
         return None
     return [value / norm for value in totals]
 
@@ -424,6 +441,11 @@ def parse_exclusions(value: str) -> tuple[str, ...]:
         if cleaned:
             patterns.append(cleaned)
     return tuple(patterns)
+
+
+def _standing(note: str | None) -> tuple[str, ...]:
+    """The root's outstanding incompleteness, if it had one before this run started."""
+    return () if note is None else (note,)
 
 
 def _printable(path: str) -> str:
@@ -530,6 +552,9 @@ class Indexer:
                     passages_indexed += counts[1]
 
             purged = self._db.delete_documents(self._vanished(root, known_hashes, seen, unreadable))
+            # Settle this root's completeness before the report quotes it, so a run that
+            # fixed everything does not hand back the warning it just cleared.
+            self._record_completeness(root, failures)
             report = IndexReport(
                 directory=_printable(str(root)),
                 files_scanned=len(seen),
@@ -540,19 +565,31 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notices.values()),
+                notes=tuple(notices.values()) + _standing(self._db.incomplete_note(str(root))),
             )
             self._db.dismiss_notices(notices)
-        if failures:
-            names = ", ".join(failure.file_path for failure in failures[:3])
-            if len(failures) > 3:
-                names += f", and {len(failures) - 3} more"
-            self._db.record_notice(
-                f"{_printable(str(root))} was indexed with {len(failures)} unreadable "
-                f"file(s) ({names}); the index for this root is incomplete."
-            )
         logger.info(report.summary())
         return report
+
+    def _record_completeness(self, root: Path, failures: Sequence[FileFailure]) -> None:
+        """Remember, or forget, that this root is only partly indexed.
+
+        Kept per root and reported on *every* later run of that root rather than handed
+        to the next run that happens along: a one-shot message is delivered to whichever
+        root indexes next, and read by a run that was itself perfectly clean.
+        """
+        key = str(root)
+        if not failures:
+            self._db.clear_incomplete(key)
+            return
+        names = ", ".join(failure.file_path for failure in failures[:3])
+        if len(failures) > 3:
+            names += f", and {len(failures) - 3} more"
+        self._db.mark_incomplete(
+            key,
+            f"{len(failures)} file(s) could not be indexed ({names}); this root is "
+            "only partly searchable until they are readable and indexed again.",
+        )
 
     @staticmethod
     def _vanished(
@@ -611,7 +648,7 @@ class Indexer:
         vectors = []
         for section in parsed.sections:
             units = tuple(next(embedded) for _ in section.units)
-            vectors.append(SectionVectors(section=_mean_vector(units), units=units))
+            vectors.append(SectionVectors(section=_section_vector(units), units=units))
         self._db.replace_document(
             file_path=file_path,
             title=parsed.title,

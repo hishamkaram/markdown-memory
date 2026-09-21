@@ -843,34 +843,61 @@ class TestAPartialIndexSaysSo:
         finally:
             broken.chmod(0o644)
 
-    def test_the_next_run_is_told_too(
+    def test_every_later_run_is_told_while_it_is_still_broken(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
-        """The next run may be another process, days later, with the file readable again.
+        """The warning stands as long as the root is incomplete.
 
-        Without a persisted notice it would see a complete-looking index and no hint that
-        part of the tree had been missing all along.
+        Handing it to whichever run comes next and forgetting it is worse than useless:
+        that run may be a different root, or the same root on a day when nothing failed.
         """
         broken = self.tree(tmp_path)
         indexer = Indexer(db, fake_embedder)
         try:
             indexer.index_directory(tmp_path)
+            second = indexer.index_directory(tmp_path)
+            assert any("only partly searchable" in note for note in second.notes), second.notes
+            third = indexer.index_directory(tmp_path)
+            assert any("only partly searchable" in note for note in third.notes), third.notes
         finally:
             broken.chmod(0o644)
-        second = indexer.index_directory(tmp_path)
-        assert any("incomplete" in note for note in second.notes), second.notes
 
-    def test_a_clean_run_leaves_nothing_behind(
+    def test_one_root_never_wears_another_root_s_failure(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
-        """A notice that outlives the problem is noise, and noise gets ignored."""
+        """One database can hold several roots, and the default one holds every project.
+
+        A warning kept database-wide is delivered to whichever root indexes next and
+        dismissed there, so the root that is actually broken goes quiet forever while an
+        unrelated root is told its index is incomplete.
+        """
+        alpha = tmp_path / "alpha"
+        broken = self.tree(alpha)
+        beta = tmp_path / "beta"
+        beta.mkdir()
+        (beta / "fine.md").write_text("# Fine\n\nnothing wrong here\n")
+        indexer = Indexer(db, fake_embedder)
+        try:
+            indexer.index_directory(alpha)
+            healthy = indexer.index_directory(beta)
+            assert healthy.notes == (), f"beta was told about alpha: {healthy.notes}"
+            assert "INCOMPLETE" not in healthy.summary()
+            # and alpha still knows, rather than having been silenced by beta's run
+            again = indexer.index_directory(alpha)
+            assert any("only partly searchable" in note for note in again.notes), again.notes
+        finally:
+            broken.chmod(0o644)
+
+    def test_a_clean_run_clears_it(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """A warning that outlives its problem is noise, and noise gets ignored."""
         broken = self.tree(tmp_path)
         indexer = Indexer(db, fake_embedder)
         try:
             indexer.index_directory(tmp_path)
         finally:
             broken.chmod(0o644)
-        indexer.index_directory(tmp_path)  # delivers and dismisses the notice
-        third = indexer.index_directory(tmp_path)
-        assert third.notes == ()
-        assert "INCOMPLETE" not in third.summary()
+        fixed = indexer.index_directory(tmp_path)
+        assert fixed.notes == ()
+        assert "INCOMPLETE" not in fixed.summary()

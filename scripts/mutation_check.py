@@ -416,7 +416,10 @@ MUTATIONS = (
     Mutation(
         name="vectors: embed the whole section again, truncation and all",
         module="indexer.py",
-        old="            vectors.append(SectionVectors(section=_mean_vector(units), units=units))",
+        old=(
+            "            vectors.append("
+            "SectionVectors(section=_section_vector(units), units=units))"
+        ),
         new=(
             "            vectors.append("
             "SectionVectors(section=units[0] if units else None, units=units))"
@@ -426,8 +429,8 @@ MUTATIONS = (
     Mutation(
         name="vectors: give a body-less section a vector pointing nowhere",
         module="indexer.py",
-        old="    if not vectors:\n        return None",
-        new="    if not vectors:\n        return [0.0]",
+        old="    if not units:\n        return None",
+        new="    if not units:\n        return [0.0]",
         tests="test_a_section_with_no_body_still_has_no_vector",
     ),
     Mutation(
@@ -444,11 +447,32 @@ MUTATIONS = (
         tests="test_the_run_that_hits_it_calls_the_index_incomplete",
     ),
     Mutation(
-        name="index: forget by the next run that the tree was incomplete",
+        name="index: forget that a root was left incomplete",
         module="indexer.py",
-        old="            self._db.record_notice(",
-        new="            _ = lambda *a: None; _(",
-        tests="test_the_next_run_is_told_too",
+        old="        self._db.mark_incomplete(",
+        new="        _ = lambda *a, **k: None; _(",
+        tests="test_every_later_run_is_told_while_it_is_still_broken",
+    ),
+    Mutation(
+        name="vectors: normalise rounding noise into a direction",
+        module="indexer.py",
+        old="    if norm < _MIN_POOLED_NORM:",
+        new="    if norm == 0.0:",
+        tests="test_passages_that_cancel_produce_no_vector_rather_than_noise",
+    ),
+    Mutation(
+        name="index: keep one root's incompleteness where every root can eat it",
+        module="db.py",
+        old='    return "incomplete:" + hashlib.sha256(',
+        new='    return "incomplete:" + "" * len(',
+        tests="test_one_root_never_wears_another_root_s_failure",
+    ),
+    Mutation(
+        name="vectors: let a cancelling section take its whole file out of the index",
+        module="indexer.py",
+        old="    return pooled if pooled is not None else list(units[0])",
+        new="    return pooled",
+        tests="test_cancelling_passages_do_not_cost_the_file_its_place",
     ),
 )
 
