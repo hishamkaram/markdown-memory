@@ -401,13 +401,15 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 )
 
     def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
-        """GitHub's mobile app cannot draw an SVG in a README.
+        """Browsers get the vector; anything that ignores <picture> gets a raster.
 
-        Pointing <img> at a PNG was not enough on its own: the app honours <source> far
-        enough to choose one, so an SVG offered there is still what it reaches for, and it
-        still drew a broken-image mark with the PNG sitting right underneath. No candidate
-        in this block may be an SVG. Dark mode survives as a second PNG, and the SVGs stay
-        the source of truth in docs/assets, which the PNGs are rasterised from.
+        The GitHub mobile app draws neither, but that is not something this markup can fix:
+        the app cannot resolve a *relative* image path at all, in Markdown or in HTML, for
+        any format (community discussion 177702). The documented workaround is an absolute
+        raw.githubusercontent.com URL, which for a private repository means committing a
+        non-expiring access token into the README - so this repository does not, and the
+        diagram stays broken in the app until the repository is public. Changing the format
+        here will not change that; only the URL would.
         """
         import make_diagram
 
@@ -415,12 +417,13 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         picture = re.search(r"<picture>(.*?)</picture>", readme, re.DOTALL)
         assert picture, "the README no longer shows the diagram in a <picture>"
         block = picture.group(1)
-        assert ".svg" not in block, (
-            "no candidate here may be an SVG: the mobile app picks one and cannot draw it"
-        )
         img = re.search(r'<img src="([^"]+)"', block)
-        assert img and img.group(1).endswith(".png"), "the <img> fallback must be a PNG"
-        assert 'srcset="docs/assets/how-it-works-dark.png"' in block, "dark mode lost"
+        assert img and img.group(1).endswith(".png"), (
+            "the <img> fallback must be a raster: it is what a client that ignores "
+            "<picture> falls back to"
+        )
+        for theme in ("dark", "light"):
+            assert f'srcset="docs/assets/how-it-works-{theme}.svg"' in block, theme
         assert "prefers-color-scheme: dark" in block, "nothing selects the dark drawing"
 
         # A fallback nothing regenerates is a fallback that goes stale, so hold its size to

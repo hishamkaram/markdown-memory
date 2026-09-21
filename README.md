@@ -9,28 +9,29 @@ with it. markdown-memory indexes your documentation by heading, so the same ques
 back as a few sections, each addressable by its breadcrumb and quoted verbatim.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+  <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 11,086
+       alt="One question asked of four documentation files. Reading them whole costs 11,100
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 1,663 tokens - the
+            vectors, fuses the two, and returns five sections totalling 1,676 tokens - the
             one that answers is 181.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 11,086 tokens in all:
+`docs/evaluation-protocol.md`, 11,100 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   128 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   181 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  577 tok  README.md  markdown-memory
+  590 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
   283 tok  README.md  markdown-memory > The embedding model > When it goes wrong
 ```
 
-**1,663 tokens instead of 11,086**, and the section that actually answers is 181 - a
+**1,676 tokens instead of 11,100**, and the section that actually answers is 181 - a
 sixtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
