@@ -300,11 +300,20 @@ class MarkdownMemoryService:
     # ------------------------------------------------------------------ resolution
 
     def _resolve_directory(self, directory: str | None) -> Path:
+        """Resolve against the root this server settled on, never the configured spelling.
+
+        The docs root is resolved once at construction precisely so a retargeted symlink
+        cannot make the server answer from one tree while reporting on another. Resolving
+        the configured path again here reopened that door from the other side: indexing
+        followed the link to its new target and wrote rows the frozen root can never see,
+        `list_documents()` with no argument then resolved outside its own root and raised,
+        and a restart keyed a different database and read as never indexed.
+        """
         if directory is None or not directory.strip():
-            return _absolute(self._config.docs_dir, IndexingError)
+            return Path(self._root)
         path = _user_path(directory.strip(), IndexingError)
         if not path.is_absolute():
-            path = self._config.docs_dir / path
+            path = Path(self._root) / path
         return _absolute(path, IndexingError)
 
     def _within_root(self, resolved: Path, error: type[MarkdownMemoryError]) -> Path:

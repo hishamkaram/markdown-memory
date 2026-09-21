@@ -963,3 +963,46 @@ class TestTheCommandLineRekeysTheDatabase:
             "MARKDOWN_MEMORY_DB stopped winning"
         )
         assert self.config(alpha, flag).db_path == flag, "the flag lost to the environment"
+
+
+class TestARetargetedDocsSymlinkStrandsNothing:
+    """The docs root is resolved once; every question and every scan must use that answer.
+
+    Resolving it once was the fix for a retargeted symlink letting the server answer from
+    one tree while reporting on another. `_resolve_directory` kept resolving the configured
+    path again, which reopened the same hole from the indexing side: a scan followed the
+    link to its new target and wrote documents and coverage the frozen root could never
+    see, `list_documents()` with no argument resolved outside its own root and raised
+    outright, and the next start keyed a different database that read as never indexed.
+    """
+
+    def test_a_scan_after_a_retarget_stays_with_the_root_it_serves(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        first = tmp_path / "real-a"
+        first.mkdir()
+        (first / "alpha.md").write_text("# Alpha\n\n## Retry policy\n\nalpha body\n")
+        second = tmp_path / "real-b"
+        second.mkdir()
+        (second / "beta.md").write_text("# Beta\n\n## Retry policy\n\nbeta body\n")
+        link = tmp_path / "docs"
+        link.symlink_to(first)
+
+        config = ServerConfig(db_path=tmp_path / "index.db", docs_dir=link)
+        service = MarkdownMemoryService(config, fake_embedder)
+        try:
+            service.index_directory()
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["alpha.md"]
+
+            link.unlink()
+            link.symlink_to(second)
+
+            report = service.index_directory()
+            assert Path(report.directory) == first, "a scan followed the link off its own root"
+            # The question that used to raise: no argument at all.
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["alpha.md"]
+            assert service.index_status().verified, "the root lost the certificate it had"
+        finally:
+            service.close()

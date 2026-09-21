@@ -62,6 +62,19 @@ class Mutation:
 
 MUTATIONS = (
     Mutation(
+        name="scope: resolve the configured docs root again on every scan",
+        module="server.py",
+        old=(
+            "        if directory is None or not directory.strip():\n"
+            "            return Path(self._root)"
+        ),
+        new=(
+            "        if directory is None or not directory.strip():\n"
+            "            return _absolute(self._config.docs_dir, IndexingError)"
+        ),
+        tests="test_a_scan_after_a_retarget_stays_with_the_root_it_serves",
+    ),
+    Mutation(
         name="config: keep the launcher's database when --docs-dir names another project",
         module="server.py",
         old="            else _project_database(docs_dir)",
