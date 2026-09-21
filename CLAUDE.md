@@ -3,7 +3,8 @@
 Local MCP server that indexes Markdown documentation so coding agents fetch one heading's
 text instead of whole files. Markdown is parsed into an AST (`markdown-it-py`), cut into
 heading-delimited sections, and stored in a single SQLite file with three indexes: FTS5
-(BM25 keywords), `sqlite-vec` section vectors, and `sqlite-vec` passage vectors (one per
+(BM25 keywords), `sqlite-vec` section vectors (the mean of a section's passage vectors, since the
+embedder truncates at 512 tokens), and `sqlite-vec` passage vectors (one per
 paragraph, list item, table row, code block). Embeddings are local ONNX on CPU:
 EmbeddingGemma-300m by default (768 dims), `bge-small-en-v1.5` via fastembed as the light
 preset (384 dims). Search fuses keyword and vector rankings with Reciprocal Rank Fusion.
@@ -41,7 +42,7 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/models.py` | Frozen dataclasses: `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `OutlineNode`, `SearchResult`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
-| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v2), repository methods, `integrity_problems()` |
+| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v4), repository methods, `integrity_problems()` |
 | `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, incremental `Indexer` |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/server.py` | `ServerConfig`, `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
@@ -126,12 +127,15 @@ section you need instead; it is typically 10-50x cheaper.
 
 Work in this order:
 
-1. **`search_docs(query, limit=5)`** - start here. Returns the best sections with their
-   breadcrumb (`heading_path`), line range, token estimate, full section `content`, and the
+1. **`search_docs(query, limit=5)`** - start here. Returns
+   `{"results": [...], "index_status": {...}}`; each hit carries its breadcrumb
+   (`heading_path`), line range, token estimate, full section `content`, and the
    `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
    `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
-   Top-1 ~88%).
+   Top-1 ~88%). When `index_status.coverage` is `"unknown"`, the documentation you just
+   searched is missing files or was never indexed end to end - say so rather than
+   concluding the docs do not cover it.
 2. **`get_document_outline(file_path)`** - only when you need the structure of a document:
    the heading tree with line spans and per-section token estimates, at a few hundred
    tokens. Use it to choose a section, or to find sibling sections of a search hit.
@@ -142,9 +146,11 @@ Work in this order:
    content lives in its children. Oversized sections appear as `Path (Part n)`; reading
    the base path returns all parts reassembled.
 
-Supporting tools: `list_documents(directory="")` shows what is indexed;
-`index_directory(directory=None)` (re)indexes - run it once per session if searches come
-back empty or stale. It is incremental (SHA-256 per file), so re-running is cheap.
+Supporting tools: `list_documents(directory="")` returns
+`{"documents": [...], "index_status": {...}}` - what is indexed, and whether anything
+vouches for it; `index_directory(directory=None)` (re)indexes - run it once per session if
+searches come back empty or stale, or if `index_status.coverage` is `"unknown"`. It is
+incremental (SHA-256 per file), so re-running is cheap.
 `file_path` may be absolute, relative to the docs root, or any unique path suffix. An
 error from `read_section` lists the valid heading paths - retry with one of them rather
 than falling back to reading the file.

@@ -205,6 +205,64 @@ class FileFailure:
     file_path: str
     message: str
 
+    def to_dict(self) -> JsonDict:
+        return {"file_path": self.file_path, "message": self.message}
+
+
+#: Failures carried on a search answer. Enough to act on, few enough not to bury the
+#: answer itself - the count in `message` says how many were left out.
+MAX_REPORTED_FAILURES = 20
+
+
+@dataclass(slots=True, frozen=True)
+class IndexStatus:
+    """Whether answers drawn from one tree can be trusted to be drawn from all of it.
+
+    `verified` means a full walk of this scope finished and read every file it found. It
+    is deliberately not a claim that the filesystem has stopped changing: a file created
+    after its directory was walked is not in the index and not in `failures`, and the next
+    run picks it up. A killed run and a tree nobody ever indexed both read unverified,
+    which is the same answer because it is the same situation - nothing walked it whole.
+    """
+
+    verified: bool
+    failures: tuple[FileFailure, ...] = ()
+    #: Documents under this scope whose vectors were built by an older pooling scheme.
+    #: They still answer, less well, and only a run over the directory holding them
+    #: rebuilds - a parent run prunes `.venv`, `node_modules` and the like, so one indexed
+    #: deliberately inside such a directory is never reached again.
+    stale_vectors: int = 0
+
+    def to_dict(self) -> JsonDict:
+        shown = self.failures[:MAX_REPORTED_FAILURES]
+        return {
+            "coverage": "verified" if self.verified else "unknown",
+            "failures": [failure.to_dict() for failure in shown],
+            "message": self.message(),
+        }
+
+    def message(self) -> str | None:
+        """One sentence, or nothing at all when there is nothing to act on."""
+        if self.verified:
+            return None
+        if not self.failures:
+            if self.stale_vectors:
+                return (
+                    f"{self.stale_vectors} document(s) here were indexed by an older "
+                    "vector format and rank less well until the directory holding them is "
+                    "indexed again."
+                )
+            return (
+                "This documentation root has not been indexed end to end since it last "
+                "changed, so an answer may be missing part of it. Run index_directory."
+            )
+        hidden = len(self.failures) - MAX_REPORTED_FAILURES
+        more = f" (showing the first {MAX_REPORTED_FAILURES})" if hidden > 0 else ""
+        return (
+            f"{len(self.failures)} path(s) could not be indexed{more}; answers here are "
+            "drawn from a tree that is missing them."
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class IndexReport:
@@ -230,4 +288,11 @@ class IndexReport:
         ]
         lines.extend(f"NOTE {note}" for note in self.notes)
         lines.extend(f"ERROR {error.file_path}: {error.message}" for error in self.errors)
+        if self.errors:
+            # Without this the run reads as a success with some noise attached, and an
+            # index missing part of its tree answers questions as if it were whole.
+            lines.append(
+                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "
+                "this documentation root is only partly searchable."
+            )
         return "\n".join(lines)

@@ -392,6 +392,12 @@ class HybridSearcher:
         fetch = limit if self._scope is None else min(limit * _SCOPED_OVERFETCH, ceiling)
         while True:
             best: dict[int, float] = dict(self._db.vec_search(embedding, fetch))
+            # Nothing came back at all, so there is nothing a wider net can catch: the
+            # root is mid-rebuild, or its vectors were discarded and not yet replaced.
+            # Without this, each empty pass quadruples the fetch and asks again, all the
+            # way up to the size of the corpus, on every scoped query.
+            if not best:
+                return {}, {}
             passages: dict[int, str] = {}
             for section_id, distance, passage in self._db.unit_search(
                 embedding, fetch * _PASSAGES_PER_CANDIDATE

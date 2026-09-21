@@ -7,8 +7,11 @@ a tenth of the size and ~25x faster, at a clear cost in recall on paraphrased qu
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import logging
+import math
 import os
 import stat
 import threading
@@ -18,9 +21,10 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from markdown_memory.db import DEFAULT_EMBEDDING_DIM, Database
+from markdown_memory.db import DEFAULT_EMBEDDING_DIM, VECTOR_FORMAT, Database
 from markdown_memory.exceptions import (
     EmbeddingError,
+    IndexBusyError,
     IndexingError,
     MarkdownMemoryError,
     ModelLoadError,
@@ -64,8 +68,14 @@ _GEMMA_BATCH_SIZE = 4
 # physical cores and 16 is the one value that loses. Only a machine that disagrees with
 # the default needs MARKDOWN_MEMORY_THREADS.
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
+#: What ``_printable`` leaves where it could not decode a byte of a file name.
+_UNDECODABLE = "�"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 MAX_FILE_BYTES = 10 * 1024 * 1024
+# Below this the pooled direction is rounding noise rather than a direction. Unit vectors
+# that genuinely cancel land near 1e-16; a real centroid of normalised passages is >= 1/n
+# of one passage, which for the 64-passage ceiling is ~0.015.
+_MIN_POOLED_NORM = 1e-6
 _EMBED_BATCH_SIZE = 32
 _MODEL_META_KEY = "embedding_model"
 _SKIPPED_DIRECTORIES = frozenset(
@@ -319,6 +329,41 @@ def _inference_threads() -> int:
     return int(override) if override.isdigit() and int(override) > 0 else 0
 
 
+def _section_vector(units: Sequence[Sequence[float]]) -> list[float] | None:
+    """The vector stored for a section: pooled, or one of its passages if pooling fails.
+
+    A section with passages must have a vector - the storage layer rejects the whole file
+    otherwise - so passages that cancel each other out cannot be allowed to cost the file
+    its place in the index. Falling back to the first passage keeps a direction that is
+    at least the section's own text.
+    """
+    if not units:
+        return None
+    pooled = _mean_vector(units)
+    return pooled if pooled is not None else list(units[0])
+
+
+def _mean_vector(vectors: Sequence[Sequence[float]]) -> list[float] | None:
+    """The centroid of ``vectors``, renormalised, or ``None`` for a section with no body.
+
+    A section's own vector used to be a separate embedding of its whole text, which the
+    model truncates at 512 tokens: 126 of 1,589 sections in the vendored corpus were
+    longer than that, the largest half again over, and their tails were simply absent
+    from the section-level signal. Averaging the passages covers the section entirely,
+    and costs one embedding call fewer per section rather than one more.
+    """
+    if not vectors:
+        return None
+    totals = [math.fsum(values) for values in zip(*vectors, strict=True)]
+    norm = math.sqrt(math.fsum(value * value for value in totals))
+    # Not `== 0.0`: passages that point opposite ways cancel to float residue near 1e-16,
+    # and dividing that by its own magnitude turns rounding noise into a full-length
+    # vector aimed in an arbitrary direction, which then matches arbitrary queries.
+    if norm < _MIN_POOLED_NORM:
+        return None
+    return [value / norm for value in totals]
+
+
 def _to_floats(values: Sequence[float]) -> list[float]:
     return [float(value) for value in values]
 
@@ -357,6 +402,73 @@ def iter_markdown_files(
                 path, directory, exclude
             ):
                 yield path
+
+
+def _behind_symlink(root: Path, path: str) -> bool:
+    """True when reaching ``path`` from ``root`` passes through a symlinked directory.
+
+    The walk sets ``followlinks=False``, so it never descends into one - it has no idea
+    what is in there, which is the same position an unreadable directory leaves it in. A
+    run that treats "I did not look" as "there is nothing there" purges documents that are
+    still on disk and still readable at that path, and clears failures it never rechecked.
+    """
+    current = root
+    for part in os.path.relpath(path, root).split(os.sep)[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _certainly_gone(root: Path, path: str) -> bool:
+    """True when ``path`` is observably absent, rather than merely out of the walk's sight.
+
+    Everything else here refuses to draw conclusions from what the walk did not visit, and
+    that refusal has one consequence nobody wanted: a row about a pruned, excluded or
+    symlink-shadowed path can never be retired, because the walk that would retire it never
+    goes there. The file is then deleted and the row outlives it - the root it sits under
+    reports itself incomplete forever, naming a path that no longer exists, and no run can
+    ever change that answer.
+
+    Not looking is not evidence. Looking at that one path is: `lstat` separates "there is
+    nothing here" (`ENOENT`) from "I am not allowed to know" (`EACCES`, a loop, a dead
+    mount), and only the first retires anything. That is a direct observation of one name,
+    not an inference from a walk's silence, which is why it is safe where the walk is not.
+
+    Two things make that observation worthless, and both answer `ENOENT` about a path that
+    was never the file's. A name that is not valid UTF-8 reached the row through
+    `_printable`, which substitutes U+FFFD for the bytes it could not decode - the stored
+    string is a rendering of the name, not the name, and nothing is at it. (Testing that
+    the string survives `_printable` does not find this: the replacement character is
+    itself valid UTF-8 and round-trips.) And a path reached through a symlink answers for
+    the link's target: replace a real directory with a broken link and every document under
+    it reports `ENOENT` while the files sit untouched wherever they were moved to. Neither
+    is evidence of a deletion.
+    """
+    if _UNDECODABLE in path:
+        return False
+    if _behind_symlink(root, path) or os.path.islink(path):
+        return False
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:  # no permission, symlink loop, unreachable mount: no evidence either way
+        return False
+    return False
+
+
+def _is_shadowing_symlink(path: str) -> bool:
+    """True when ``path`` is a symlink the walk sees the name of but never follows.
+
+    `os.walk(followlinks=False)` lists a symlinked directory among its parent's names and
+    stops there, so a failure recorded against that directory cannot be rechecked by any
+    walk of the tree above it. `_behind_symlink` cannot answer this: it tests the
+    components *before* the last one, which is right for a file inside a linked tree and
+    blind to the linked directory itself. A symlink to a *file* is walked and indexed like
+    any other file, so only one that does not resolve to a file is out of reach.
+    """
+    return os.path.islink(path) and not os.path.isfile(path)
 
 
 def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
@@ -403,6 +515,16 @@ def parse_exclusions(value: str) -> tuple[str, ...]:
     return tuple(patterns)
 
 
+def _key(root: Path) -> str:
+    """One spelling per documentation root.
+
+    `index_directory` resolves its argument before anything else, and that resolved root
+    is the only one this key is ever built from. Normalising a second time here would
+    only hide it if that ever stopped being true.
+    """
+    return str(root)
+
+
 def _printable(path: str) -> str:
     """``path`` safe to log and to send as JSON (undecodable bytes become U+FFFD)."""
     return os.fsencode(path).decode("utf-8", errors="replace")
@@ -433,6 +555,48 @@ class Indexer:
         self._exclude = tuple(exclude)
         self._run_lock = threading.Lock()
 
+    @contextlib.contextmanager
+    def _scan_lock(self) -> Iterator[None]:
+        """One scan at a time over this database, across threads and across processes.
+
+        A thread lock cannot see another process, and every ordering rule this feature
+        tried instead of a lock was wrong in one direction or the other. Both halves
+        refuse rather than wait: a scan can run for 25 minutes, and a tool call that
+        blocks that long is a client timeout, which reads to the agent as a broken
+        server rather than a busy one.
+
+        `flock` is released by the kernel when the process dies, so a killed run cannot
+        strand it - the one guarantee a row in the database could not give.
+        """
+        if not self._run_lock.acquire(blocking=False):
+            raise IndexBusyError(
+                "Another index run is in progress in this process; try again shortly."
+            )
+        try:
+            # Inside the try: opening the lock file can fail on its own (a read-only
+            # directory, no file descriptors left), and a thread lock taken above and
+            # never released would refuse every later run in this process for good.
+            # Resolved: two spellings of one database - a symlink, a relative path -
+            # would otherwise take two different locks and both scans would proceed.
+            lock_path = str(Path(self._db.path).resolve()) + ".lock"
+            handle = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            self._run_lock.release()
+            raise
+        try:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise IndexBusyError(
+                    f"Another process is indexing {self._db.path}; try again shortly."
+                ) from error
+            os.truncate(handle, 0)
+            os.write(handle, f"{os.getpid()}\n".encode("ascii"))
+            yield
+        finally:
+            os.close(handle)
+            self._run_lock.release()
+
     def index_directory(self, directory: Path) -> IndexReport:
         """Index new/changed files, skip unchanged ones, purge files that disappeared.
 
@@ -451,8 +615,21 @@ class Indexer:
                 f"Directory name is not valid UTF-8 and cannot be indexed: {_printable(str(root))}"
             ) from None
 
-        with self._run_lock:
+        with self._scan_lock():
             started = time.perf_counter()
+            # Set at the first write of the run, not here: a run that changes nothing has
+            # no business retracting a certificate that is still true. Once it does write,
+            # the certificate stays retracted until a full pass finishes - so a run killed
+            # partway leaves the tree honestly described as unvouched-for, with no marker
+            # to clean up and nothing to go stale.
+            retracted = False
+
+            def about_to_write() -> None:
+                nonlocal retracted
+                if not retracted:
+                    self._db.mark_scan_started(str(root))
+                    retracted = True
+
             previous_model = self._db.get_meta(_MODEL_META_KEY)
             if previous_model not in {None, self._embedder.model_name}:
                 # Vectors from different models are not comparable, and they share one
@@ -471,6 +648,12 @@ class Indexer:
             # notice. They are dismissed only once the report carrying them exists: a run
             # that aborts - the model cannot be loaded - leaves them for the next one.
             notices = self._db.pending_notices()
+            # Captured here, after this run has done its own discarding and just before it
+            # reads the hashes it will trust: a discard *after* this point means the walk
+            # measured a database that no longer exists. Captured any earlier and the run
+            # counts its own model-change wipe as somebody else's, then refuses to certify
+            # the index it just rebuilt from scratch.
+            generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
 
             seen: set[str] = set()
@@ -492,7 +675,7 @@ class Indexer:
                 file_path = str(path)
                 seen.add(file_path)
                 try:
-                    counts = self._index_file(path, known_hashes.get(file_path))
+                    counts = self._index_file(path, known_hashes.get(file_path), about_to_write)
                 except ModelLoadError:
                     raise  # not this file's fault: every other file would fail identically
                 except (MarkdownMemoryError, OSError) as exc:
@@ -506,7 +689,28 @@ class Indexer:
                     sections_indexed += counts[0]
                     passages_indexed += counts[1]
 
-            purged = self._db.delete_documents(self._vanished(root, known_hashes, seen, unreadable))
+            vanished = self._vanished(root, known_hashes, seen, unreadable)
+            if vanished:
+                about_to_write()  # deleting is changing it, even if no file was read
+            purged = self._db.delete_documents(vanished)
+            # This run's own failures are already in `errors`, and the search tools read
+            # the recorded ones straight from the database, so nothing is added to
+            # `notes`: a warning repeated in three places is how a warning becomes noise.
+            # Only what this walk could have reached: a failure inside a pruned directory
+            # or one that could not be listed is not this run's to forget, however far
+            # under its root it sits.
+            reachable = self._reachable(root, self._db.failure_paths(str(root)), unreadable)
+            self._db.record_failures(
+                reachable,
+                {
+                    failure.file_path: f"{failure.message} (indexing {_printable(str(root))})"
+                    for failure in failures
+                },
+            )
+            # The walk finished, which is all this records; what it could not read is
+            # recorded separately, and `index_status` refuses to call a tree whole while
+            # anything under it is still listed there. Two facts, two places, one answer.
+            self._db.mark_scan_complete(str(root), generation)
             report = IndexReport(
                 directory=_printable(str(root)),
                 files_scanned=len(seen),
@@ -523,9 +727,45 @@ class Indexer:
         logger.info(report.summary())
         return report
 
+    def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
+        """The subset of ``paths`` a walk of ``root`` would have visited.
+
+        Pruned directories (`.venv`, `node_modules`), directories excluded by
+        configuration, and directories that could not be listed are never entered, so this
+        run saw nothing inside them and may not speak for what it did not see.
+
+        Every component is tested, including the last. A recorded failure is usually a
+        file, but an unreadable *directory* is recorded under its own path - and dropping
+        the final component would ask whether `.venv`'s parent is walkable rather than
+        whether `.venv` is, and then clear it.
+
+        A path out of the walk's sight is still retired once it is observably gone
+        (`_certainly_gone`), or its row would outlive the file and no run could ever
+        retire it.
+        """
+        blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
+        visitable = []
+        for path in paths:
+            if self._walk_would_visit(root, path, blocked) or _certainly_gone(root, path):
+                visitable.append(path)
+        return visitable
+
+    def _walk_would_visit(self, root: Path, path: str, blocked: tuple[str, ...]) -> bool:
+        """Whether a walk of ``root`` reaches ``path``, given the directories it could not list."""
+        if blocked and path.startswith(blocked):
+            return False
+        if not _is_walkable(os.path.relpath(path, root).split(os.sep)):
+            return False
+        if _behind_symlink(root, path) or _is_shadowing_symlink(path):
+            return False
+        return not (self._exclude and _is_excluded(Path(path), root, self._exclude))
+
     @staticmethod
     def _vanished(
-        root: Path, known: dict[str, str], seen: set[str], unreadable: Sequence[str]
+        root: Path,
+        known: dict[str, tuple[str, int]],
+        seen: set[str],
+        unreadable: Sequence[str],
     ) -> list[str]:
         """Known documents that this walk *would* have found had they still existed.
 
@@ -533,19 +773,34 @@ class Indexer:
         when the walk could not have reached it: it lives under a directory that could
         not be listed, or under a pruned tree (``node_modules`` ...) that was indexed
         explicitly by pointing ``index_directory`` inside it.
+
+        Unless the file is observably gone (`_certainly_gone`). Not being visited is not
+        evidence of deletion; `ENOENT` on that one name is exactly that evidence, and
+        without it a deleted document under a pruned tree keeps answering searches with
+        text that is not on disk any more, until someone re-indexes that tree by hand.
         """
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         vanished: list[str] = []
         for file_path in sorted(set(known) - seen):
+            if _certainly_gone(root, file_path):
+                vanished.append(file_path)
+                continue
             if blocked and file_path.startswith(blocked):
                 continue
             relative = os.path.relpath(file_path, root)
             if not _is_walkable(relative.split(os.sep)[:-1]):
                 continue
+            if _behind_symlink(root, file_path):
+                continue
             vanished.append(file_path)
         return vanished
 
-    def _index_file(self, path: Path, known_hash: str | None) -> tuple[int, int] | None:
+    def _index_file(
+        self,
+        path: Path,
+        known: tuple[str, int] | None,
+        about_to_write: Callable[[], None],
+    ) -> tuple[int, int] | None:
         """Index one file. Returns ``(sections, passages)``, or ``None`` when unchanged."""
         file_path = str(path)
         try:
@@ -561,29 +816,33 @@ class Indexer:
         if len(data) > MAX_FILE_BYTES:
             raise IndexingError(f"File is larger than {MAX_FILE_BYTES} bytes; skipped")
         content_hash = hash_bytes(data)
-        if content_hash == known_hash:
+        # The format counts as much as the content: a file whose bytes never changed still
+        # has to be rebuilt if its vectors were pooled by an older scheme, or it would keep
+        # them forever and the table would answer one query two different ways.
+        if known is not None and known == (content_hash, VECTOR_FORMAT):
             return None
         parsed = self._parser.parse(
             data.decode("utf-8", errors="replace"), fallback_title=path.stem
         )
-        # One embedding call per file: each section with a body contributes its own text
-        # followed by its passages; heading-only sections contribute nothing.
+        # One embedding call per file, over the passages alone. The section vector is the
+        # mean of its passages rather than a separate embedding of the whole section:
+        # that text ran past the model's 512-token limit for 7.9% of the vendored corpus
+        # and lost its tail, and embedding it cost one extra call per section.
         texts: list[str] = []
         for section in parsed.sections:
-            if section.units:
-                texts.append(section.embedding_text)
-                texts.extend(section.unit_texts)
+            texts.extend(section.unit_texts)
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
         embedded = iter(embeddings)
-        vectors = [
-            SectionVectors(
-                section=next(embedded) if section.units else None,
-                units=tuple(next(embedded) for _ in section.units),
-            )
-            for section in parsed.sections
-        ]
+        vectors = []
+        for section in parsed.sections:
+            units = tuple(next(embedded) for _ in section.units)
+            vectors.append(SectionVectors(section=_section_vector(units), units=units))
+        # Here, and not a line earlier: parsing and embedding can fail without touching
+        # the index, and a run that changed nothing must leave a standing certificate
+        # alone. A model that will not load fails identically on every file.
+        about_to_write()
         self._db.replace_document(
             file_path=file_path,
             title=parsed.title,

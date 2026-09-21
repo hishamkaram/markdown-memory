@@ -370,7 +370,10 @@ class LiveTest:
         if outcome.is_error:
             return None, text, elapsed_ms
         structured = outcome.structured_content or {}
-        return structured.get("result"), text, elapsed_ms
+        # A tool returning an object is its own structured content; only a bare list or
+        # scalar arrives wrapped in "result".
+        payload = structured["result"] if set(structured) == {"result"} else structured
+        return payload, text, elapsed_ms
 
     async def median_latency(self, tool: str, runs: int = 7, **arguments: Any) -> float:
         samples = [(await self.call(tool, **arguments))[2] for _ in range(runs)]
@@ -411,7 +414,15 @@ class LiveTest:
         print(f"        {summary}")
         self.check("6 scanned, 6 (re)indexed" in summary, "all 6 Markdown files indexed")
         self.check("ERROR" not in summary, "no per-file errors")
-        documents, _, _ = await self.call("list_documents")
+        answer, _, _ = await self.call("list_documents")
+        self.check(
+            "list_documents returns an envelope", set(answer) == {"documents", "index_status"}
+        )
+        self.check(
+            "a freshly indexed root vouches for itself",
+            answer["index_status"] == {"coverage": "verified", "failures": [], "message": None},
+        )
+        documents = answer["documents"]
         titles = {Path(d["file_path"]).name: d["title"] for d in documents}
         self.check(len(documents) == 6, "list_documents reports 6 documents")
         self.check(
@@ -428,7 +439,8 @@ class LiveTest:
         self.metrics["sections"] = sections
         self.check(sections > 30, f"{sections} sections stored")
         self.check("passages)" in summary, "per-passage vectors were embedded too")
-        scoped, _, _ = await self.call("list_documents", directory="guides")
+        scoped_answer, _, _ = await self.call("list_documents", directory="guides")
+        scoped = scoped_answer["documents"]
         self.check(len(scoped) == 2, "list_documents(directory='guides') filters to 2 documents")
 
     async def outline(self) -> None:
@@ -585,7 +597,8 @@ class LiveTest:
             ("--replay-from-offset", "Helios Configuration Reference > Command Line Flags"),
             ("ENOSPC", "Ingest Pipeline Architecture > Failure Modes"),
         ):
-            results, _, elapsed = await self.call("search_docs", query=query, limit=5)
+            answer, _, elapsed = await self.call("search_docs", query=query, limit=5)
+            results = answer["results"]
             top = results[0]
             print(
                 f"        {query!r} -> {top['heading_path']} "
@@ -594,7 +607,9 @@ class LiveTest:
             self.check(top["heading_path"] == expected_path, f"top hit for {query!r} is correct")
             self.check(top["fts_rank"] == 1, "FTS5 ranked it first")
             self.check(query in top["content"], "the literal identifier is in the returned section")
-        results, _, _ = await self.call("search_docs", query="HELIOS_WAL_SEGMENT_MB", limit=5)
+        results = (await self.call("search_docs", query="HELIOS_WAL_SEGMENT_MB", limit=5))[0][
+            "results"
+        ]
         self.check(
             [r["fts_rank"] for r in results].count(None) == len(results) - 1,
             "identifier occurs in one section only: every other hit came from vectors",
@@ -628,7 +643,8 @@ class LiveTest:
             ("how do I undo a bad deploy", "Deployment Guide > Rolling Back", 3),
         )
         for query, expected_path, worst_position in cases:
-            results, _, elapsed = await self.call("search_docs", query=query, limit=5)
+            answer, _, elapsed = await self.call("search_docs", query=query, limit=5)
+            results = answer["results"]
             hit = next((r for r in results if r["heading_path"] == expected_path), None)
             position = results.index(hit) + 1 if hit else None
             print(
@@ -671,9 +687,11 @@ class LiveTest:
         self.metrics["index_delta_ms"] = elapsed
         print(f"        {summary}")
         self.check("1 (re)indexed, 4 unchanged, 1 purged" in summary, "1 changed, 1 deleted")
-        results, _, _ = await self.call("search_docs", query="zstd codec")
+        results = (await self.call("search_docs", query="zstd codec"))[0]["results"]
         self.check(results[0]["heading_path"] == "Changelog > 1.9.0", "new section is searchable")
-        results, _, _ = await self.call("search_docs", query="Vault sidecar SIGHUP", limit=20)
+        results = (await self.call("search_docs", query="Vault sidecar SIGHUP", limit=20))[0][
+            "results"
+        ]
         self.check(
             not any("deployment.md" in r["file_path"] for r in results),
             "purged file left no sections, FTS rows or vectors behind",

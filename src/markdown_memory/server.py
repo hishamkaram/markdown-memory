@@ -28,6 +28,7 @@ from markdown_memory.exceptions import (
     DocumentNotFoundError,
     IndexingError,
     MarkdownMemoryError,
+    SearchError,
     SectionNotFoundError,
 )
 from markdown_memory.indexer import (
@@ -44,6 +45,7 @@ from markdown_memory.models import (
     Document,
     DocumentSummary,
     IndexReport,
+    IndexStatus,
     JsonDict,
     OutlineNode,
     SearchResult,
@@ -166,7 +168,13 @@ class MarkdownMemoryService:
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
         self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
-        self._searcher = HybridSearcher(self._db, self._embedder, scope=str(self._config.docs_dir))
+        # Resolved, because indexing resolves: a document under a symlinked or relative
+        # docs root is stored by its real path, and a scope spelled any other way filters
+        # every one of them out and returns nothing. Resolved ONCE, and reused: resolving
+        # again per call lets a retargeted symlink answer from one tree while reporting on
+        # another, which is a lie told with two correct halves.
+        self._root = str(_absolute(self._config.docs_dir, SearchError))
+        self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
 
     @property
     def db(self) -> Database:
@@ -188,7 +196,8 @@ class MarkdownMemoryService:
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         # An empty argument means "this project", not "everything this database holds":
         # the default database is shared by every project on the machine.
-        return self._db.list_documents(str(self._resolve_directory(directory or None)))
+        scope = self._resolve_directory(directory or None)
+        return self._db.list_documents(str(self._within_root(scope, IndexingError)))
 
     def get_document_outline(self, file_path: str) -> list[OutlineNode]:
         document = self._resolve_document(file_path)
@@ -205,6 +214,29 @@ class MarkdownMemoryService:
     def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
         return self._searcher.search(query, limit)
 
+    def index_status(self, directory: str | None = None) -> IndexStatus:
+        """What can honestly be said about answers drawn from this server's documents.
+
+        Indexing reports its own failures, but almost nothing calls indexing: an agent
+        opens a session, searches, and is served from whatever the index happens to hold.
+        Until this is asked at the point of use, a root that lost files to a permissions
+        error - or was never indexed at all - answers with confidence and no caveat.
+
+        Coverage is always the configured docs root's, because that is the tree every
+        answer is drawn from; `directory` only narrows which failures are worth naming.
+        """
+        if directory is None:
+            return self._db.index_status(self._root)
+        # Narrowed in one read, not composed from two: coverage stays the root's - that is
+        # the tree every answer is drawn from - while the failures and stale documents
+        # named are the ones that live here. Resolved against the root this service was
+        # built for, never against the configured path again, or a retargeted symlink
+        # pairs this root's certificate with another tree's failures.
+        scope = self._within_root(
+            _absolute(Path(self._root) / directory.strip(), SearchError), SearchError
+        )
+        return self._db.index_status(self._root, str(scope))
+
     # ------------------------------------------------------------------ resolution
 
     def _resolve_directory(self, directory: str | None) -> Path:
@@ -214,6 +246,28 @@ class MarkdownMemoryService:
         if not path.is_absolute():
             path = self._config.docs_dir / path
         return _absolute(path, IndexingError)
+
+    def _within_root(self, resolved: Path, error: type[MarkdownMemoryError]) -> Path:
+        """Refuse to *answer about* a directory outside the tree this server serves.
+
+        `..`, an absolute path and a symlink each reach out of the root, and each was
+        obeyed: `list_documents` handed back another project's file paths, and a status
+        lookup paired this root's certificate with that tree's failures - `coverage:
+        verified` beside a non-empty failure list, which the envelope promises cannot
+        happen. Search has been scoped to the root ever since it answered one project's
+        question from another's documentation; these are the two other ways in.
+
+        `index_directory` is deliberately not scoped this way. It is an instruction rather
+        than a question - go and index that tree - and it keys the tree it walked under its
+        own root, so nothing it writes is attributed here.
+        """
+        root = Path(self._root)
+        if resolved != root and root not in resolved.parents:
+            raise error(
+                f"{str(resolved)!r} is outside this server's documentation root "
+                f"({self._root}); name a directory inside it."
+            )
+        return resolved
 
     def _resolve_document(self, file_path: str) -> Document:
         """Find an indexed document by absolute path, relative path, or unique path suffix."""
@@ -488,9 +542,19 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def list_documents(directory: str = "") -> list[JsonDict]:
-        """List indexed documents (path, title, section count), optionally under `directory`."""
-        return [summary.to_dict() for summary in services.get().list_documents(directory)]
+    def list_documents(directory: str = "") -> JsonDict:
+        """List indexed documents (path, title, section count), optionally under `directory`.
+
+        Returns `{"documents": [...], "index_status": {...}}`. `index_status.coverage` is
+        "verified" only when a full index run of this documentation root finished and read
+        every file it found; otherwise it is "unknown" and `index_status.message` says why.
+        """
+        service = services.get()
+        scope = directory if directory.strip() else None
+        return {
+            "documents": [summary.to_dict() for summary in service.list_documents(directory)],
+            "index_status": service.index_status(scope).to_dict(),
+        }
 
     @server.tool()
     @anticipated_errors
@@ -511,10 +575,20 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def search_docs(query: str, limit: int = 5) -> list[JsonDict]:
+    def search_docs(query: str, limit: int = 5) -> JsonDict:
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
-        sections. Works for exact identifiers (flags, env vars) and for conceptual questions."""
-        return [result.to_dict() for result in services.get().search_docs(query, limit)]
+        sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
+
+        Returns `{"results": [...], "index_status": {...}}`, `results` holding at most
+        `limit` sections. When `index_status.coverage` is "unknown", what you searched is
+        missing part of its documentation, or was never indexed end to end: an answer drawn
+        from it may be confidently incomplete, and `index_status.message` says what to run.
+        """
+        service = services.get()
+        return {
+            "results": [result.to_dict() for result in service.search_docs(query, limit)],
+            "index_status": service.index_status().to_dict(),
+        }
 
     return server
 

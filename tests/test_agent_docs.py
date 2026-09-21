@@ -235,7 +235,7 @@ class TestIntegrityProblems:
 
     def test_outdated_schema_version_is_reported(self, db: Database) -> None:
         db.connection().execute("PRAGMA user_version = 1")
-        assert db.integrity_problems() == ["schema version is 1, expected 2"]
+        assert db.integrity_problems() == ["schema version is 1, expected 4"]
 
 
 class TestReindexScript:

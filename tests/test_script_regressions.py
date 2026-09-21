@@ -74,6 +74,7 @@ class _EvalStubService:
 
     def __init__(self, config: ServerConfig) -> None:
         self.embedder = FakeEmbedder(model_name="stub")
+        self.db = None  # only ever handed to the cache probes, which the tests stub out
         self.closed = False
         self.report = IndexReport(
             directory="stub", files_scanned=0, files_indexed=0, files_unchanged=0, files_purged=0,
@@ -255,6 +256,11 @@ class TestEvalIndexCache:
         arguments = argparse.Namespace(embedder="embeddinggemma", rebuild=True)
         base = ServerConfig(db_path=tmp_path / "x.db", docs_dir=tmp_path)
         probes = [eval_cache.Probe("body number 1", "Doc > S1: body number 1")]
+        # Without these, a build that is wrongly allowed through dies in the cache probes
+        # instead of reaching the recording step - and a test that dies proves nothing
+        # about whether the partial index would have been scored and cached.
+        monkeypatch.setattr(eval_cache, "check_vectors", lambda *a, **k: None)
+        monkeypatch.setattr(eval_cache, "confirm_stable", lambda *a, **k: None)
 
         with pytest.raises(SystemExit, match="indexing failed"):
             eval_retrieval.open_service(arguments, base, probes)
@@ -441,3 +447,56 @@ class _ReversedEmbedder(FakeEmbedder):
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return [list(reversed(vector)) for vector in super().embed_documents(texts)]
+
+
+class TestEveryMutationStillPointsAtCode:
+    """The harness quotes source it does not own, and source moves underneath it.
+
+    A refactor renamed nothing and broke five mutations at once: each anchor still read
+    like the code, but no longer matched a character of it, so the mutation was never
+    applied, the tests ran against an unmutated copy, and the sweep called it a survivor.
+    A sweep takes forty minutes and reads like a hole in the suite. This reads like what
+    it is, in a second, on the commit that moved the line.
+    """
+
+    @pytest.fixture
+    def harness(self) -> object:
+        import importlib.util
+
+        path = Path(__file__).parent.parent / "scripts" / "mutation_check.py"
+        spec = importlib.util.spec_from_file_location("mutation_check_under_test", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_every_anchor_matches_exactly_one_line_of_its_module(self, harness: object) -> None:
+        root = Path(__file__).parent.parent
+        stale: list[str] = []
+        for mutation in harness.MUTATIONS:  # type: ignore[attr-defined]
+            directory = "src/markdown_memory" if mutation.area == "src" else "scripts"
+            source = (root / directory / mutation.module).read_text(encoding="utf-8")
+            found = harness._occurrences(source, mutation.old)  # type: ignore[attr-defined]
+            if len(found) != 1:
+                stale.append(f"{mutation.name}: {len(found)} matches in {mutation.module}")
+            elif mutation.old.startswith(" ") and source[found[0] - 1] != "\n":
+                stale.append(f"{mutation.name}: matches mid-line in {mutation.module}")
+        assert stale == [], "these mutations no longer name any code: " + "; ".join(stale)
+
+    def test_every_selector_names_a_test_that_exists(self, harness: object) -> None:
+        """A renamed test makes pytest exit 5, which the sweep used to read as a catch."""
+        suite = "\n".join(
+            path.read_text(encoding="utf-8") for path in Path(__file__).parent.glob("test_*.py")
+        )
+        # ``tests`` is a ``-k`` expression: one name, or several joined by and/or/not, and
+        # a name may be a class as readily as a function.
+        missing = [
+            f"{mutation.name} -> {name}"
+            for mutation in harness.MUTATIONS  # type: ignore[attr-defined]
+            for name in mutation.tests.replace("(", " ").replace(")", " ").split()
+            if name not in {"and", "or", "not"}
+            and f"def {name}(" not in suite
+            and f"class {name}" not in suite
+        ]
+        assert missing == [], "these mutations select no test: " + "; ".join(missing)

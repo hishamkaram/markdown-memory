@@ -16,7 +16,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.server as server_module
-from markdown_memory.exceptions import ConfigurationError, DatabaseError
+from markdown_memory.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    IndexingError,
+    SearchError,
+)
 from markdown_memory.models import (
     OutlineNode,
 )
@@ -500,5 +505,320 @@ class TestOneDatabaseManyProjects:
         try:
             results = service.search_docs("retry backoff policy", 5)
             assert [Path(result.file_path).name for result in results] == ["mine.md"]
+        finally:
+            service.close()
+
+
+class TestTheAnswerSaysWhenItIsIncomplete:
+    """Indexing reports its own failures, but almost nothing calls indexing.
+
+    An agent opens a session and searches; it is served from whatever the index holds.
+    Until the question is asked at the point of use, a root that lost files to a
+    permissions error - or was never indexed at all - answers with confidence and no
+    caveat, and the agent concludes the documentation does not cover the thing it could
+    not read.
+    """
+
+    @staticmethod
+    def broken_tree(root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "good.md").write_text("# Good\n\nretry backoff policy documented here\n")
+        broken = root / "broken.md"
+        broken.write_text("# Broken\n\nbody\n")
+        broken.chmod(0o000)
+        return broken
+
+    @staticmethod
+    def service(tmp_path: Path, docs: Path, embedder: FakeEmbedder) -> MarkdownMemoryService:
+        return MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "i.db", docs_dir=docs), embedder
+        )
+
+    def test_a_search_says_the_index_is_missing_files(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        docs = tmp_path / "docs"
+        broken = self.broken_tree(docs)
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+        finally:
+            broken.chmod(0o644)
+        try:
+            status = service.index_status()
+            assert not status.verified
+            assert [failure.file_path for failure in status.failures] == [str(broken)]
+            # a fresh service over the same database - the agent's usual case, where
+            # nothing re-indexes - must still say it
+            second = self.service(tmp_path, docs, fake_embedder)
+            try:
+                assert not second.index_status().verified
+            finally:
+                second.close()
+        finally:
+            service.close()
+
+    def test_a_whole_index_says_nothing(self, tmp_path: Path, fake_embedder: FakeEmbedder) -> None:
+        """A caveat on every answer would be ignored by the time it mattered."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "good.md").write_text("# Good\n\nall readable\n")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+            status = service.index_status()
+            assert status.verified
+            assert status.failures == ()
+            assert status.message() is None
+        finally:
+            service.close()
+
+    def test_a_root_nobody_indexed_does_not_claim_to_be_whole(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The commonest way to answer from a tree you have not read: never read it.
+
+        Nothing failed, so there is nothing to report file by file. Only the certificate
+        can tell "indexed and clean" from "never indexed", and they are not the same
+        answer to an agent about to trust what comes back.
+        """
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "good.md").write_text("# Good\n\nnever indexed\n")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            status = service.index_status()
+            assert not status.verified
+            assert status.failures == ()
+            assert status.message() is not None
+        finally:
+            service.close()
+
+    def test_a_failure_below_the_docs_root_is_not_silent(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Indexing is often pointed at one subdirectory; searching is not."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "index.md").write_text("# Home\n\nwelcome\n")
+        broken = self.broken_tree(docs / "api")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            # Index the whole root first, so the certificate has something to lose and the
+            # assertion below cannot pass merely because nothing ever walked this tree.
+            broken.chmod(0o644)
+            service.index_directory()
+            assert service.index_status().verified
+            broken.chmod(0o000)
+
+            # A readable file alongside the broken one, so the run actually writes and
+            # the root's certificate is genuinely retracted - otherwise this passes on the
+            # failure row alone and says nothing about the retraction it is named for.
+            (docs / "api" / "also.md").write_text("# Also\n\nreadable\n")
+            service.index_directory("api")
+            status = service.index_status()
+            assert not status.verified, "the subdirectory failed silently"
+            assert [f.file_path for f in status.failures] == [str(broken)]
+            assert not service._db.index_status(str(docs)).verified
+        finally:
+            broken.chmod(0o644)
+            service.close()
+
+    def test_fixing_a_file_and_reindexing_its_directory_clears_the_failure(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The other direction: a warning that outlives its problem gets ignored."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "index.md").write_text("# Home\n\nwelcome\n")
+        broken = self.broken_tree(docs / "api")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+            assert service.index_status().failures
+            broken.chmod(0o644)
+            service.index_directory("api")
+            assert service.index_status().failures == (), "the warning outlived the problem"
+        finally:
+            broken.chmod(0o644)
+            service.close()
+
+    def test_listing_one_directory_names_only_its_own_failures(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Coverage is the root's; which failures are worth naming is the caller's scope."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "index.md").write_text("# Home\n\nwelcome\n")
+        broken = self.broken_tree(docs / "api")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+            assert service.index_status("api").failures
+            elsewhere = service.index_status(str(docs / "other"))
+            assert elsewhere.failures == ()
+            assert not elsewhere.verified, "coverage is still the root's, and the root is not"
+        finally:
+            broken.chmod(0o644)
+            service.close()
+
+    def test_a_narrowed_status_is_never_internally_contradictory(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Coverage and the failures named have to come from one snapshot.
+
+        Composed from two reads, a status can carry a failure it has just been handed
+        while still calling the tree verified - each half true when it was taken, the pair
+        never true at once, and the answer says "verified" with the contradiction attached.
+        """
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "index.md").write_text("# Home\n\nwelcome\n")
+        broken = self.broken_tree(docs / "api")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+            for scope in (None, "api", "."):
+                status = service.index_status(scope)
+                assert not (status.verified and status.failures), (
+                    f"status for {scope!r} called a tree whole while naming what is wrong"
+                )
+        finally:
+            broken.chmod(0o644)
+            service.close()
+
+    def test_a_subdirectory_is_not_blamed_for_the_root_s_stale_vectors(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Coverage is the root's; what is *named* has to be what lives here.
+
+        Filtering the failures to the requested directory but not the stale-vector count
+        tells a clean subdirectory that documents it does not contain were indexed by an
+        older format - a caveat about somewhere else, attached to its answers.
+        """
+        docs = tmp_path / "docs"
+        (docs / "api").mkdir(parents=True)
+        (docs / "old.md").write_text("# Old\n\nbody\n")
+        (docs / "api" / "a.md").write_text("# A\n\nalpha body\n")
+        service = self.service(tmp_path, docs, fake_embedder)
+        try:
+            service.index_directory()
+            with service._db.transaction() as conn:  # what a pre-pooling release left
+                conn.execute(
+                    "UPDATE documents SET vector_format = 1 WHERE file_path LIKE '%old.md'"
+                )
+            assert service.index_status().stale_vectors == 1
+            assert service.index_status("api").stale_vectors == 0, "api wore the root's staleness"
+        finally:
+            service.close()
+
+    def test_status_and_search_always_describe_the_same_tree(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """One resolution, used twice - not two resolutions that can drift apart.
+
+        The searcher fixes its scope when the service is built. A status lookup that
+        resolves the configured path again on every call answers from the tree it was
+        built for while reporting on whatever the path points at now, and both halves are
+        individually correct.
+        """
+        first, second = tmp_path / "real-a", tmp_path / "real-b"
+        for root, token in ((first, "alpha-only-token"), (second, "beta-only-token")):
+            root.mkdir()
+            (root / "guide.md").write_text(f"# Guide\n\n{token} documented here\n")
+        # The second tree is damaged, so the two describe themselves differently and this
+        # test can tell which one the status is actually about.
+        broken = second / "broken.md"
+        broken.write_text("# Broken\n\nbody\n")
+        broken.chmod(0o000)
+        link = tmp_path / "docs"
+        link.symlink_to(first, target_is_directory=True)
+        service = self.service(tmp_path, link, fake_embedder)
+        try:
+            service.index_directory()
+            link.unlink()
+            link.symlink_to(second, target_is_directory=True)  # retargeted underneath it
+            service.index_directory()
+
+            hits = service.search_docs("alpha-only-token", 5)
+            assert {Path(hit.file_path).parent.name for hit in hits} == {"real-a"}
+            assert service.index_status().verified, (
+                "status described the retargeted tree while the search answered from the "
+                "one this service was built for"
+            )
+        finally:
+            broken.chmod(0o644)
+            service.close()
+
+    def test_a_symlinked_docs_root_still_answers(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The scope a search filters by has to be the path the documents are stored under."""
+        real = tmp_path / "real_docs"
+        real.mkdir()
+        (real / "guide.md").write_text("# Guide\n\nretry backoff policy documented here\n")
+        link = tmp_path / "docs"
+        link.symlink_to(real, target_is_directory=True)
+        service = self.service(tmp_path, link, fake_embedder)
+        try:
+            service.index_directory()
+            assert service.search_docs("retry backoff policy", 5)
+        finally:
+            service.close()
+
+
+class TestADirectoryArgumentCannotLeaveTheRoot:
+    """Search was scoped to the docs root; every other way in was not.
+
+    `search_docs` has filtered by the resolved root ever since it answered one project's
+    question out of another project's documentation. The `directory` argument reached past
+    it three ways - an absolute path, `..`, and a symlink pointing out of the tree - and
+    `list_documents` obeyed all three, handing back another project's file paths. The
+    status lookup was worse than a leak: coverage stayed the configured root's while the
+    failures came from wherever the symlink landed, so the envelope returned
+    `coverage: "verified"` beside a non-empty failure list and a null message, which its
+    own contract says cannot happen.
+    """
+
+    @staticmethod
+    def service(tmp_path: Path, embedder: FakeEmbedder) -> tuple[MarkdownMemoryService, Path]:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "good.md").write_text("# Good\n\nreadable\n")
+        outside = tmp_path / "other"
+        outside.mkdir()
+        (outside / "secret.md").write_text("# Secret\n\nanother project\n")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "index.db", docs_dir=docs), embedder
+        )
+        service.index_directory()
+        return service, outside
+
+    def test_every_spelling_of_outside_is_refused(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        service, outside = self.service(tmp_path, fake_embedder)
+        (tmp_path / "docs" / "api").symlink_to(outside)
+        try:
+            for spelling in ("api", str(outside), "../other"):
+                with pytest.raises(IndexingError, match="outside this server"):
+                    service.list_documents(spelling)
+            with pytest.raises(SearchError, match="outside this server"):
+                service.index_status("api")
+        finally:
+            service.close()
+
+    def test_a_directory_inside_the_root_still_answers(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The containment check must not cost the ordinary case its answer."""
+        service, _ = self.service(tmp_path, fake_embedder)
+        nested = tmp_path / "docs" / "api"
+        nested.mkdir()
+        (nested / "ref.md").write_text("# Ref\n\nbody\n")
+        try:
+            service.index_directory()
+            assert [d.file_path for d in service.list_documents("api")] == [str(nested / "ref.md")]
+            assert service.index_status("api").verified
         finally:
             service.close()
