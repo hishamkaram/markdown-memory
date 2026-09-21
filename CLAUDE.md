@@ -22,13 +22,14 @@ uv run pytest                                  # unit + integration tests (-m "n
 uv run python scripts/eval_retrieval.py        # retrieval accuracy gate (see policy below)
 uv run python scripts/live_test.py             # end-to-end: spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/reindex_docs.py DIR --force   # forced re-index + integrity verification
-scripts/check.sh                               # ruff + format + mypy + pytest + live test, fail-fast
+scripts/check.sh                               # licences + ruff + format + mypy + pytest + live test
 uv run python scripts/mutation_check.py        # delete guarded behaviours; a test must notice
 git config core.hooksPath .githooks             # once per clone: run that gate on every push
 ```
 
 `.githooks/pre-push` runs `scripts/check.sh` before anything leaves the machine, and
-`.github/workflows/gate.yml` runs the same five steps on every push and pull request,
+`.github/workflows/gate.yml` runs the same steps on every pull request and on pushes to
+`main`,
 across Python 3.11 to 3.14, with the ONNX model restored from a cache keyed on its pinned
 revision. The hook is the one to satisfy - it is what you can run - but `git push
 --no-verify` skips it, which is why CI also exists. `tests/test_agent_docs.py` holds the
@@ -92,7 +93,9 @@ the scan bookkeeping in `db.py`.
 ## Retrieval regression policy
 
 Any change to ranking, chunking, unit extraction, FTS query building, the embedder or its
-prompts **must pass** `uv run python scripts/eval_retrieval.py` on the held-out set:
+prompts **must pass** `uv run python scripts/eval_retrieval.py` on the held-out set. CI does
+not run it - it holds an exclusive lock and asserts on latency - so this one is on you to
+run before proposing the change; nothing will stop a regression at review time:
 
 | Gate | Floor | Frozen baseline (EmbeddingGemma) |
 | --- | --- | --- |

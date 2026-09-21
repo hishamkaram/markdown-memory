@@ -4,8 +4,9 @@
     "Claude Code does not expand ${workspaceFolder} or ${CLAUDE_PROJECT_DIR} inside",
     "this file - it reports them as missing and passes them through literally - so a",
     "variable here would be handed to uv as a directory name of that spelling.",
-    "MARKDOWN_MEMORY_EXCLUDE keeps this repository's own fixtures and vendored eval",
-    "corpus out of its index; set it to whatever is not documentation in yours."
+    "MARKDOWN_MEMORY_EXCLUDE keeps what is not documentation out of the index. The",
+    "patterns below are an example, not this repository's: markdown-memory's own",
+    "\\.mcp.json excludes scripts/eval_data and tests/fixtures. Set yours to match."
   ],
   "mcpServers": {
     "markdown-memory": {

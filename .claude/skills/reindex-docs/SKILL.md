@@ -15,8 +15,8 @@ documents first, re-embeds everything, and then checks the store.
 uv run python scripts/reindex_docs.py <directory> --force
 ```
 
-- `<directory>` defaults to the configured docs root (`MARKDOWN_MEMORY_DOCS_DIR`, else the
-  current directory).
+- `<directory>` defaults to the configured docs root: `MARKDOWN_MEMORY_DOCS_DIR`, else
+  `CLAUDE_PROJECT_DIR`, else the current directory.
 - `--db PATH` targets a specific database. Without it the script resolves the same way the
   server does: `MARKDOWN_MEMORY_DB` if it is set, else the index keyed on the directory
   being re-indexed (`$XDG_DATA_HOME/markdown-memory/projects/<name>-<digest>/index.db`).

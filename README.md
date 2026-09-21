@@ -11,26 +11,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <img src="docs/assets/how-it-works-light.svg" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 10,997
+       alt="One question asked of four documentation files. Reading them whole costs 11,086
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 1,663 tokens - the
-            one that answers is 184.">
+            one that answers is 181.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 10,997 tokens in all:
+`docs/evaluation-protocol.md`, 11,086 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   128 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  184 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+  181 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
   577 tok  README.md  markdown-memory
-  491 tok  CLAUDE.md  markdown-memory > Commands
+  494 tok  CLAUDE.md  markdown-memory > Commands
   283 tok  README.md  markdown-memory > The embedding model > When it goes wrong
 ```
 
-**1,663 tokens instead of 10,997**, and the section that actually answers is 184 - a
+**1,663 tokens instead of 11,086**, and the section that actually answers is 181 - a
 sixtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -126,7 +126,7 @@ missed and `index_status.message` says what to run.
 
 ### What downloads, when, and where
 
-On its first real use - not at startup - the server fetches three files from
+The server starts a background thread that fetches three files from
 [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)
 at a pinned revision: the quantized ONNX graph, its external weights, and the tokenizer.
 About **330 MB**, once per machine, into:
@@ -289,7 +289,10 @@ falling back to the working directory only when that is not set. The docs root d
 that same project root, so it needs no entry. Each worktree of a repository is its own
 directory, so each gets its own index.
 
-Nothing is written into the repository, so there is nothing to add to its `.gitignore`.
+By default nothing is written into the repository. (A *relative* `MARKDOWN_MEMORY_DB`
+is resolved against the project root and does land inside it - `.gitignore` covers
+`.markdown-memory/` for that reason, and any other relative path you choose is yours to
+ignore.)
 The index lives under `$XDG_DATA_HOME/markdown-memory/projects/`, in a directory named for
 the documentation root and a digest of its resolved path - out of reach of `git clean
 -xdf`, writable when the checkout is not, and on local disk when the checkout is on a

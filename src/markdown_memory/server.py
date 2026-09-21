@@ -171,8 +171,11 @@ def resolve_config(
     cross-project leak keying was added to close. An explicitly configured database still
     wins, from the argument or the environment, in that order.
 
-    Every entry point resolves its configuration here - the server's own flags and the
-    scripts alike - so that precedence is written once and cannot drift between them.
+    Every entry point that takes overrides resolves them here - the server's own flags
+    and the scripts alike - so that precedence is written once and cannot drift between
+    them. The paths that accept none (the in-process service, `eval_retrieval.py`) go
+    straight to `ServerConfig.from_env`, which is the same answer with nothing laid over
+    it.
     """
     base = ServerConfig.from_env()
     root = docs_dir.expanduser() if docs_dir else base.docs_dir

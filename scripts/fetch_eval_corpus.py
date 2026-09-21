@@ -289,6 +289,30 @@ def check() -> int:
             if name not in recorded.get("legal", {}):
                 print(f"{source.name}/{name}: not vendored; re-run without --check")
                 problems += 1
+
+        # A file the manifest does not mention is one nothing verifies: it survives an
+        # upstream deletion, keeps being indexed, and would be redistributed with the rest.
+        for tree, expected in (
+            (CORPUS / source.name, set(recorded["files"])),
+            (LICENCES / source.name, set(recorded.get("legal", {}))),
+        ):
+            if not tree.is_dir():
+                continue
+            found = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
+            for stray in sorted(found - expected):
+                print(f"{tree.name}/{stray}: not in the manifest; delete it or re-vendor")
+                problems += 1
+
+    # The attribution table is generated, so it can drift from the sources it describes -
+    # a wrong licence name or a dead link would otherwise pass every other check here.
+    attribution = EVAL_DATA / "corpus_v2_LICENSES.md"
+    if not attribution.exists():
+        print(f"{attribution.name}: missing; re-run without --check")
+        problems += 1
+    elif attribution.read_text(encoding="utf-8") != licences():
+        print(f"{attribution.name}: stale; re-run without --check to regenerate it")
+        problems += 1
+
     print("corpus matches the manifest" if not problems else f"{problems} problem(s)")
     return 1 if problems else 0
 

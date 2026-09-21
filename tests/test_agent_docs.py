@@ -25,6 +25,7 @@ SKILLS = ("run-eval", "reindex-docs", "test-regression")
 # The gate, in order. `scripts/check.sh` runs it locally and `.github/workflows/gate.yml`
 # runs the same list in CI; the tests below hold both to this one definition.
 GATE_STEPS = (
+    "uv run python scripts/fetch_eval_corpus.py --check",
     "uv run ruff check .",
     "uv run ruff format --check .",
     "uv run mypy --strict src/",
@@ -136,6 +137,20 @@ class TestDocsMatchTheCode:
         for name in ("CLAUDE.md", ".claude/skills/run-eval/SKILL.md"):
             text = all_agent_text()[name]
             assert f"| {quoted[0]} |" in text and f"| {quoted[1]} |" in text, (name, quoted)
+
+        # Two gate tables are not all of it. The number is printed in five first-party
+        # places, and checking only the two that happen to use a table cell is how it went
+        # three merges out of date: the README preset row, the navigation block that is
+        # byte-identical across the three agent files, and the floors comment beside the
+        # thresholds themselves all quote it too.
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert f"| {quoted[0]} / {quoted[1]} /" in readme, ("README.md preset row", quoted)
+        block = NAVIGATION_BLOCK.search(all_agent_text()["CLAUDE.md"])
+        assert block is not None
+        assert f"Top-1 ~{quoted[0]}" in block.group(0), ("navigation block", quoted)
+        assert f"~{quoted[1]} reliable" in block.group(0), ("navigation block", quoted)
+        floors = (ROOT / "scripts/eval_retrieval.py").read_text(encoding="utf-8")
+        assert f"measured: {quoted[0]} / {quoted[1]} /" in floors, ("eval_retrieval.py", quoted)
         for preset in baseline.values():
             assert set(preset) == {
                 "dev/paraphrase",

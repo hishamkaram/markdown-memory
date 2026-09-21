@@ -75,6 +75,9 @@ jobs:
           print('embedding model loaded')
           "
 
+      # Apache-2.0 asks that the licence travel with the copy: this fails the job when
+      # a vendored licence or NOTICE goes missing, is edited, or gains a stray file.
+      - run: uv run python scripts/fetch_eval_corpus.py --check
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy --strict src/
