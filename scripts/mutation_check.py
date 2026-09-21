@@ -62,6 +62,19 @@ class Mutation:
 
 MUTATIONS = (
     Mutation(
+        name="config: put every project's index back in one shared database",
+        module="server.py",
+        old=(
+            "            db_path=(db_path if db_path else "
+            "_project_database(docs_dir if docs_dir else root)),"
+        ),
+        new=(
+            "            db_path=(db_path if db_path else "
+            '_xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"),'
+        ),
+        tests="test_one_working_directory_two_projects_two_databases",
+    ),
+    Mutation(
         name="max-sim: rank a section by its own vector, never by its best passage",
         module="search.py",
         old=(

@@ -19,6 +19,7 @@ import markdown_memory.server as server_module
 from markdown_memory.exceptions import (
     ConfigurationError,
     DatabaseError,
+    DocumentNotFoundError,
     IndexingError,
     SearchError,
 )
@@ -822,3 +823,84 @@ class TestADirectoryArgumentCannotLeaveTheRoot:
             assert service.index_status("api").verified
         finally:
             service.close()
+
+class TestEachProjectKeepsItsOwnIndex:
+    """The default database was shared by every project on the machine.
+
+    Search has been scoped to the docs root since it once answered one project's question
+    out of another's documentation, but scoping is a filter over a shared file, not
+    isolation: a document stays resolvable across the whole database by path or unique
+    suffix, and one project's failure rows and coverage certificate sat beside another's.
+    The safe arrangement existed - set MARKDOWN_MEMORY_DB - but it was opt-in, so anyone
+    who simply ran the server got the unsafe one.
+
+    The index is keyed on the documentation root, and the first attempt keyed it on the
+    working directory instead. That closed nothing for a launcher that starts both servers
+    from one directory - a CI runner, an editor daemon, a shell that never changed
+    directory - because both projects landed in one database again.
+    """
+
+    @staticmethod
+    def project(root: Path, name: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{name}.md").write_text(f"# {name}\n\n## Retry policy\n\n{name} body\n")
+        return root
+
+    def test_one_working_directory_two_projects_two_databases(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alpha = self.project(tmp_path / "alpha", "alpha")
+        beta = self.project(tmp_path / "beta", "beta")
+        launcher = tmp_path / "runner"
+        launcher.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        # Neither server is started from its own project: the cwd is the launcher's.
+        monkeypatch.chdir(launcher)
+
+        databases = []
+        for root in (alpha, beta):
+            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            config = ServerConfig.from_env()
+            databases.append(config.db_path)
+            service = MarkdownMemoryService(config, fake_embedder)
+            try:
+                service.index_directory()
+            finally:
+                service.close()
+
+        assert databases[0] != databases[1], "two projects shared one database"
+        assert not (launcher / ".markdown-memory").exists(), "an index was written to the cwd"
+        for root in (alpha, beta):
+            assert list(root.iterdir()) == [root / f"{root.name}.md"], (
+                "an index was written into the project"
+            )
+
+        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(beta))
+        service = MarkdownMemoryService(ServerConfig.from_env(), fake_embedder)
+        try:
+            assert [Path(d.file_path).name for d in service.list_documents()] == ["beta.md"]
+            # Resolution by path or unique suffix is database-wide, so a shared file hands
+            # this over however search is scoped.
+            with pytest.raises(DocumentNotFoundError):
+                service.get_document_outline(str(alpha / "alpha.md"))
+        finally:
+            service.close()
+
+    def test_two_roots_of_the_same_name_do_not_collide(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The label is only for humans; the digest is what keeps them apart."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        first = tmp_path / "one" / "docs"
+        second = tmp_path / "two" / "docs"
+        paths = []
+        for root in (first, second):
+            root.mkdir(parents=True)
+            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            paths.append(ServerConfig.from_env().db_path)
+        assert paths[0] != paths[1], "two roots named 'docs' shared one index"
+        assert all(p.parent.name.startswith("docs-") for p in paths)

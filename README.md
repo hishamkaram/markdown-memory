@@ -100,7 +100,7 @@ indexes its own six documentation files and keeps the vendored evaluation corpus
 | Environment variable | CLI flag | Default |
 | --- | --- | --- |
 | `MARKDOWN_MEMORY_DOCS_DIR` | `--docs-dir` | current working directory |
-| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/index.db` (`~/.local/share/...`) |
+| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/projects/<root>-<digest>/index.db` — one index per docs root |
 | `MARKDOWN_MEMORY_MODEL_CACHE` | - | `$XDG_CACHE_HOME/markdown-memory/models` (`~/.cache/...`) |
 | `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | nothing excluded |
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
