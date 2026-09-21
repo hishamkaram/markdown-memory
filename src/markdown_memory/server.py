@@ -155,6 +155,34 @@ class ServerConfig:
         )
 
 
+def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
+    """Environment configuration with the command line laid over it.
+
+    `--docs-dir` names a different documentation root, and the default database is keyed on
+    that root, so it has to re-key: taking `ServerConfig.from_env().db_path` as the fallback
+    reads a path derived from the *environment's* root, and two servers launched from one
+    directory with different `--docs-dir` would land in the launcher's single database -
+    exactly the cross-project leak keying was added to close. An explicitly configured
+    database still wins, from the flag or the environment, in that order.
+    """
+    base = ServerConfig.from_env()
+    docs_dir = arguments.docs_dir.expanduser() if arguments.docs_dir else base.docs_dir
+    configured_db = _configured_path(ENV_DB_PATH, _project_root())
+    return ServerConfig(
+        db_path=(
+            arguments.db.expanduser()
+            if arguments.db
+            else configured_db
+            if configured_db
+            else _project_database(docs_dir)
+        ),
+        docs_dir=docs_dir,
+        embedder=arguments.embedder or base.embedder,
+        model_cache_dir=base.model_cache_dir,
+        exclude=tuple(arguments.exclude) or base.exclude,
+    )
+
+
 def _project_root() -> Path:
     """The directory a relative configured path is relative to.
 
@@ -669,16 +697,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     arguments = parser.parse_args(argv)
 
     configure_logging(arguments.log_level)
-    base = ServerConfig.from_env()
-    db_path: Path | None = arguments.db
-    docs_dir: Path | None = arguments.docs_dir
-    config = ServerConfig(
-        db_path=db_path.expanduser() if db_path else base.db_path,
-        docs_dir=docs_dir.expanduser() if docs_dir else base.docs_dir,
-        embedder=arguments.embedder or base.embedder,
-        model_cache_dir=base.model_cache_dir,
-        exclude=tuple(arguments.exclude) or base.exclude,
-    )
+    config = _config_from_cli(arguments)
     try:
         service = MarkdownMemoryService(config)
     except MarkdownMemoryError:

@@ -5,6 +5,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -386,7 +387,12 @@ class TestProjectScopedConfiguration:
         config = json.loads((Path(__file__).parent.parent / ".mcp.json").read_text())
         environment = config["mcpServers"]["markdown-memory"]["env"]
         assert not any("${" in value for value in environment.values())
-        assert not Path(environment["MARKDOWN_MEMORY_DB"]).is_absolute()
+        # The database is keyed on the docs root now, so the shipped config sets no path at
+        # all. Any path it does set must stay relative: the server resolves one against the
+        # project root, and an absolute path in a committed config belongs to one machine.
+        for name in (server_module.ENV_DB_PATH, server_module.ENV_DOCS_DIR):
+            if name in environment:
+                assert not Path(environment[name]).is_absolute()
 
 
 class TestOneDatabaseManyProjects:
@@ -824,6 +830,7 @@ class TestADirectoryArgumentCannotLeaveTheRoot:
         finally:
             service.close()
 
+
 class TestEachProjectKeepsItsOwnIndex:
     """The default database was shared by every project on the machine.
 
@@ -904,3 +911,55 @@ class TestEachProjectKeepsItsOwnIndex:
             paths.append(ServerConfig.from_env().db_path)
         assert paths[0] != paths[1], "two roots named 'docs' shared one index"
         assert all(p.parent.name.startswith("docs-") for p in paths)
+
+
+class TestTheCommandLineRekeysTheDatabase:
+    """`--docs-dir` names a different project, so the default database must follow it.
+
+    The command line was laid over a configuration whose database path had already been
+    derived from the *environment's* docs root. Two servers launched from one directory
+    with different `--docs-dir` therefore shared the launcher's single database and could
+    resolve each other's documents - the cross-project leak that keying the database on
+    the documentation root exists to close, reached through the one path that skipped it.
+    """
+
+    @staticmethod
+    def config(docs: Path | None, db: Path | None = None) -> ServerConfig:
+        arguments = argparse.Namespace(docs_dir=docs, db=db, embedder=None, exclude=[])
+        return server_module._config_from_cli(arguments)
+
+    @pytest.fixture(autouse=True)
+    def _launcher(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        for name in (
+            server_module.ENV_DB_PATH,
+            server_module.ENV_DOCS_DIR,
+            server_module.ENV_PROJECT_DIR,
+        ):
+            monkeypatch.delenv(name, raising=False)
+        launcher = tmp_path / "launcher"
+        launcher.mkdir()
+        monkeypatch.chdir(launcher)
+        yield
+
+    def test_two_docs_dir_flags_do_not_share_the_launcher_s_database(self, tmp_path: Path) -> None:
+        alpha, beta = tmp_path / "alpha", tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+        assert self.config(alpha).db_path != self.config(beta).db_path, (
+            "two --docs-dir projects shared the launcher's database"
+        )
+
+    def test_an_explicit_database_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keying is the default, not a policy: whoever names a database gets it."""
+        alpha = tmp_path / "alpha"
+        alpha.mkdir()
+        flag = tmp_path / "flag.db"
+        assert self.config(alpha, flag).db_path == flag, "--db stopped winning"
+        monkeypatch.setenv(server_module.ENV_DB_PATH, str(tmp_path / "from_env.db"))
+        assert self.config(alpha).db_path == tmp_path / "from_env.db", (
+            "MARKDOWN_MEMORY_DB stopped winning"
+        )
+        assert self.config(alpha, flag).db_path == flag, "the flag lost to the environment"

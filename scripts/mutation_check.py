@@ -62,6 +62,13 @@ class Mutation:
 
 MUTATIONS = (
     Mutation(
+        name="config: keep the launcher's database when --docs-dir names another project",
+        module="server.py",
+        old="            else _project_database(docs_dir)",
+        new="            else base.db_path",
+        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database",
+    ),
+    Mutation(
         name="config: put every project's index back in one shared database",
         module="server.py",
         old=(
