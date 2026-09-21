@@ -211,6 +211,14 @@ MUTATIONS = (
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
     ),
     Mutation(
+        name="diagram: let a machine with no browser report a half-redrawn picture as done",
+        module="make_diagram.py",
+        area="scripts",
+        old="    if missing:",
+        new="    if False:",
+        tests="test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning",
+    ),
+    Mutation(
         name="cache: fingerprint the passages but not the section around them",
         module="eval_cache.py",
         area="scripts",

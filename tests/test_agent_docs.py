@@ -154,10 +154,18 @@ class TestDocsMatchTheCode:
 
         # The README prints a full row per preset, not just the default's two headline
         # figures, and the light preset drifts by the same mechanism as the default did.
-        for preset, name in (("embeddinggemma", "embeddinggemma"), ("bge-small", "bge-small")):
+        # Read each row by its preset name: looking the triple up anywhere in the file
+        # passes just as happily when the two rows have been swapped, which is a table that
+        # recommends the wrong model.
+        for preset in ("embeddinggemma", "bge-small"):
             row = baseline[preset]["held_out/paraphrase"]
             printed = " / ".join(f"{row[key]:.0%}" for key in ("top1", "top3", "top5"))
-            assert f"| {printed} |" in readme, (f"README.md {name} row", printed)
+            line = re.search(rf"^\| `{re.escape(preset)}`.*$", readme, re.M)
+            assert line, f"README.md has no preset row for {preset}"
+            assert f"| {printed} |" in line.group(0), (
+                f"README.md's `{preset}` row reads {line.group(0)!r}, "
+                f"but the baseline says {printed}"
+            )
         for preset in baseline.values():
             assert set(preset) == {
                 "dev/paraphrase",
@@ -393,23 +401,53 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         expected = [f"{tokens:,}" for _, tokens in make_diagram.LEFT_FILES]
         expected += [str(tokens) for tokens, _, _ in make_diagram.RIGHT_HITS]
         expected.append(f"answers is {make_diagram.BEST_HIT}")
+        expected.append(f"{make_diagram.TOTAL_TOKENS:,} tokens")
+        expected.append(f"{make_diagram.RETURNED_TOKENS:,} tokens")
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            # Only what the <text> elements draw. Searching the whole file would score the
+            # aria-label, which carries the same sentence - so deleting the visible caption
+            # and leaving the alt text behind would have passed.
+            drawn = "\n".join(re.findall(r"<text[^>]*>(.*?)</text>", rendered, re.DOTALL))
+            assert drawn, f"{svg} draws no text at all"
             for figure in expected:
-                assert figure in rendered, (
-                    f"{svg} does not print {figure!r}; re-run scripts/make_diagram.py"
+                assert figure in drawn, (
+                    f"{svg} does not draw {figure!r}; re-run scripts/make_diagram.py"
+                )
+
+    def test_the_drawing_says_the_same_thing_to_a_reader_who_cannot_see_it(self) -> None:
+        """The aria-label is the picture, for anyone not looking at it.
+
+        It used to spell its three figures out by hand while the caption beside them was
+        derived, so a re-measurement moved the caption and left the alt text describing the
+        previous one.
+        """
+        import make_diagram
+
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            label = re.search(r'aria-label="([^"]*)"', rendered)
+            assert label, f"{svg} has no aria-label"
+            for figure in (
+                f"{make_diagram.TOTAL_TOKENS:,}",
+                f"{make_diagram.RETURNED_TOKENS:,}",
+                str(make_diagram.BEST_HIT),
+            ):
+                assert figure in label.group(1), (
+                    f"{svg}'s aria-label does not carry {figure!r}: it describes a "
+                    f"different picture than the one it labels"
                 )
 
     def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
         """Browsers get the vector; anything that ignores <picture> gets a raster.
 
-        The GitHub mobile app draws neither, but that is not something this markup can fix:
-        the app cannot resolve a *relative* image path at all, in Markdown or in HTML, for
-        any format (community discussion 177702). The documented workaround is an absolute
-        raw.githubusercontent.com URL, which for a private repository means committing a
-        non-expiring access token into the README - so this repository does not, and the
-        diagram stays broken in the app until the repository is public. Changing the format
-        here will not change that; only the URL would.
+        The GitHub mobile app draws neither today, and that is not something this markup can
+        fix. The app renders a relative image path perfectly well - hishamkaram/delegation-
+        layer does exactly that, in raw HTML, and it draws - but that repository is public
+        and this one is not. Images in a private repository need an authenticated fetch the
+        app does not make for them, which is why the format was changed twice here to no
+        effect. The fix is publishing the repository, not editing this markup; the raster
+        below stays regardless, for clients that do not implement <picture>.
         """
         import make_diagram
 
@@ -434,14 +472,47 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             make_diagram.W * make_diagram.PNG_SCALE,
             make_diagram.H * make_diagram.PNG_SCALE,
         )
+        blobs: dict[str, bytes] = {}
         for theme in ("light", "dark"):
             png = ROOT / "docs/assets" / f"how-it-works-{theme}.png"
             assert png.exists(), f"{png.name} is missing; run scripts/make_diagram.py"
-            header = png.read_bytes()[:24]
+            blobs[theme] = png.read_bytes()
+            header = blobs[theme][:24]
             assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{png.name} is not a PNG"
             assert header[12:16] == b"IHDR", f"{png.name} has no image header"
             size = (int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big"))
             assert size == expected, (png.name, size, expected)
+            # A blank canvas of the right dimensions would satisfy everything above. The
+            # drawing is several hundred glyphs on a flat background, which does not
+            # compress anywhere near this small; an empty one lands in the low tens of KB.
+            assert len(blobs[theme]) > 60_000, (
+                f"{png.name} is {len(blobs[theme])} bytes - too little to be the drawing"
+            )
+        assert blobs["light"] != blobs["dark"], (
+            "the two rasters are byte-identical, so at least one was not drawn from its own theme"
+        )
+
+    def test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The generator rewrites the SVG before it rasterises the PNG.
+
+        So a machine with no headless browser regenerates the vector, leaves the raster at
+        the previous figures, and used to exit 0 over two images that now disagree. Run it
+        against a scratch directory rather than the repository: the point is the exit code,
+        and a test that redrew `docs/assets` would be a test that edits tracked files.
+        """
+        import make_diagram
+
+        (tmp_path / "docs/assets").mkdir(parents=True)
+        monkeypatch.setattr(make_diagram, "ROOT", tmp_path)
+        monkeypatch.setattr(make_diagram, "rasterise", lambda svg, png: False)
+
+        assert make_diagram.main() != 0, (
+            "main() reported success while the PNGs the README falls back to went stale"
+        )
+        drawn = sorted(p.name for p in (tmp_path / "docs/assets").iterdir())
+        assert drawn == ["how-it-works-dark.svg", "how-it-works-light.svg"], drawn
 
     def test_the_sections_the_worked_example_returns_are_the_size_it_claims(self) -> None:
         """Ranking needs the model; a section's token estimate does not, so pin that."""

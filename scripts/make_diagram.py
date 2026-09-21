@@ -5,6 +5,7 @@ that switched theme with a media query would render wrongly in one of the two. T
 presentation attributes only, selected with <picture> in the README.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -58,13 +59,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 W, H = 1120, 430
 
-# Bars are to scale against the largest single thing on the page: README.md at 5,410
-# tokens. One scale for both sides, or the comparison the picture exists to make would be
-# drawn dishonestly. tests/test_agent_docs.py re-measures these against the real files:
-# edit the documentation and the figures below stop being true, which is a test failure.
-# What reading each file whole costs, and what the query gives back instead. Both are
-# measured, never estimated: tests/test_agent_docs.py re-derives every number here from the
-# real files and fails when the documentation moves on without the picture.
+# What reading each file whole costs, and what the query gives back instead. Both sides are
+# measured, never estimated, and both are drawn to one scale - the largest file below - or
+# the comparison this picture exists to make would be drawn dishonestly. No figure is
+# repeated anywhere else in this file: every total, caption and label is derived from these
+# two lists, because a number written out twice is a number that goes stale in one place.
+# tests/test_agent_docs.py re-derives all of them from the real files, so editing the
+# documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
     ("README.md", 5424),
     ("CLAUDE.md", 3034),
@@ -79,8 +80,15 @@ RIGHT_HITS = [
     (283, "When it goes wrong", False),
 ]
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
-# The hit the caption calls out. Derived, so the caption cannot disagree with the bar.
+# Every figure the drawing prints is derived from the two lists above - the totals, the
+# caption and the aria-label alike. Writing any of them out by hand is how the caption and
+# the bar beside it come to disagree, which is precisely the defect this picture claims to
+# be free of.
+TOTAL_TOKENS = sum(tokens for _, tokens in LEFT_FILES)
+RETURNED_TOKENS = sum(tokens for tokens, _, _ in RIGHT_HITS)
 BEST_HIT = next(tokens for tokens, _, best in RIGHT_HITS if best)
+# Counts read as words in prose, and prose is what the captions and the aria-label are.
+WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 LEFT_BAR = 200.0
 RIGHT_BAR = 200.0
 
@@ -114,9 +122,10 @@ def arrow(x0, x1, y, colour):
 def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
-        f'height="{H}" role="img" aria-label="One question: reading four whole files costs '
-        f"11,100 tokens; markdown-memory returns five sections totalling 1,676, and the one "
-        f'that answers is 181 tokens.">'
+        f'height="{H}" role="img" aria-label="One question: reading {WORDS[len(LEFT_FILES)]} '
+        f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns "
+        f"{WORDS[len(RIGHT_HITS)]} sections totalling {RETURNED_TOKENS:,}, and the one that "
+        f'answers is {BEST_HIT} tokens.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
 
@@ -132,7 +141,13 @@ def draw(c: dict) -> str:
         )
     )
     o.append(
-        text(40, 64, "one question, asked of four documentation files", fill=c["muted"], size=12)
+        text(
+            40,
+            64,
+            f"one question, asked of {WORDS[len(LEFT_FILES)]} documentation files",
+            fill=c["muted"],
+            size=12,
+        )
     )
 
     # ---- left: reading the files whole ----
@@ -158,7 +173,7 @@ def draw(c: dict) -> str:
         )
         y += 46
     o.append(f'<path d="M62 318 L328 318" stroke="{c["coldEdge"]}" stroke-width="1"/>')
-    o.append(text(62, 338, "11,100 tokens", fill=c["cold"], size=14, weight=600))
+    o.append(text(62, 338, f"{TOTAL_TOKENS:,} tokens", fill=c["cold"], size=14, weight=600))
     o.append(text(62, 354, "most of it about something else", fill=c["muted"], size=11))
 
     # ---- middle: what it does with them ----
@@ -230,7 +245,7 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, "1,676 tokens", fill=c["warm"], size=14, weight=600))
+    o.append(text(732, 338, f"{RETURNED_TOKENS:,} tokens", fill=c["warm"], size=14, weight=600))
     o.append(
         text(
             732,
@@ -255,10 +270,14 @@ def draw(c: dict) -> str:
     return "\n".join(o) + "\n"
 
 
-# GitHub's mobile app does not render an SVG in a README, and does not honour <picture>;
-# it shows a broken-image mark instead. The README therefore points its <img> - the element
-# every client understands - at a PNG, and offers the SVGs as <source>s for the web. The
-# PNG is rasterised at 2x so it stays sharp on a phone.
+# The README offers the SVGs as <source>s and points its <img> - the element every client
+# understands - at a PNG, so a reader whose client does not implement <picture> still sees
+# the drawing. Rasterised at 2x so it stays sharp on a phone.
+#
+# This is not what fixes the GitHub mobile app, which draws a broken-image mark for this
+# README today. The app renders a relative image path fine in a public repository; what it
+# will not do is the authenticated fetch a private one needs. Two changes of format here
+# moved nothing, and a third would not either.
 PNG_SCALE = 2
 BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 
@@ -268,17 +287,25 @@ def rasterise(svg: Path, png: Path) -> bool:
     browser = next((shutil.which(name) for name in BROWSERS if shutil.which(name)), None)
     if browser is None:
         return False
+    # --no-sandbox only where the sandbox cannot work anyway: as root, Chrome refuses to
+    # start without it. Passing it unconditionally would drop the sandbox on the machine
+    # of everyone who runs this as themselves, to fix a problem they do not have.
+    sandbox = ["--no-sandbox"] if os.geteuid() == 0 else []
     with tempfile.TemporaryDirectory() as scratch:
-        subprocess.run(
-            [browser, "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
+        done = subprocess.run(
+            [browser, "--headless", "--disable-gpu", *sandbox, "--hide-scrollbars",
              f"--force-device-scale-factor={PNG_SCALE}", f"--screenshot={png}",
              f"--window-size={W},{H}", f"--user-data-dir={scratch}", svg.as_uri()],
-            check=True, capture_output=True,
+            capture_output=True, text=True,
         )  # fmt: skip
+    if done.returncode != 0:
+        # Chrome says why on stderr; swallowing it leaves "it did not work" and nothing else.
+        raise SystemExit(f"{browser} failed to rasterise {svg.name}:\n{done.stderr.strip()}")
     return True
 
 
 def main() -> int:
+    missing = False
     for name, colours in THEMES.items():
         path = ROOT / "docs/assets" / f"how-it-works-{name}.svg"
         path.write_text(draw(colours), encoding="utf-8")
@@ -287,7 +314,18 @@ def main() -> int:
         if rasterise(path, png):
             print(png.relative_to(ROOT))
         else:
-            print(f"  no headless browser found; {png.name} left as it was", file=sys.stderr)
+            print(f"  no headless browser found; {png.name} was NOT redrawn", file=sys.stderr)
+            missing = True
+    if missing:
+        # The SVGs above have already been rewritten, so exiting 0 here would hand back a
+        # vector carrying new figures and a raster still carrying the old ones - the exact
+        # disagreement between the two images that the fallback exists to avoid. Say so
+        # loudly: the drawing is only half regenerated until a browser is installed.
+        print(
+            "install chromium and re-run: the PNGs the README falls back to are now stale",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
