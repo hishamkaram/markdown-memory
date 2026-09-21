@@ -18,7 +18,6 @@ an indexing transaction is open.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import os
@@ -26,7 +25,7 @@ import sqlite3
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -38,6 +37,8 @@ from markdown_memory.exceptions import DatabaseError
 from markdown_memory.models import (
     Document,
     DocumentSummary,
+    FileFailure,
+    IndexStatus,
     Section,
     SectionDraft,
     SectionVectors,
@@ -46,8 +47,18 @@ from markdown_memory.models import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_DIM = 384
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+
+#: How a section's vector is built. 1 embedded the whole section text, truncated at the
+#: model's token limit; 2 is the mean of the section's passage vectors. Stored per document
+#: so that a document written under the old scheme re-indexes itself and one written under
+#: the new one is left alone - a format change repairs a tree file by file, and resumes
+#: where it stopped if it is interrupted.
+VECTOR_FORMAT = 2
+_LEGACY_VECTORS = 1
+
 _SECTION_ID_META_KEY = "next_section_id"
+_GENERATION_META_KEY = "index_generation"
 _BUSY_TIMEOUT_MS = 10_000
 _WAL_ATTEMPTS = 40
 _WAL_RETRY_SECONDS = 0.05
@@ -165,6 +176,37 @@ def _schema_v2(embedding_dim: int) -> tuple[str, ...]:
     )
 
 
+def _schema_v4() -> tuple[str, ...]:
+    """What is known to be wrong with the index, and whether anything vouches for it.
+
+    Two questions, kept apart because they have different answers. `index_failures` says
+    which paths could not be read, one row per path, written by whichever scan last looked
+    at that path. `index_coverage` says whether a full walk of a root ever finished without
+    failures - the only thing that can distinguish "every file was seen" from "only these
+    files were seen", which no amount of per-file state can tell you: a run killed on its
+    tenth file leaves the other 990 with no rows at all.
+
+    Earlier attempts hashed the root (so containment could not be asked), then kept a
+    wall-clock guard (wrong in both orderings), then a crash marker that masked the file
+    rows. Those are gone. What makes this sound instead is the scan lock: one scan at a
+    time, so the run that just walked a tree is entitled to speak for it.
+    """
+    return (
+        """
+        CREATE TABLE index_failures (
+            file_path TEXT PRIMARY KEY,
+            message   TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE index_coverage (
+            root     TEXT PRIMARY KEY,
+            verified INTEGER NOT NULL
+        )
+        """,
+    )
+
+
 def serialize_embedding(embedding: Sequence[float]) -> bytes:
     """Pack a vector into the little-endian float32 blob format sqlite-vec expects."""
     return struct.pack(f"<{len(embedding)}f", *embedding)
@@ -175,9 +217,13 @@ def _is_usable_vector(embedding: Sequence[float]) -> bool:
     return all(math.isfinite(value) for value in embedding) and any(embedding)
 
 
-def _incomplete_key(root: str) -> str:
-    """A meta key naming one documentation root, hashed so any path is a valid key."""
-    return "incomplete:" + hashlib.sha256(root.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+def _bump_generation(conn: sqlite3.Connection) -> None:
+    """Mark that everything indexed before this moment is gone."""
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?, '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+        (_GENERATION_META_KEY,),
+    )
 
 
 def _directory_prefix(directory: str) -> str:
@@ -388,6 +434,18 @@ class Database:
                             "Re-run index_directory for each documentation root.",
                         )
                     applied.append(2)
+                if current < 4:
+                    for statement in _schema_v4():
+                        tx.execute(statement)
+                    tx.execute(
+                        "ALTER TABLE documents "
+                        f"ADD COLUMN vector_format INTEGER NOT NULL DEFAULT {_LEGACY_VECTORS}"
+                    )
+                    # v3 was never released; it exists only in working copies of the
+                    # abandoned design. Its table is dropped rather than migrated.
+                    tx.execute("DROP TABLE IF EXISTS index_problems")
+                    tx.execute("DELETE FROM meta WHERE key LIKE 'incomplete:%'")
+                    applied.append(4)
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
@@ -429,6 +487,9 @@ class Database:
         )
         with self.transaction() as tx:
             dropped = tx.execute("DELETE FROM documents").rowcount
+            # Every root's documents are gone, including roots this process never looked
+            # at; a certificate that survived would vouch for an empty tree.
+            self.revoke_coverage(tx)
             if dropped:
                 _add_notice(
                     tx,
@@ -474,25 +535,183 @@ class Database:
             ).fetchall()
         return {str(key): str(value) for key, value in rows}
 
-    def mark_incomplete(self, root: str, message: str) -> None:
-        """Remember that ``root`` is only partly indexed, until a clean run says otherwise.
+    def failure_paths(self, root: str) -> list[str]:
+        """Every path recorded as unreadable under ``root``."""
+        prefix = _directory_prefix(root)
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT file_path FROM index_failures "
+                "WHERE file_path = ? OR substr(file_path, 1, length(?)) = ?",
+                (root, prefix, prefix),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
-        Deliberately *not* the notice queue: notices are database-wide and dismissed by
-        whoever reads them first, so one root's failure would be delivered to another
-        root's run and deleted there - leaving the affected root silent forever. One
-        database can hold several roots, and the default database holds every project on
-        the machine.
+    def record_failures(self, clear: Sequence[str], failures: Mapping[str, str]) -> None:
+        """Forget the failures in ``clear``, then record ``failures``.
+
+        The caller names what to forget rather than passing a root, because a walk does
+        not reach everything beneath its root: `.venv` and `node_modules` are pruned, and
+        a directory that cannot be listed is skipped. Clearing by prefix would erase what
+        a scan never looked at - a file recorded as broken inside a pruned directory would
+        be quietly declared fine by a run of its parent.
+
+        What is cleared is replaced wholesale, because a failure can outlive every chance
+        to clear it one at a time: a file that fails on its *first* index never reaches
+        `replace_document`, so it never enters `documents` and a later purge cannot find
+        it either. Sound because one scan runs at a time - the run that just walked these
+        paths is the freshest word on them.
         """
-        self.set_meta(_incomplete_key(root), message)
-
-    def clear_incomplete(self, root: str) -> None:
-        """Forget it: this root indexed cleanly."""
         with self.transaction() as conn:
-            conn.execute("DELETE FROM meta WHERE key = ?", (_incomplete_key(root),))
+            conn.executemany(
+                "DELETE FROM index_failures WHERE file_path = ?", [(path,) for path in clear]
+            )
+            if failures:
+                conn.executemany(
+                    "INSERT INTO index_failures(file_path, message) VALUES (?, ?)",
+                    sorted(failures.items()),
+                )
 
-    def incomplete_note(self, root: str) -> str | None:
-        """Why ``root`` is partly indexed, or ``None`` when it is whole."""
-        return self.get_meta(_incomplete_key(root))
+    def mark_scan_started(self, root: str) -> None:
+        """This root, and every root containing it, is no longer vouched for.
+
+        Called at a scan's first write, not at its start: a run that changes nothing -
+        the model will not load, every file is unchanged - has no business retracting a
+        certificate. A scan of `docs/api` retracts `docs` too, because a half-written
+        subtree is a half-written tree.
+        """
+        prefix = _directory_prefix(root)
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE index_coverage SET verified = 0 "
+                # itself, anything containing it, and anything inside it: this scan may
+                # rewrite any of them, and none may go on vouching for itself while it does
+                "WHERE root = ? "
+                "OR substr(?, 1, length(root) + 1) = root || ? "
+                "OR substr(root, 1, length(?)) = ?",
+                (root, root, os.sep, prefix, prefix),
+            )
+            conn.execute(
+                "INSERT INTO index_coverage(root, verified) VALUES (?, 0) "
+                "ON CONFLICT(root) DO UPDATE SET verified = 0",
+                (root,),
+            )
+
+    def mark_scan_complete(self, root: str, generation: int) -> None:
+        """A full walk of ``root`` ran to the end.
+
+        Not "and everything was readable" - that is what `index_failures` is for, and
+        `index_status` will not call a tree whole while anything under it is listed there.
+        Keeping the two apart means a run does not have to decide what a later question
+        will mean.
+
+        Only this root's row is written. An earlier draft also deleted the rows of roots
+        inside it, on the grounds that this walk covered them - but it does not cover a
+        pruned subtree, and a walk that hit failures covered even less. Deleting them
+        turned a nested root that was perfectly fine into one that reported unknown,
+        which is a worse answer than the one it replaced.
+        """
+        with self.transaction() as conn:
+            current = int(
+                (
+                    conn.execute(
+                        "SELECT value FROM meta WHERE key = ?", (_GENERATION_META_KEY,)
+                    ).fetchone()
+                    or ("0",)
+                )[0]
+            )
+            if current != generation:
+                # The index was discarded while this scan was walking; what it just
+                # measured describes a database that no longer exists.
+                return
+            conn.execute(
+                "INSERT INTO index_coverage(root, verified) VALUES (?, 1) "
+                "ON CONFLICT(root) DO UPDATE SET verified = 1",
+                (root,),
+            )
+
+    def revoke_coverage(self, conn: sqlite3.Connection | None = None) -> None:
+        """Nothing is vouched for any more - the index itself was discarded.
+
+        A model or dimension change empties every document in the database, including
+        roots this process never looked at. A certificate that outlives its subject is
+        worse than none: it says a tree is whole when nothing of it is left.
+
+        The generation is bumped in the same breath. Revoking only settles the
+        certificates that exist *now*; a scan already running has read its file hashes,
+        will skip every file as unchanged, and would write a fresh certificate over an
+        empty database. It compares the generation instead and stands down.
+        """
+        if conn is not None:
+            _bump_generation(conn)
+            conn.execute("DELETE FROM index_coverage")
+            return
+        with self.transaction() as owned:
+            _bump_generation(owned)
+            owned.execute("DELETE FROM index_coverage")
+
+    def generation(self) -> int:
+        """How many times this database has been emptied wholesale."""
+        return int(self.get_meta(_GENERATION_META_KEY) or "0")
+
+    def index_status(self, root: str, scope: str | None = None) -> IndexStatus:
+        """What can honestly be said about answers drawn from ``root``.
+
+        ``scope`` narrows *what is named* - the failures and stale documents worth
+        mentioning - without changing whose coverage is being reported: a caller asking
+        about one directory is still served from the whole root, and the certificate
+        belongs to the root.
+
+        Every read is one snapshot. Taken separately, a scan committing between them hands
+        back a verdict that was never true at any instant: the failures read as empty, the
+        certificate still reads valid, and the answer claims a whole tree while the row
+        proving otherwise is already committed. Composing two snapshots in the caller has
+        exactly the same hole, which is why the narrowing happens here.
+        """
+        named = scope if scope is not None else root
+        prefix = _directory_prefix(named)
+        with self._reading() as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = conn.execute(
+                    "SELECT file_path, message FROM index_failures "
+                    "WHERE file_path = ? OR substr(file_path, 1, length(?)) = ? "
+                    "ORDER BY file_path",
+                    (named, prefix, prefix),
+                ).fetchall()
+                certificate = conn.execute(
+                    "SELECT verified FROM index_coverage WHERE root = ?", (root,)
+                ).fetchone()
+                stale_vectors = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM documents "
+                        "WHERE (file_path = ? OR substr(file_path, 1, length(?)) = ?) "
+                        "AND vector_format != ?",
+                        (named, prefix, prefix, VECTOR_FORMAT),
+                    ).fetchone()[0]
+                )
+                # Whether the ROOT is whole, in the same snapshot. A caller asking about
+                # one directory is still answered from the whole root, so a clean
+                # subdirectory of a root that lost files is not itself a safe answer -
+                # only what is *named* narrows.
+                whole = rows == [] and stale_vectors == 0
+                if named != root:
+                    root_prefix = _directory_prefix(root)
+                    whole = not conn.execute(
+                        "SELECT 1 FROM index_failures "
+                        "WHERE file_path = ? OR substr(file_path, 1, length(?)) = ? "
+                        "UNION ALL SELECT 1 FROM documents "
+                        "WHERE (file_path = ? OR substr(file_path, 1, length(?)) = ?) "
+                        "AND vector_format != ? LIMIT 1",
+                        (root, root_prefix, root_prefix,
+                         root, root_prefix, root_prefix, VECTOR_FORMAT),
+                    ).fetchone()  # fmt: skip
+            finally:
+                conn.execute("COMMIT")
+        failures = tuple(
+            FileFailure(file_path=str(path), message=str(message)) for path, message in rows
+        )
+        verified = certificate is not None and bool(certificate[0]) and whole
+        return IndexStatus(verified=verified, failures=failures, stale_vectors=stale_vectors)
 
     def dismiss_notices(self, keys: Iterable[str]) -> None:
         """Forget the notices that have been delivered; any added since are kept."""
@@ -529,16 +748,24 @@ class Database:
             ).fetchall()
         return [_document_from_row(row) for row in rows]
 
-    def document_hashes(self, directory: str) -> dict[str, str]:
-        """Map ``file_path -> content_hash`` for every document under ``directory``."""
+    def document_hashes(self, directory: str) -> dict[str, tuple[str, int]]:
+        """Map ``file_path -> (content_hash, vector_format)`` under ``directory``.
+
+        The format travels with the hash because both answer the same question - may this
+        file be skipped? - and a file whose vectors predate the current pooling must be
+        rebuilt however unchanged its bytes are.
+        """
         prefix = _directory_prefix(directory)
         with self._reading() as conn:
             rows = conn.execute(
-                "SELECT file_path, content_hash FROM documents "
+                "SELECT file_path, content_hash, vector_format FROM documents "
                 "WHERE substr(file_path, 1, length(?)) = ?",
                 (prefix, prefix),
             ).fetchall()
-        return {str(path): str(content_hash) for path, content_hash in rows}
+        return {
+            str(path): (str(content_hash), int(vector_format))
+            for path, content_hash, vector_format in rows
+        }
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         """All documents (optionally restricted to ``directory``) with section counts."""
@@ -603,9 +830,10 @@ class Database:
             ).fetchone()
             if row is None:
                 cursor = conn.execute(
-                    "INSERT INTO documents(file_path, title, content_hash, last_modified) "
-                    "VALUES (?, ?, ?, ?)",
-                    (file_path, title, content_hash, last_modified),
+                    "INSERT INTO documents"
+                    "(file_path, title, content_hash, last_modified, vector_format) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (file_path, title, content_hash, last_modified, VECTOR_FORMAT),
                 )
                 if cursor.lastrowid is None:  # pragma: no cover - sqlite always sets it
                     raise DatabaseError("INSERT INTO documents returned no rowid")
@@ -613,9 +841,9 @@ class Database:
             else:
                 doc_id = int(row[0])
                 conn.execute(
-                    "UPDATE documents SET title = ?, content_hash = ?, last_modified = ? "
-                    "WHERE id = ?",
-                    (title, content_hash, last_modified, doc_id),
+                    "UPDATE documents SET title = ?, content_hash = ?, last_modified = ?, "
+                    "vector_format = ? WHERE id = ?",
+                    (title, content_hash, last_modified, VECTOR_FORMAT, doc_id),
                 )
                 conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
             for section, vector in zip(sections, vectors, strict=True):
@@ -694,6 +922,7 @@ class Database:
         """
         with self.transaction() as conn:
             discarded = conn.execute("DELETE FROM documents").rowcount
+            self.revoke_coverage(conn)
             if discarded and notice is not None:
                 _add_notice(conn, notice(discarded))
             return discarded
@@ -934,6 +1163,7 @@ class Database:
         """Row count of one of the known tables (diagnostics and integrity tests)."""
         if table not in {
             "documents", "sections", "sections_fts", "sections_vec", "units", "units_vec",
+            "index_failures", "index_coverage",
         }:  # fmt: skip
             raise DatabaseError(f"Unknown table: {table!r}")
         # COUNT(*) on an external-content FTS5 table is answered from `sections`; the

@@ -14,10 +14,10 @@ Everything runs locally: parsing with `markdown-it-py`, embeddings with
 | Tool | Purpose |
 | --- | --- |
 | `index_directory(directory=None)` | Scan a tree, (re)index new/changed `.md` files (SHA-256), purge deleted ones |
-| `list_documents(directory="")` | Indexed paths, titles and section counts |
+| `list_documents(directory="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
 | `get_document_outline(file_path)` | Hierarchical TOC with line ranges and token estimates |
 | `read_section(file_path, heading_path, include_subsections=False)` | Verbatim text of one section |
-| `search_docs(query, limit=5)` | BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); each hit reports the `matched_passage` |
+| `search_docs(query, limit=5)` | `{results, index_status}`: BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); each hit reports the `matched_passage`, and `index_status` says whether the tree searched is known to be whole |
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base

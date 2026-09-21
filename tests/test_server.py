@@ -53,11 +53,16 @@ def server(service: MarkdownMemoryService) -> MCPServer[None]:
 
 
 async def call(server: MCPServer[None], name: str, **arguments: Any) -> Any:
-    """Invoke a tool and return its structured result (the ``result`` wrapper removed)."""
+    """Invoke a tool and return its structured result (the ``result`` wrapper removed).
+
+    A tool that already returns an object is its own structured content; only a bare list
+    or scalar is wrapped in ``result``.
+    """
     outcome = await server.call_tool(name, arguments)
     assert not outcome.is_error
     assert outcome.structured_content is not None
-    return outcome.structured_content["result"]
+    content = outcome.structured_content
+    return content["result"] if set(content) == {"result"} else content
 
 
 async def test_the_five_tools_are_registered_with_typed_schemas(server: MCPServer[None]) -> None:
@@ -99,7 +104,12 @@ async def test_index_directory_accepts_relative_and_absolute_paths(
 
 async def test_list_documents(server: MCPServer[None], docs_dir: Path) -> None:
     await call(server, "index_directory")
-    documents = await call(server, "list_documents")
+    answer = await call(server, "list_documents")
+    assert set(answer) == {"documents", "index_status"}
+    assert answer["index_status"]["coverage"] == "verified"
+    assert answer["index_status"]["failures"] == []
+    assert answer["index_status"]["message"] is None
+    documents = answer["documents"]
     assert [Path(d["file_path"]).name for d in documents] == [
         "clean_doc.md",
         "messy_doc.md",
@@ -110,8 +120,9 @@ async def test_list_documents(server: MCPServer[None], docs_dir: Path) -> None:
     assert clean["section_count"] == 11
     assert set(clean) == {"file_path", "title", "section_count", "last_modified"}
     nested = await call(server, "list_documents", directory="nested")
-    assert [d["title"] for d in nested] == ["Nested Copy"]
-    assert await call(server, "list_documents", directory=str(docs_dir / "missing")) == []
+    assert [d["title"] for d in nested["documents"]] == ["Nested Copy"]
+    missing = await call(server, "list_documents", directory=str(docs_dir / "missing"))
+    assert missing["documents"] == []
 
 
 async def test_outline_is_hierarchical_with_lines_and_token_estimates(
@@ -328,7 +339,11 @@ async def test_invalid_arguments_are_rejected_by_the_schema(server: MCPServer[No
 
 async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[None]) -> None:
     await call(server, "index_directory")
-    results = await call(server, "search_docs", query="ORBIT_UPSTREAM_TIMEOUT_MS", limit=3)
+    answer = await call(server, "search_docs", query="ORBIT_UPSTREAM_TIMEOUT_MS", limit=3)
+    assert set(answer) == {"results", "index_status"}
+    # A clean index says so quietly: a caveat on every answer is a caveat nobody reads.
+    assert answer["index_status"] == {"coverage": "verified", "failures": [], "message": None}
+    results = answer["results"]
     assert 1 <= len(results) <= 3
     top = results[0]
     assert top["heading_path"] == "Orbit Gateway > Configuration > Environment Variables"
@@ -339,7 +354,35 @@ async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[No
         "score", "fts_rank", "vec_rank", "tokens", "content",
     }  # fmt: skip
     assert [r["score"] for r in results] == sorted((r["score"] for r in results), reverse=True)
-    assert await call(server, "search_docs", query="   ") == []
+    assert (await call(server, "search_docs", query="   "))["results"] == []
+
+
+async def test_a_search_over_a_damaged_index_says_so_in_its_answer(
+    server: MCPServer[None], docs_dir: Path
+) -> None:
+    """The caveat has to ride on the answer, not wait in a tool nobody calls.
+
+    An agent searches and acts on what comes back. If the tree it searched is missing
+    files, the moment to say so is in that reply - by the time anyone runs the indexer
+    again the wrong conclusion has already been drawn.
+    """
+    await call(server, "index_directory")
+    broken = docs_dir / "unreadable.md"
+    broken.write_text("# Unreadable\n\nbody\n")
+    broken.chmod(0o000)
+    try:
+        await call(server, "index_directory")
+        answer = await call(server, "search_docs", query="gateway", limit=3)
+        status = answer["index_status"]
+        assert status["coverage"] == "unknown"
+        assert [f["file_path"] for f in status["failures"]] == [str(broken)]
+        assert status["message"] is not None and "could not be indexed" in status["message"]
+        assert answer["results"], "the answer still comes, with the caveat attached"
+
+        listed = await call(server, "list_documents")
+        assert listed["index_status"]["coverage"] == "unknown"
+    finally:
+        broken.chmod(0o644)
 
 
 async def test_search_reflects_reindexing(server: MCPServer[None], docs_dir: Path) -> None:
@@ -348,10 +391,10 @@ async def test_search_reflects_reindexing(server: MCPServer[None], docs_dir: Pat
     (docs_dir / "messy_doc.md").unlink()
     summary = await call(server, "index_directory")
     assert "1 (re)indexed" in summary and "1 purged" in summary
-    top = (await call(server, "search_docs", query="quokka"))[0]
+    top = (await call(server, "search_docs", query="quokka"))["results"][0]
     assert top["heading_path"] == "Fresh > Zanzibar"
     stale = await call(server, "search_docs", query="MESSY_FLAG", limit=20)
-    assert all("messy_doc.md" not in r["file_path"] for r in stale)
+    assert all("messy_doc.md" not in r["file_path"] for r in stale["results"])
 
 
 async def test_tools_never_write_to_stdout(

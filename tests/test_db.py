@@ -123,7 +123,14 @@ class TestSchema:
         conn = db.connection()
         documents = [str(row[1]) for row in conn.execute("PRAGMA table_info(documents)")]
         sections = [str(row[1]) for row in conn.execute("PRAGMA table_info(sections)")]
-        assert documents == ["id", "file_path", "title", "content_hash", "last_modified"]
+        assert documents == [
+            "id",
+            "file_path",
+            "title",
+            "content_hash",
+            "last_modified",
+            "vector_format",
+        ]
         assert sections == [
             "id", "doc_id", "heading_title", "heading_level", "heading_path",
             "content", "start_line", "end_line", "part_index",

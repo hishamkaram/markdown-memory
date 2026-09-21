@@ -45,6 +45,7 @@ from markdown_memory.models import (
     Document,
     DocumentSummary,
     IndexReport,
+    IndexStatus,
     JsonDict,
     OutlineNode,
     SearchResult,
@@ -169,10 +170,11 @@ class MarkdownMemoryService:
         self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
         # Resolved, because indexing resolves: a document under a symlinked or relative
         # docs root is stored by its real path, and a scope spelled any other way filters
-        # every one of them out and returns nothing.
-        self._searcher = HybridSearcher(
-            self._db, self._embedder, scope=str(_absolute(self._config.docs_dir, SearchError))
-        )
+        # every one of them out and returns nothing. Resolved ONCE, and reused: resolving
+        # again per call lets a retargeted symlink answer from one tree while reporting on
+        # another, which is a lie told with two correct halves.
+        self._root = str(_absolute(self._config.docs_dir, SearchError))
+        self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
 
     @property
     def db(self) -> Database:
@@ -211,15 +213,26 @@ class MarkdownMemoryService:
     def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
         return self._searcher.search(query, limit)
 
-    def index_warning(self) -> str | None:
-        """Why this root's answers may be missing something, or ``None`` if it is whole.
+    def index_status(self, directory: str | None = None) -> IndexStatus:
+        """What can honestly be said about answers drawn from this server's documents.
 
         Indexing reports its own failures, but almost nothing calls indexing: an agent
         opens a session, searches, and is served from whatever the index happens to hold.
         Until this is asked at the point of use, a root that lost files to a permissions
-        error answers with confidence and no caveat.
+        error - or was never indexed at all - answers with confidence and no caveat.
+
+        Coverage is always the configured docs root's, because that is the tree every
+        answer is drawn from; `directory` only narrows which failures are worth naming.
         """
-        return self._db.incomplete_note(str(_absolute(self._config.docs_dir, SearchError)))
+        if directory is None:
+            return self._db.index_status(self._root)
+        # Narrowed in one read, not composed from two: coverage stays the root's - that is
+        # the tree every answer is drawn from - while the failures and stale documents
+        # named are the ones that live here. Resolved against the root this service was
+        # built for, never against the configured path again, or a retargeted symlink
+        # pairs this root's certificate with another tree's failures.
+        scope = _absolute(Path(self._root) / directory.strip(), SearchError)
+        return self._db.index_status(self._root, str(scope))
 
     # ------------------------------------------------------------------ resolution
 
@@ -504,17 +517,19 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def list_documents(directory: str = "") -> list[JsonDict]:
+    def list_documents(directory: str = "") -> JsonDict:
         """List indexed documents (path, title, section count), optionally under `directory`.
 
-        If some files could not be indexed, the last entry is `{"index_warning": ...}`.
+        Returns `{"documents": [...], "index_status": {...}}`. `index_status.coverage` is
+        "verified" only when a full index run of this documentation root finished and read
+        every file it found; otherwise it is "unknown" and `index_status.message` says why.
         """
         service = services.get()
-        documents: list[JsonDict] = [s.to_dict() for s in service.list_documents(directory)]
-        warning = service.index_warning()
-        if warning is not None:
-            documents.append({"index_warning": warning})
-        return documents
+        scope = directory if directory.strip() else None
+        return {
+            "documents": [summary.to_dict() for summary in service.list_documents(directory)],
+            "index_status": service.index_status(scope).to_dict(),
+        }
 
     @server.tool()
     @anticipated_errors
@@ -535,19 +550,20 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def search_docs(query: str, limit: int = 5) -> list[JsonDict]:
+    def search_docs(query: str, limit: int = 5) -> JsonDict:
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
-        If some files could not be indexed, the last entry is `{"index_warning": ...}`
-        instead of a section: what you searched is missing part of its documentation.
+        Returns `{"results": [...], "index_status": {...}}`, `results` holding at most
+        `limit` sections. When `index_status.coverage` is "unknown", what you searched is
+        missing part of its documentation, or was never indexed end to end: an answer drawn
+        from it may be confidently incomplete, and `index_status.message` says what to run.
         """
         service = services.get()
-        results: list[JsonDict] = [r.to_dict() for r in service.search_docs(query, limit)]
-        warning = service.index_warning()
-        if warning is not None:
-            results.append({"index_warning": warning})
-        return results
+        return {
+            "results": [result.to_dict() for result in service.search_docs(query, limit)],
+            "index_status": service.index_status().to_dict(),
+        }
 
     return server
 

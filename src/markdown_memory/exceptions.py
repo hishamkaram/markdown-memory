@@ -23,6 +23,14 @@ class IndexingError(MarkdownMemoryError):
     """The indexing pipeline failed (bad directory, unreadable file, ...)."""
 
 
+class IndexBusyError(IndexingError):
+    """Another indexing run holds the lock on this database.
+
+    Its own class because the answer is "try again shortly", not "this failed": the
+    caller did nothing wrong and nothing is broken.
+    """
+
+
 class EmbeddingError(IndexingError):
     """The embedding model failed to load or to produce usable vectors."""
 
