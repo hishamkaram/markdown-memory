@@ -32,8 +32,8 @@ git config core.hooksPath .githooks             # once per clone: run that gate 
 across Python 3.11 to 3.14, with the ONNX model restored from a cache keyed on its pinned
 revision. The hook is the one to satisfy - it is what you can run - but `git push
 --no-verify` skips it, which is why CI also exists. `tests/test_agent_docs.py` holds the
-two step lists in the same order. The retrieval gate stays out of CI: it needs a ~25-minute
-index build, holds an exclusive lock, and asserts on latency.
+two step lists in the same order. The retrieval gate stays out of CI: it holds an exclusive
+lock and asserts on latency, which a shared runner cannot hold still.
 
 The first run downloads the embedding model (~330 MB) into
 `$XDG_CACHE_HOME/markdown-memory/models`. Tests that need the real model are marked

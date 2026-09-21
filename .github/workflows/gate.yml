@@ -4,9 +4,9 @@
 # step in the log rather than a single opaque script. A test keeps the two lists in the
 # same order: tests/test_agent_docs.py::test_check_script_runs_the_documented_steps_in_order.
 #
-# The retrieval gate (scripts/eval_retrieval.py) is deliberately absent: it needs a
-# ~25-minute index build, takes an exclusive flock, and asserts on latency, which a
-# shared runner cannot hold still. It stays a local, deliberate step.
+# The retrieval gate (scripts/eval_retrieval.py) is deliberately absent: it takes an
+# exclusive flock and asserts on latency, which a shared runner cannot hold still. It
+# stays a local, deliberate step.
 name: gate
 
 on:
