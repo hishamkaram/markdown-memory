@@ -155,31 +155,46 @@ class ServerConfig:
         )
 
 
-def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
-    """Environment configuration with the command line laid over it.
+def resolve_config(
+    *,
+    db: Path | None = None,
+    docs_dir: Path | None = None,
+    embedder: str | None = None,
+    exclude: Sequence[str] = (),
+) -> ServerConfig:
+    """Environment configuration with explicit overrides laid over it.
 
-    `--docs-dir` names a different documentation root, and the default database is keyed on
-    that root, so it has to re-key: taking `ServerConfig.from_env().db_path` as the fallback
-    reads a path derived from the *environment's* root, and two servers launched from one
-    directory with different `--docs-dir` would land in the launcher's single database -
-    exactly the cross-project leak keying was added to close. An explicitly configured
-    database still wins, from the flag or the environment, in that order.
+    Naming a different documentation root re-keys the database, because the default is
+    keyed on that root: taking `ServerConfig.from_env().db_path` as the fallback reads a
+    path derived from the *environment's* root, and two callers pointed at different roots
+    from one directory would land in the launcher's single database - exactly the
+    cross-project leak keying was added to close. An explicitly configured database still
+    wins, from the argument or the environment, in that order.
+
+    Every entry point resolves its configuration here - the server's own flags and the
+    scripts alike - so that precedence is written once and cannot drift between them.
     """
     base = ServerConfig.from_env()
-    docs_dir = arguments.docs_dir.expanduser() if arguments.docs_dir else base.docs_dir
+    root = docs_dir.expanduser() if docs_dir else base.docs_dir
     configured_db = _configured_path(ENV_DB_PATH, _project_root())
     return ServerConfig(
         db_path=(
-            arguments.db.expanduser()
-            if arguments.db
-            else configured_db
-            if configured_db
-            else _project_database(docs_dir)
+            db.expanduser() if db else configured_db if configured_db else _project_database(root)
         ),
-        docs_dir=docs_dir,
-        embedder=arguments.embedder or base.embedder,
+        docs_dir=root,
+        embedder=embedder or base.embedder,
         model_cache_dir=base.model_cache_dir,
-        exclude=tuple(arguments.exclude) or base.exclude,
+        exclude=tuple(exclude) or base.exclude,
+    )
+
+
+def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
+    """The command line laid over the environment."""
+    return resolve_config(
+        db=arguments.db,
+        docs_dir=arguments.docs_dir,
+        embedder=arguments.embedder,
+        exclude=arguments.exclude,
     )
 
 

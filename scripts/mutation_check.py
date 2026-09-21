@@ -75,11 +75,19 @@ MUTATIONS = (
         tests="test_a_scan_after_a_retarget_stays_with_the_root_it_serves",
     ),
     Mutation(
-        name="config: keep the launcher's database when --docs-dir names another project",
+        name="config: keep the launcher's database when another project's root is named",
         module="server.py",
-        old="            else _project_database(docs_dir)",
-        new="            else base.db_path",
-        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database",
+        old=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else _project_database(root)"
+        ),
+        new=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else base.db_path"
+        ),
+        tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database "
+        "or test_naming_a_directory_rekeys_the_database "
+        "or test_the_script_resolves_its_configuration_the_same_way",
     ),
     Mutation(
         name="config: put every project's index back in one shared database",
@@ -820,6 +828,24 @@ MUTATIONS = (
         old="        verified = certificate is not None and bool(certificate[0]) and whole",
         new="        verified = (certificate is None or bool(certificate[0])) and whole",
         tests="test_a_root_nobody_indexed_does_not_claim_to_be_whole",
+    ),
+    Mutation(
+        name="config: overrule a database that was configured on purpose",
+        module="server.py",
+        old=(
+            "            db.expanduser() if db else configured_db "
+            "if configured_db else _project_database(root)"
+        ),
+        new=("            configured_db if configured_db else _project_database(root)"),
+        tests="test_an_explicitly_configured_database_still_wins",
+    ),
+    Mutation(
+        name="config: index the trees the operator excluded",
+        module="server.py",
+        old="        exclude=tuple(exclude) or base.exclude,",
+        new="        exclude=tuple(exclude),",
+        tests="test_exclusions_are_inherited_rather_than_dropped "
+        "or test_the_script_resolves_its_configuration_the_same_way",
     ),
 )
 

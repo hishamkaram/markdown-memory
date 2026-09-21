@@ -17,26 +17,33 @@ import logging
 import sys
 from pathlib import Path
 
-from markdown_memory.server import MarkdownMemoryService, ServerConfig, configure_logging
+from markdown_memory.server import (
+    MarkdownMemoryService,
+    ServerConfig,
+    configure_logging,
+    resolve_config,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("directory", nargs="?", type=Path, help="default: the configured docs root")
     parser.add_argument("--force", action="store_true", help="re-embed unchanged files too")
-    parser.add_argument("--db", type=Path, help="database path (default: MARKDOWN_MEMORY_DB)")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        help="database path (default: MARKDOWN_MEMORY_DB, else the index keyed on the directory)",
+    )
     parser.add_argument("--embedder", choices=("embeddinggemma", "bge-small"))
     arguments = parser.parse_args()
     configure_logging("WARNING")
 
-    base = ServerConfig.from_env()
-    directory = (arguments.directory or base.docs_dir).expanduser().resolve()
-    config = ServerConfig(
-        db_path=(arguments.db or base.db_path).expanduser(),
-        docs_dir=directory,
-        embedder=arguments.embedder or base.embedder,
-        model_cache_dir=base.model_cache_dir,
-    )
+    directory = (arguments.directory or ServerConfig.from_env().docs_dir).expanduser().resolve()
+    # The same resolution the server itself does, for the same reason: the default database
+    # is keyed on the documentation root, so naming a directory has to re-key it. Verifying
+    # one project's index while writing to another's is the failure this script exists to
+    # catch, and it would be the one doing it.
+    config = resolve_config(db=arguments.db, docs_dir=directory, embedder=arguments.embedder)
     service = MarkdownMemoryService(config)
     try:
         database = service.db
