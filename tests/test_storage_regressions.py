@@ -813,3 +813,64 @@ class TestExcludedPaths:
         """`fnmatch` folds case on some platforms; the docs tree must not."""
         self.tree(tmp_path)
         assert "fixtures/sample.md" in self.indexed(db, fake_embedder, tmp_path, "FIXTURES")
+
+
+class TestAPartialIndexSaysSo:
+    """`index_directory` continues past a file it cannot read, and used to return a
+    success-shaped report: the errors were listed, but the summary read like a clean run
+    and nothing survived into the next session. An index missing part of its tree answers
+    questions as though it were whole.
+    """
+
+    @staticmethod
+    def tree(root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "good.md").write_text("# Good\n\nreadable documentation\n")
+        broken = root / "broken.md"
+        broken.write_text("# Broken\n\nbody\n")
+        broken.chmod(0o000)
+        return broken
+
+    def test_the_run_that_hits_it_calls_the_index_incomplete(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        broken = self.tree(tmp_path)
+        try:
+            report = Indexer(db, fake_embedder).index_directory(tmp_path)
+            assert report.errors
+            assert "INCOMPLETE" in report.summary()
+            assert report.files_indexed == 1  # the readable file still landed
+        finally:
+            broken.chmod(0o644)
+
+    def test_the_next_run_is_told_too(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """The next run may be another process, days later, with the file readable again.
+
+        Without a persisted notice it would see a complete-looking index and no hint that
+        part of the tree had been missing all along.
+        """
+        broken = self.tree(tmp_path)
+        indexer = Indexer(db, fake_embedder)
+        try:
+            indexer.index_directory(tmp_path)
+        finally:
+            broken.chmod(0o644)
+        second = indexer.index_directory(tmp_path)
+        assert any("incomplete" in note for note in second.notes), second.notes
+
+    def test_a_clean_run_leaves_nothing_behind(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """A notice that outlives the problem is noise, and noise gets ignored."""
+        broken = self.tree(tmp_path)
+        indexer = Indexer(db, fake_embedder)
+        try:
+            indexer.index_directory(tmp_path)
+        finally:
+            broken.chmod(0o644)
+        indexer.index_directory(tmp_path)  # delivers and dismisses the notice
+        third = indexer.index_directory(tmp_path)
+        assert third.notes == ()
+        assert "INCOMPLETE" not in third.summary()

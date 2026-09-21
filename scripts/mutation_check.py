@@ -413,6 +413,43 @@ MUTATIONS = (
         new='        if text[index] == " ":',
         tests="test_a_run_broken_only_by_tabs_breaks_there",
     ),
+    Mutation(
+        name="vectors: embed the whole section again, truncation and all",
+        module="indexer.py",
+        old="            vectors.append(SectionVectors(section=_mean_vector(units), units=units))",
+        new=(
+            "            vectors.append("
+            "SectionVectors(section=units[0] if units else None, units=units))"
+        ),
+        tests="test_the_section_vector_sits_among_its_passages",
+    ),
+    Mutation(
+        name="vectors: give a body-less section a vector pointing nowhere",
+        module="indexer.py",
+        old="    if not vectors:\n        return None",
+        new="    if not vectors:\n        return [0.0]",
+        tests="test_a_section_with_no_body_still_has_no_vector",
+    ),
+    Mutation(
+        name="index: let a partial run read as a clean one",
+        module="models.py",
+        old=(
+            "            lines.append(\n"
+            '                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "'
+        ),
+        new=(
+            "        if False:\n            lines.append(\n"
+            '                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "'
+        ),
+        tests="test_the_run_that_hits_it_calls_the_index_incomplete",
+    ),
+    Mutation(
+        name="index: forget by the next run that the tree was incomplete",
+        module="indexer.py",
+        old="            self._db.record_notice(",
+        new="            _ = lambda *a: None; _(",
+        tests="test_the_next_run_is_told_too",
+    ),
 )
 
 

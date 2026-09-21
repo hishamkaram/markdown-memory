@@ -12,6 +12,7 @@ from fakes import FakeEmbedder
 from markdown_memory.db import Database
 from markdown_memory.exceptions import EmbeddingError, IndexingError
 from markdown_memory.indexer import Indexer, hash_bytes, iter_markdown_files
+from markdown_memory.parser import MarkdownParser
 
 
 @pytest.fixture
@@ -91,8 +92,10 @@ class TestIncrementalIndexing:
     ) -> None:
         Indexer(db, fake_embedder).index_directory(docs)
         embedded = [text for call in fake_embedder.document_calls for text in call]
-        assert "Readme > Usage\n\nrun it" in embedded  # section vector: breadcrumb + plain body
-        assert "Readme > Usage: run it" in embedded  # passage vector
+        assert "Readme > Usage: run it" in embedded  # every passage carries its breadcrumb
+        # The section's own text is no longer embedded separately: its vector is the mean
+        # of its passages, which the model cannot truncate and costs one call fewer.
+        assert "Readme > Usage\n\nrun it" not in embedded
 
     def test_unchanged_files_are_skipped_without_embedding(
         self, db: Database, fake_embedder: FakeEmbedder, docs: Path
@@ -244,3 +247,80 @@ class TestFailureIsolation:
         assert report.files_purged == 0
         assert len(report.errors) == 1
         assert str(docs / "guides" / "setup.md") in indexed_paths(db)  # stale beats missing
+
+
+class TestSectionVectorsCoverTheWholeSection:
+    """A section's own vector used to be a separate embedding of all its text.
+
+    The model truncates at 512 tokens, and 126 of the 1,589 sections in the vendored
+    corpus are longer than that - the largest half again over - so the tail never reached
+    the section-level signal. The vector is the mean of the section's passages now, which
+    nothing truncates, and which costs one embedding call fewer per section rather than
+    one more.
+    """
+
+    def long_section(self) -> str:
+        body = "\n\n".join(
+            f"Paragraph {n} describes a distinct rule about retries and deadlines."
+            for n in range(40)
+        )
+        return f"# Doc\n\n## Retry policy\n\n{body}\n"
+
+    def test_the_whole_section_reaches_the_embedder(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        (tmp_path / "long.md").write_text(self.long_section(), encoding="utf-8")
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        embedded = " ".join(text for call in fake_embedder.document_calls for text in call)
+        assert "Paragraph 0 " in embedded
+        assert "Paragraph 39 " in embedded, "the tail of a long section never reached the model"
+
+    def test_the_section_text_is_not_embedded_a_second_time(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Pooling replaces that call; embedding both would cost more, not less."""
+        (tmp_path / "long.md").write_text(self.long_section(), encoding="utf-8")
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        embedded = [text for call in fake_embedder.document_calls for text in call]
+        assert all(text.startswith("Doc > Retry policy: ") for text in embedded)
+
+    def test_the_section_vector_is_the_centroid_of_its_passages(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Not the first passage, not a truncation: the mean of all of them.
+
+        Searching with that centroid must land on the section at distance zero, which one
+        passage's vector cannot satisfy for a section of forty.
+        """
+        import math
+
+        (tmp_path / "long.md").write_text(self.long_section(), encoding="utf-8")
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        draft = next(
+            section
+            for section in MarkdownParser()
+            .parse(self.long_section(), fallback_title="Doc")
+            .sections
+            if section.units
+        )
+        passages = fake_embedder.embed_documents(list(draft.unit_texts))
+        totals = [sum(values) for values in zip(*passages, strict=True)]
+        norm = math.sqrt(sum(value * value for value in totals))
+        centroid = [value / norm for value in totals]
+        nearest = db.vec_search(centroid, 1)
+        assert nearest and nearest[0][1] < 1e-6, f"section vector is not the centroid: {nearest}"
+
+    def test_a_section_with_no_body_still_has_no_vector(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Pooling nothing must give nothing, not a zero vector pointing nowhere."""
+        (tmp_path / "stub.md").write_text(
+            "# Doc\n\n## Empty\n\n### Child\n\ntext\n", encoding="utf-8"
+        )
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        document = db.get_document(str(tmp_path / "stub.md"))
+        assert document is not None
+        sections = db.get_sections(document.id)
+        with_body = db.sections_with_passages([section.id for section in sections])
+        assert len(with_body) < len(sections), "the fixture has no heading-only section"
+        assert db.count_rows("sections_vec") == len(with_body)

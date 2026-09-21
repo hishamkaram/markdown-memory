@@ -468,6 +468,16 @@ class Database:
             ).fetchall()
         return {str(key): str(value) for key, value in rows}
 
+    def record_notice(self, message: str) -> None:
+        """Leave a message for whoever next indexes this database.
+
+        Used when a run ends with files it could not read: the run itself reports them,
+        but the next one - possibly in another process, days later - would otherwise see
+        a complete-looking index with no sign that part of the tree is missing.
+        """
+        with self.transaction() as conn:
+            _add_notice(conn, message)
+
     def dismiss_notices(self, keys: Iterable[str]) -> None:
         """Forget the notices that have been delivered; any added since are kept."""
         with self.transaction() as conn:

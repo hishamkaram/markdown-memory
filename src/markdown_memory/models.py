@@ -230,4 +230,11 @@ class IndexReport:
         ]
         lines.extend(f"NOTE {note}" for note in self.notes)
         lines.extend(f"ERROR {error.file_path}: {error.message}" for error in self.errors)
+        if self.errors:
+            # Without this the run reads as a success with some noise attached, and an
+            # index missing part of its tree answers questions as if it were whole.
+            lines.append(
+                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "
+                "this documentation root is only partly searchable."
+            )
         return "\n".join(lines)

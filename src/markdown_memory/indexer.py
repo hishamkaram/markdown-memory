@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import stat
 import threading
@@ -319,6 +320,28 @@ def _inference_threads() -> int:
     return int(override) if override.isdigit() and int(override) > 0 else 0
 
 
+def _mean_vector(vectors: Sequence[Sequence[float]]) -> list[float] | None:
+    """The centroid of ``vectors``, renormalised, or ``None`` for a section with no body.
+
+    A section's own vector used to be a separate embedding of its whole text, which the
+    model truncates at 512 tokens: 126 of 1,589 sections in the vendored corpus were
+    longer than that, the largest half again over, and their tails were simply absent
+    from the section-level signal. Averaging the passages covers the section entirely,
+    and costs one embedding call fewer per section rather than one more.
+    """
+    if not vectors:
+        return None
+    dimension = len(vectors[0])
+    totals = [0.0] * dimension
+    for vector in vectors:
+        for index, value in enumerate(vector):
+            totals[index] += value
+    norm = math.sqrt(sum(value * value for value in totals))
+    if norm == 0.0:  # opposing passages that cancel out; no direction to report
+        return None
+    return [value / norm for value in totals]
+
+
 def _to_floats(values: Sequence[float]) -> list[float]:
     return [float(value) for value in values]
 
@@ -520,6 +543,14 @@ class Indexer:
                 notes=tuple(notices.values()),
             )
             self._db.dismiss_notices(notices)
+        if failures:
+            names = ", ".join(failure.file_path for failure in failures[:3])
+            if len(failures) > 3:
+                names += f", and {len(failures) - 3} more"
+            self._db.record_notice(
+                f"{_printable(str(root))} was indexed with {len(failures)} unreadable "
+                f"file(s) ({names}); the index for this root is incomplete."
+            )
         logger.info(report.summary())
         return report
 
@@ -566,24 +597,21 @@ class Indexer:
         parsed = self._parser.parse(
             data.decode("utf-8", errors="replace"), fallback_title=path.stem
         )
-        # One embedding call per file: each section with a body contributes its own text
-        # followed by its passages; heading-only sections contribute nothing.
+        # One embedding call per file, over the passages alone. The section vector is the
+        # mean of its passages rather than a separate embedding of the whole section:
+        # that text ran past the model's 512-token limit for 7.9% of the vendored corpus
+        # and lost its tail, and embedding it cost one extra call per section.
         texts: list[str] = []
         for section in parsed.sections:
-            if section.units:
-                texts.append(section.embedding_text)
-                texts.extend(section.unit_texts)
+            texts.extend(section.unit_texts)
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
         embedded = iter(embeddings)
-        vectors = [
-            SectionVectors(
-                section=next(embedded) if section.units else None,
-                units=tuple(next(embedded) for _ in section.units),
-            )
-            for section in parsed.sections
-        ]
+        vectors = []
+        for section in parsed.sections:
+            units = tuple(next(embedded) for _ in section.units)
+            vectors.append(SectionVectors(section=_mean_vector(units), units=units))
         self._db.replace_document(
             file_path=file_path,
             title=parsed.title,
