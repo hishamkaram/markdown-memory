@@ -151,6 +151,13 @@ class TestDocsMatchTheCode:
         assert f"~{quoted[1]} reliable" in block.group(0), ("navigation block", quoted)
         floors = (ROOT / "scripts/eval_retrieval.py").read_text(encoding="utf-8")
         assert f"measured: {quoted[0]} / {quoted[1]} /" in floors, ("eval_retrieval.py", quoted)
+
+        # The README prints a full row per preset, not just the default's two headline
+        # figures, and the light preset drifts by the same mechanism as the default did.
+        for preset, name in (("embeddinggemma", "embeddinggemma"), ("bge-small", "bge-small")):
+            row = baseline[preset]["held_out/paraphrase"]
+            printed = " / ".join(f"{row[key]:.0%}" for key in ("top1", "top3", "top5"))
+            assert f"| {printed} |" in readme, (f"README.md {name} row", printed)
         for preset in baseline.values():
             assert set(preset) == {
                 "dev/paraphrase",
@@ -372,6 +379,58 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
             assert f"{total:,} tokens" in rendered, f"{svg} prints a stale total"
+
+    def test_the_committed_drawing_prints_every_figure_the_generator_holds(self) -> None:
+        """A correct total is not a correct picture.
+
+        The committed SVGs once carried a per-file number 348 tokens below the bar beside
+        it, with the right total printed underneath - the mutation sweep had written a
+        falsified figure straight into `docs/assets/`, because the generator drew at import
+        time. Checking the total alone let that through.
+        """
+        import make_diagram
+
+        expected = [f"{tokens:,}" for _, tokens in make_diagram.LEFT_FILES]
+        expected += [str(tokens) for tokens, _, _ in make_diagram.RIGHT_HITS]
+        expected.append(f"answers is {make_diagram.BEST_HIT}")
+        for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
+            rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
+            for figure in expected:
+                assert figure in rendered, (
+                    f"{svg} does not print {figure!r}; re-run scripts/make_diagram.py"
+                )
+
+    def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
+        """GitHub's mobile app renders neither an SVG README image nor <picture>.
+
+        It draws a broken-image mark, which is what the repository shipped. The <img> - the
+        one element every client honours - therefore has to point at the PNG, with the SVGs
+        offered above it as <source>s for browsers that do understand them.
+        """
+        import make_diagram
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        picture = re.search(r"<picture>(.*?)</picture>", readme, re.DOTALL)
+        assert picture, "the README no longer shows the diagram in a <picture>"
+        block = picture.group(1)
+        img = re.search(r'<img src="([^"]+)"', block)
+        assert img and img.group(1).endswith(".png"), (
+            "the <img> fallback must be a PNG: an SVG there is what the mobile app cannot draw"
+        )
+        for theme in ("dark", "light"):
+            assert f'srcset="docs/assets/how-it-works-{theme}.svg"' in block, theme
+
+        # A fallback nothing regenerates is a fallback that goes stale, so hold its size to
+        # the drawing's own, at the scale the generator rasterises.
+        from PIL import Image
+
+        for theme in ("light", "dark"):
+            png = ROOT / "docs/assets" / f"how-it-works-{theme}.png"
+            assert png.exists(), f"{png.name} is missing; run scripts/make_diagram.py"
+            with Image.open(png) as raster:
+                expected = (make_diagram.W * make_diagram.PNG_SCALE,
+                            make_diagram.H * make_diagram.PNG_SCALE)  # fmt: skip
+                assert raster.size == expected, (png.name, raster.size, expected)
 
     def test_the_sections_the_worked_example_returns_are_the_size_it_claims(self) -> None:
         """Ranking needs the model; a section's token estimate does not, so pin that."""

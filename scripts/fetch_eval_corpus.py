@@ -303,13 +303,26 @@ def check() -> int:
                 print(f"{tree.name}/{stray}: not in the manifest; delete it or re-vendor")
                 problems += 1
 
+    # Walking each known set catches a stray inside one, but not a whole set that was
+    # retired from SOURCES: its directory is simply never visited, and everything under it
+    # keeps being indexed and redistributed. So sweep the two roots themselves.
+    known = {source.name for source in SOURCES}
+    for root in (CORPUS, LICENCES):
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            if entry.name not in known:
+                print(f"{root.name}/{entry.name}: not a set this script vendors; delete it")
+                problems += 1
+
     # The attribution table is generated, so it can drift from the sources it describes -
     # a wrong licence name or a dead link would otherwise pass every other check here.
+    # Compared as bytes: decoding would let a line-ending-only rewrite through.
     attribution = EVAL_DATA / "corpus_v2_LICENSES.md"
     if not attribution.exists():
         print(f"{attribution.name}: missing; re-run without --check")
         problems += 1
-    elif attribution.read_text(encoding="utf-8") != licences():
+    elif attribution.read_bytes() != licences().encode("utf-8"):
         print(f"{attribution.name}: stale; re-run without --check to regenerate it")
         problems += 1
 

@@ -5,6 +5,10 @@ that switched theme with a media query would render wrongly in one of the two. T
 presentation attributes only, selected with <picture> in the README.
 """
 
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 FONT = (
@@ -50,6 +54,8 @@ THEMES = {
     },
 }
 
+ROOT = Path(__file__).resolve().parent.parent
+
 W, H = 1120, 430
 
 # Bars are to scale against the largest single thing on the page: README.md at 5,410
@@ -60,7 +66,7 @@ W, H = 1120, 430
 # measured, never estimated: tests/test_agent_docs.py re-derives every number here from the
 # real files and fails when the documentation moves on without the picture.
 LEFT_FILES = [
-    ("README.md", 5410),
+    ("README.md", 5424),
     ("CLAUDE.md", 3034),
     ("evaluation-protocol.md", 1661),
     ("AGENTS.md", 981),
@@ -68,11 +74,13 @@ LEFT_FILES = [
 RIGHT_HITS = [
     (128, "Pre-download it, or install offline", False),
     (181, "What downloads, when, and where", True),
-    (577, "markdown-memory  (preamble)", False),
+    (590, "markdown-memory  (preamble)", False),
     (494, "Commands  (CLAUDE.md)", False),
     (283, "When it goes wrong", False),
 ]
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
+# The hit the caption calls out. Derived, so the caption cannot disagree with the bar.
+BEST_HIT = next(tokens for tokens, _, best in RIGHT_HITS if best)
 LEFT_BAR = 200.0
 RIGHT_BAR = 200.0
 
@@ -107,7 +115,7 @@ def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading four whole files costs '
-        f"11,086 tokens; markdown-memory returns five sections totalling 1,663, and the one "
+        f"11,100 tokens; markdown-memory returns five sections totalling 1,676, and the one "
         f'that answers is 181 tokens.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
@@ -150,7 +158,7 @@ def draw(c: dict) -> str:
         )
         y += 46
     o.append(f'<path d="M62 318 L328 318" stroke="{c["coldEdge"]}" stroke-width="1"/>')
-    o.append(text(62, 338, "11,086 tokens", fill=c["cold"], size=14, weight=600))
+    o.append(text(62, 338, "11,100 tokens", fill=c["cold"], size=14, weight=600))
     o.append(text(62, 354, "most of it about something else", fill=c["muted"], size=11))
 
     # ---- middle: what it does with them ----
@@ -222,9 +230,15 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, "1,663 tokens", fill=c["warm"], size=14, weight=600))
+    o.append(text(732, 338, "1,676 tokens", fill=c["warm"], size=14, weight=600))
     o.append(
-        text(732, 354, "and the one that answers is 184, quoted verbatim", fill=c["muted"], size=11)
+        text(
+            732,
+            354,
+            f"and the one that answers is {BEST_HIT}, quoted verbatim",
+            fill=c["muted"],
+            size=11,
+        )
     )
 
     o.append(
@@ -241,6 +255,45 @@ def draw(c: dict) -> str:
     return "\n".join(o) + "\n"
 
 
-for name, colours in THEMES.items():
-    Path(f"docs/assets/how-it-works-{name}.svg").write_text(draw(colours), encoding="utf-8")
-    print(f"docs/assets/how-it-works-{name}.svg")
+# GitHub's mobile app does not render an SVG in a README, and does not honour <picture>;
+# it shows a broken-image mark instead. The README therefore points its <img> - the element
+# every client understands - at a PNG, and offers the SVGs as <source>s for the web. The
+# PNG is rasterised at 2x so it stays sharp on a phone.
+PNG_SCALE = 2
+BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+
+
+def rasterise(svg: Path, png: Path) -> bool:
+    """Render `svg` to `png` with headless Chrome. False when no browser is installed."""
+    browser = next((shutil.which(name) for name in BROWSERS if shutil.which(name)), None)
+    if browser is None:
+        return False
+    with tempfile.TemporaryDirectory() as scratch:
+        subprocess.run(
+            [browser, "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
+             f"--force-device-scale-factor={PNG_SCALE}", f"--screenshot={png}",
+             f"--window-size={W},{H}", f"--user-data-dir={scratch}", svg.as_uri()],
+            check=True, capture_output=True,
+        )  # fmt: skip
+    return True
+
+
+def main() -> int:
+    for name, colours in THEMES.items():
+        path = ROOT / "docs/assets" / f"how-it-works-{name}.svg"
+        path.write_text(draw(colours), encoding="utf-8")
+        print(path.relative_to(ROOT))
+        png = path.with_suffix(".png")
+        if rasterise(path, png):
+            print(png.relative_to(ROOT))
+        else:
+            print(f"  no headless browser found; {png.name} left as it was", file=sys.stderr)
+    return 0
+
+
+# Guarded, and not merely for tidiness: tests/test_agent_docs.py imports this module to
+# read the figures it draws. Writing at import time would have that test regenerate the
+# SVGs it then checks, which is an assertion that cannot fail - and a test run that edits
+# tracked files.
+if __name__ == "__main__":
+    raise SystemExit(main())
