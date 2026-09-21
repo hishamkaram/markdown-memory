@@ -443,6 +443,16 @@ def parse_exclusions(value: str) -> tuple[str, ...]:
     return tuple(patterns)
 
 
+def _key(root: Path) -> str:
+    """One spelling per documentation root.
+
+    `index_directory` resolves its argument before anything else, and that resolved root
+    is the only one this key is ever built from. Normalising a second time here would
+    only hide it if that ever stopped being true.
+    """
+    return str(root)
+
+
 def _standing(note: str | None) -> tuple[str, ...]:
     """The root's outstanding incompleteness, if it had one before this run started."""
     return () if note is None else (note,)
@@ -552,9 +562,12 @@ class Indexer:
                     passages_indexed += counts[1]
 
             purged = self._db.delete_documents(self._vanished(root, known_hashes, seen, unreadable))
-            # Settle this root's completeness before the report quotes it, so a run that
-            # fixed everything does not hand back the warning it just cleared.
+            # Settled first, so a run that fixed everything does not hand back the warning
+            # it just cleared. The note is then reported only when this run did not fail
+            # itself - its own failures are already in `errors`, and saying it twice is
+            # how a warning becomes noise.
             self._record_completeness(root, failures)
+            standing = () if failures else _standing(self._db.incomplete_note(_key(root)))
             report = IndexReport(
                 directory=_printable(str(root)),
                 files_scanned=len(seen),
@@ -565,7 +578,7 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notices.values()) + _standing(self._db.incomplete_note(str(root))),
+                notes=tuple(notices.values()) + standing,
             )
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
@@ -578,7 +591,10 @@ class Indexer:
         to the next run that happens along: a one-shot message is delivered to whichever
         root indexes next, and read by a run that was itself perfectly clean.
         """
-        key = str(root)
+        # Resolved, because "." and an absolute path are the same root: the service
+        # resolves before calling, a script or test may not, and two spellings would be
+        # two states - one of them able to clear the other's warning.
+        key = _key(root)
         if not failures:
             self._db.clear_incomplete(key)
             return

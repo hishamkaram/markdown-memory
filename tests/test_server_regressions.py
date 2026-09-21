@@ -502,3 +502,86 @@ class TestOneDatabaseManyProjects:
             assert [Path(result.file_path).name for result in results] == ["mine.md"]
         finally:
             service.close()
+
+
+class TestTheAnswerSaysWhenItIsIncomplete:
+    """Indexing reports its own failures, but almost nothing calls indexing.
+
+    An agent opens a session and searches; it is served from whatever the index holds.
+    Until the question is asked at the point of use, a root that lost files to a
+    permissions error answers with confidence and no caveat.
+    """
+
+    @staticmethod
+    def broken_tree(root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "good.md").write_text("# Good\n\nretry backoff policy documented here\n")
+        broken = root / "broken.md"
+        broken.write_text("# Broken\n\nbody\n")
+        broken.chmod(0o000)
+        return broken
+
+    def test_a_search_says_the_index_is_missing_files(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        docs = tmp_path / "docs"
+        broken = self.broken_tree(docs)
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "i.db", docs_dir=docs), fake_embedder
+        )
+        try:
+            service.index_directory()
+        finally:
+            broken.chmod(0o644)
+        try:
+            assert service.index_warning() is not None
+            # a fresh service over the same database - the agent's usual case, where
+            # nothing re-indexes - must still say it
+            second = MarkdownMemoryService(
+                ServerConfig(db_path=tmp_path / "i.db", docs_dir=docs), fake_embedder
+            )
+            try:
+                assert second.index_warning() is not None
+            finally:
+                second.close()
+        finally:
+            service.close()
+
+    def test_a_whole_index_says_nothing(self, tmp_path: Path, fake_embedder: FakeEmbedder) -> None:
+        """A caveat on every answer would be ignored by the time it mattered."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "good.md").write_text("# Good\n\nall readable\n")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "i.db", docs_dir=docs), fake_embedder
+        )
+        try:
+            service.index_directory()
+            assert service.index_warning() is None
+        finally:
+            service.close()
+
+    def test_a_symlinked_docs_root_still_answers(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Indexing resolves the root; the search scope has to resolve it too.
+
+        A document under a symlinked root is stored by its real path, so a scope spelled
+        any other way filters out every one of them and the server answers nothing at
+        all - while reporting a perfectly successful index.
+        """
+        real = tmp_path / "real_docs"
+        real.mkdir()
+        (real / "guide.md").write_text("# Guide\n\n## Retry\n\nretry backoff policy\n")
+        link = tmp_path / "docs_link"
+        os.symlink(real, link)
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "i.db", docs_dir=link), fake_embedder
+        )
+        try:
+            service.index_directory()
+            assert service.search_docs("retry backoff policy", 5), (
+                "the symlinked root answered nothing"
+            )
+        finally:
+            service.close()

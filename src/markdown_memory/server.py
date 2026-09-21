@@ -28,6 +28,7 @@ from markdown_memory.exceptions import (
     DocumentNotFoundError,
     IndexingError,
     MarkdownMemoryError,
+    SearchError,
     SectionNotFoundError,
 )
 from markdown_memory.indexer import (
@@ -166,7 +167,12 @@ class MarkdownMemoryService:
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
         self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
-        self._searcher = HybridSearcher(self._db, self._embedder, scope=str(self._config.docs_dir))
+        # Resolved, because indexing resolves: a document under a symlinked or relative
+        # docs root is stored by its real path, and a scope spelled any other way filters
+        # every one of them out and returns nothing.
+        self._searcher = HybridSearcher(
+            self._db, self._embedder, scope=str(_absolute(self._config.docs_dir, SearchError))
+        )
 
     @property
     def db(self) -> Database:
@@ -204,6 +210,16 @@ class MarkdownMemoryService:
 
     def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
         return self._searcher.search(query, limit)
+
+    def index_warning(self) -> str | None:
+        """Why this root's answers may be missing something, or ``None`` if it is whole.
+
+        Indexing reports its own failures, but almost nothing calls indexing: an agent
+        opens a session, searches, and is served from whatever the index happens to hold.
+        Until this is asked at the point of use, a root that lost files to a permissions
+        error answers with confidence and no caveat.
+        """
+        return self._db.incomplete_note(str(_absolute(self._config.docs_dir, SearchError)))
 
     # ------------------------------------------------------------------ resolution
 
@@ -489,8 +505,16 @@ def create_server(
     @server.tool()
     @anticipated_errors
     def list_documents(directory: str = "") -> list[JsonDict]:
-        """List indexed documents (path, title, section count), optionally under `directory`."""
-        return [summary.to_dict() for summary in services.get().list_documents(directory)]
+        """List indexed documents (path, title, section count), optionally under `directory`.
+
+        If some files could not be indexed, the last entry is `{"index_warning": ...}`.
+        """
+        service = services.get()
+        documents: list[JsonDict] = [s.to_dict() for s in service.list_documents(directory)]
+        warning = service.index_warning()
+        if warning is not None:
+            documents.append({"index_warning": warning})
+        return documents
 
     @server.tool()
     @anticipated_errors
@@ -513,8 +537,17 @@ def create_server(
     @anticipated_errors
     def search_docs(query: str, limit: int = 5) -> list[JsonDict]:
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
-        sections. Works for exact identifiers (flags, env vars) and for conceptual questions."""
-        return [result.to_dict() for result in services.get().search_docs(query, limit)]
+        sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
+
+        If some files could not be indexed, the last entry is `{"index_warning": ...}`
+        instead of a section: what you searched is missing part of its documentation.
+        """
+        service = services.get()
+        results: list[JsonDict] = [r.to_dict() for r in service.search_docs(query, limit)]
+        warning = service.index_warning()
+        if warning is not None:
+            results.append({"index_warning": warning})
+        return results
 
     return server
 

@@ -424,7 +424,7 @@ MUTATIONS = (
             "            vectors.append("
             "SectionVectors(section=units[0] if units else None, units=units))"
         ),
-        tests="test_the_section_vector_sits_among_its_passages",
+        tests="test_the_section_vector_is_the_centroid_of_its_passages",
     ),
     Mutation(
         name="vectors: give a body-less section a vector pointing nowhere",
@@ -441,7 +441,7 @@ MUTATIONS = (
             '                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "'
         ),
         new=(
-            "        if False:\n            lines.append(\n"
+            "            _ = (\n"
             '                f"INCOMPLETE: {len(self.errors)} file(s) could not be indexed; "'
         ),
         tests="test_the_run_that_hits_it_calls_the_index_incomplete",
@@ -451,7 +451,7 @@ MUTATIONS = (
         module="indexer.py",
         old="        self._db.mark_incomplete(",
         new="        _ = lambda *a, **k: None; _(",
-        tests="test_every_later_run_is_told_while_it_is_still_broken",
+        tests="test_every_later_run_says_it_while_it_is_still_broken",
     ),
     Mutation(
         name="vectors: normalise rounding noise into a direction",
@@ -473,6 +473,33 @@ MUTATIONS = (
         old="    return pooled if pooled is not None else list(units[0])",
         new="    return pooled",
         tests="test_cancelling_passages_do_not_cost_the_file_its_place",
+    ),
+    Mutation(
+        name="index: treat one root's two spellings as two roots",
+        module="indexer.py",
+        old="            root = directory.expanduser().resolve(strict=True)",
+        new="            root = directory.expanduser()",
+        tests="test_the_same_root_spelled_two_ways_is_one_root",
+    ),
+    Mutation(
+        name="scope: filter search by the docs root as spelled, not as resolved",
+        module="server.py",
+        old=(
+            "            self._db, self._embedder, "
+            "scope=str(_absolute(self._config.docs_dir, SearchError))"
+        ),
+        new="            self._db, self._embedder, scope=str(self._config.docs_dir)",
+        tests="test_a_symlinked_docs_root_still_answers",
+    ),
+    Mutation(
+        name="answers: never mention that the index is missing files",
+        module="server.py",
+        old=(
+            "        return self._db.incomplete_note("
+            "str(_absolute(self._config.docs_dir, SearchError)))"
+        ),
+        new="        return None",
+        tests="test_a_search_says_the_index_is_missing_files",
     ),
 )
 
@@ -506,6 +533,17 @@ def run_tests(workspace: Path, mutation: Mutation) -> bool:
     override = (
         ["-o", f"pythonpath=tests {workspace / 'scripts'}"] if mutation.area == "scripts" else []
     )
+    # A selector naming a test that no longer exists makes pytest exit 5, which reads as
+    # "the mutation was caught" - so every mutation whose test was renamed would pass
+    # while proving nothing. Count the matches first.
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "not embedding",
+         "-k", mutation.tests, "--collect-only", "--no-header", *override],
+        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    if collected.returncode != 0 or " test" not in collected.stdout.rsplit("\n", 3)[-2]:
+        print(f"  SETUP ERROR: no test matches {mutation.tests!r}", flush=True)
+        return False
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "not embedding",
          "-k", mutation.tests, "--no-header", "-x", *override],

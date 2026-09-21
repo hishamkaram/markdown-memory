@@ -843,22 +843,17 @@ class TestAPartialIndexSaysSo:
         finally:
             broken.chmod(0o644)
 
-    def test_every_later_run_is_told_while_it_is_still_broken(
+    def test_every_later_run_says_it_while_it_is_still_broken(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
-        """The warning stands as long as the root is incomplete.
-
-        Handing it to whichever run comes next and forgetting it is worse than useless:
-        that run may be a different root, or the same root on a day when nothing failed.
-        """
+        """Not once, and not to whoever comes next: every run of this root, until fixed."""
         broken = self.tree(tmp_path)
         indexer = Indexer(db, fake_embedder)
         try:
-            indexer.index_directory(tmp_path)
-            second = indexer.index_directory(tmp_path)
-            assert any("only partly searchable" in note for note in second.notes), second.notes
-            third = indexer.index_directory(tmp_path)
-            assert any("only partly searchable" in note for note in third.notes), third.notes
+            for _ in range(3):
+                report = indexer.index_directory(tmp_path)
+                assert "INCOMPLETE" in report.summary()
+            assert db.incomplete_note(str(tmp_path)) is not None
         finally:
             broken.chmod(0o644)
 
@@ -867,9 +862,9 @@ class TestAPartialIndexSaysSo:
     ) -> None:
         """One database can hold several roots, and the default one holds every project.
 
-        A warning kept database-wide is delivered to whichever root indexes next and
-        dismissed there, so the root that is actually broken goes quiet forever while an
-        unrelated root is told its index is incomplete.
+        State kept database-wide is delivered to whichever root indexes next and cleared
+        there, so the root that is actually broken goes quiet while an unrelated one is
+        told its index is incomplete.
         """
         alpha = tmp_path / "alpha"
         broken = self.tree(alpha)
@@ -882,11 +877,35 @@ class TestAPartialIndexSaysSo:
             healthy = indexer.index_directory(beta)
             assert healthy.notes == (), f"beta was told about alpha: {healthy.notes}"
             assert "INCOMPLETE" not in healthy.summary()
-            # and alpha still knows, rather than having been silenced by beta's run
-            again = indexer.index_directory(alpha)
-            assert any("only partly searchable" in note for note in again.notes), again.notes
+            assert db.incomplete_note(str(alpha)) is not None, "beta's clean run silenced alpha"
+            assert db.incomplete_note(str(beta)) is None
         finally:
             broken.chmod(0o644)
+
+    def test_the_same_root_spelled_two_ways_is_one_root(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """A detour through a subdirectory leads to the same tree.
+
+        Two spellings would be two states: a clean run under one would not clear the
+        warning recorded under the other, which would then stand forever.
+
+        `Path` itself folds away `.` and doubled separators, so a test using those
+        spellings normalises the path before the indexer ever sees it and proves
+        nothing. `..` is kept verbatim, and only `resolve()` removes it.
+        """
+        broken = self.tree(tmp_path)
+        (tmp_path / "nested").mkdir()
+        detour = tmp_path / "nested" / ".."
+        assert str(detour) != str(tmp_path), "pathlib normalised the detour away"
+        indexer = Indexer(db, fake_embedder)
+        try:
+            indexer.index_directory(tmp_path)
+        finally:
+            broken.chmod(0o644)
+        assert db.incomplete_note(str(tmp_path)) is not None
+        indexer.index_directory(detour)  # the same root, spelled the long way round
+        assert db.incomplete_note(str(tmp_path)) is None, "the odd spelling was a second state"
 
     def test_a_clean_run_clears_it(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -901,3 +920,4 @@ class TestAPartialIndexSaysSo:
         fixed = indexer.index_directory(tmp_path)
         assert fixed.notes == ()
         assert "INCOMPLETE" not in fixed.summary()
+        assert db.incomplete_note(str(tmp_path)) is None
