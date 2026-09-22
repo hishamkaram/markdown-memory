@@ -61,7 +61,7 @@ jobs:
       # EmbeddingGemma is ~330 MB and pinned by revision, so the key is that revision:
       # move the pin and the key moves with it. A warm cache means no download at all,
       # because _download() returns early when all three files are already present.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
           key: mdmem-model-5090578d9565
