@@ -1,7 +1,7 @@
 [project]
 name = "markdown-memory"
 version = "0.1.0"
-description = "AST-aware Markdown documentation indexer and hybrid retrieval MCP server for AI coding agents"
+description = "MCP server that hands coding agents the one Markdown section that answers the question, not the whole file. Local hybrid search: BM25 keywords + ONNX embeddings in SQLite. No API keys, no network."
 readme = "README.md"
 authors = [
     { name = "Hesham Karm", email = "24391550+hishamkaram@users.noreply.github.com" }
@@ -9,7 +9,29 @@ authors = [
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-keywords = ["mcp", "markdown", "documentation", "retrieval", "embeddings", "sqlite"]
+# Kept in step with the repository's GitHub topics, which are what anyone actually
+# searches. Nothing indexes these while "Private :: Do Not Upload" is below.
+keywords = [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "coding-agent",
+    "ai-agents",
+    "markdown",
+    "documentation",
+    "rag",
+    "retrieval-augmented-generation",
+    "hybrid-search",
+    "semantic-search",
+    "vector-search",
+    "full-text-search",
+    "bm25",
+    "embeddings",
+    "onnx",
+    "sqlite",
+    "sqlite-vec",
+    "fts5",
+]
 classifiers = [
     # Every version CI runs, and CI runs every version listed: claiming one nothing
     # tests is how a broken install gets discovered by its first user.
