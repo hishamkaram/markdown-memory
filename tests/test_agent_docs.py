@@ -231,7 +231,7 @@ class TestDocsMatchTheCode:
     def test_ci_caches_the_model_revision_the_code_pins(self) -> None:
         """The cache key is the pin, so moving the pin cannot serve the old weights."""
         workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
-        assert f"mdmem-model-{GEMMA_REVISION[:12]}" in workflow
+        assert f"key: mdmem-model-{GEMMA_REVISION[:12]}-v2" in workflow
 
     def test_ci_tests_every_python_version_the_metadata_claims(self) -> None:
         """`requires-python` and the classifiers are promises; this is what keeps them."""

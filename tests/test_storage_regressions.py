@@ -888,6 +888,10 @@ class StopsAfterOneFile:
     def dimension(self) -> int:
         return self._inner.dimension
 
+    @property
+    def weights_revision(self) -> str | None:
+        return self._inner.weights_revision
+
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         self._files += 1
         if self._files > 1:
@@ -911,6 +915,10 @@ class RefusesToLoad:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def weights_revision(self) -> str | None:
+        return None
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         raise ModelLoadError("Cannot load the embedding model")

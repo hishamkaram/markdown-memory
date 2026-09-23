@@ -159,9 +159,72 @@ MUTATIONS = (
         tests="TestSectionIdsOnAnUpgradedDatabase or TestMigratingARealOldDatabase",
     ),
     Mutation(
+        name="cache: trust size, mtime and inode, and drop ctime from the stamp",
+        module="indexer.py",
+        old='        "ctime_ns": info.st_ctime_ns,\n',
+        new="",
+        tests="test_a_file_rewritten_with_its_old_mtime_restored_is_still_caught",
+    ),
+    Mutation(
+        name="cache: trust a model file that is a symlink out of the cache",
+        module="indexer.py",
+        old="""    if not stat.S_ISREG(info.st_mode):
+        return None  # a symlink into a blob store is not a file this cache vouches for
+""",
+        new="",
+        tests="test_a_model_file_replaced_by_a_symlink_is_not_trusted",
+    ),
+    Mutation(
+        name="cache: adopt the unversioned folder without checking its bytes",
+        module="indexer.py",
+        old="        if not legacy.is_dir() or _unverified(legacy):\n",
+        new="        if not legacy.is_dir():\n",
+        tests="test_an_unversioned_folder_that_does_not_match_is_left_where_it_is",
+    ),
+    Mutation(
+        name="cache: take what was downloaded on trust",
+        module="indexer.py",
+        old="            still_wrong = _unverified(self._model_dir)\n",
+        new="            still_wrong: list[str] = []\n",
+        tests="test_a_download_that_does_not_match_the_manifest_fails_without_downloading_again",
+    ),
+    Mutation(
+        name="cache: treat any load failure as corruption and re-download",
+        module="indexer.py",
+        old="                        self._session, self._tokenizer = self._open()\n",
+        new="""                        try:
+                            self._session, self._tokenizer = self._open()
+                        except ModelLoadError:
+                            self._fetch()
+                            raise
+""",
+        tests="test_a_load_failure_on_verified_files_is_not_treated_as_corruption",
+    ),
+    Mutation(
+        name="cache: repair under the shared lock, beside whoever is reading",
+        module="indexer.py",
+        old="                    with _model_cache_lock(self._cache_dir, exclusive=True):\n",
+        new="                    with _model_cache_lock(self._cache_dir, exclusive=False):\n",
+        tests="test_two_processes_starting_at_once_download_once_between_them",
+    ),
+    Mutation(
+        name="cache: say nothing when the weights changed under the model name",
+        module="indexer.py",
+        old="        if recorded == weights:\n",
+        new="        if recorded != weights:\n",
+        tests="test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared",
+    ),
+    Mutation(
+        name="cache: overwrite the recorded weights on every run",
+        module="indexer.py",
+        old='        if recorded is None or self._db.count_rows("documents") == 0:\n',
+        new="        if True:\n",
+        tests="test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared",
+    ),
+    Mutation(
         name="indexer: let onnxruntime's intra-op pool spin-wait again",
         module="indexer.py",
-        old="                    options.add_session_config_entry(*_SPIN_CONFIG)\n",
+        old="            options.add_session_config_entry(*_SPIN_CONFIG)\n",
         new="",
         tests="test_gemma_session_disables_intra_op_spinning",
     ),

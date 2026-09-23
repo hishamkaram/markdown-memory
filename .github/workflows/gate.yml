@@ -59,12 +59,15 @@ jobs:
       - run: uv run python scripts/fetch_eval_corpus.py --check
 
       # EmbeddingGemma is ~330 MB and pinned by revision, so the key is that revision:
-      # move the pin and the key moves with it. A warm cache means no download at all,
-      # because _download() returns early when all three files are already present.
+      # move the pin and the key moves with it. The `-v2` suffix is the cache layout
+      # itself, which now keeps the files in a folder named after the revision. A warm
+      # cache means no download at all; it does cost one verification pass (under a
+      # second), because a restore recreates the files with new inodes and timestamps,
+      # which is exactly the change the stamp is there to notice.
       - uses: actions/cache@v6
         with:
           path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
-          key: mdmem-model-5090578d9565
+          key: mdmem-model-5090578d9565-v2
 
       # The 15 tests that need the model SKIP rather than fail when it cannot load, so a
       # cache miss would leave the job green over fifteen untested behaviours. Loading the

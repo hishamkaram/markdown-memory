@@ -52,6 +52,8 @@ from markdown_memory.indexer import (
     GEMMA_REVISION,
     MAX_FILE_BYTES,
     Embedder,
+    fastembed_model_dir,
+    gemma_model_dir,
     iter_markdown_files,
 )
 from markdown_memory.parser import (
@@ -60,9 +62,6 @@ from markdown_memory.parser import (
     MAX_UNITS_PER_SECTION,
     MarkdownParser,
 )
-
-# Where each preset keeps its files inside the model cache, for identity purposes.
-_MODEL_DIRECTORIES = {"bge-small": "models--BAAI--bge-small-en-v1.5"}
 
 SOURCE = Path(__file__).parent.parent / "src" / "markdown_memory"
 # Modules whose source decides what goes into the index. `search.py` is deliberately
@@ -189,10 +188,15 @@ def _model_identity(model_cache_dir: Path | None, embedder: str) -> str:
     """
     if model_cache_dir is None:
         return embedder
-    directories = [model_cache_dir / _MODEL_DIRECTORIES.get(embedder, embedder)]
+    # Each preset's folder is asked of the code that creates it. Guessing bge-small's from
+    # its model name gave `models--BAAI--bge-small-en-v1.5`, while fastembed downloads its
+    # own re-export into `models--qdrant--bge-small-en-v1.5-onnx-q`, so this part of the
+    # key was an empty string for that preset however the weights changed.
     if embedder == DEFAULT_EMBEDDER:
-        # huggingface lays the snapshot out under models--<org>--<repo>/snapshots/<sha>.
-        directories = list(model_cache_dir.glob("**/" + GEMMA_REVISION)) or directories
+        directories = [gemma_model_dir(model_cache_dir)]
+    else:
+        fastembed_directory = fastembed_model_dir(model_cache_dir)
+        directories = [fastembed_directory] if fastembed_directory else []
     entries: list[str] = []
     for directory in directories:
         if not directory.is_dir():

@@ -10,13 +10,14 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import logging
 import math
 import os
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -48,7 +49,33 @@ GEMMA_REPOSITORY = "onnx-community/embeddinggemma-300m-ONNX"
 # Pinned so that an upstream re-export can never silently change stored vectors.
 GEMMA_REVISION = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
 GEMMA_MODEL_FILE = "onnx/model_quantized.onnx"
-GEMMA_FILES = (GEMMA_MODEL_FILE, GEMMA_MODEL_FILE + "_data", "tokenizer.json")
+# Size and sha256 of every file at GEMMA_REVISION, from the Hub's paths-info API. This is
+# what stands between a damaged cache and onnxruntime: huggingface_hub checks only the
+# size of what it downloads, and hands back a file that is already on disk without reading
+# it at all.
+GEMMA_MANIFEST: Mapping[str, tuple[int, str]] = {
+    GEMMA_MODEL_FILE: (
+        567_874,
+        "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8",
+    ),
+    GEMMA_MODEL_FILE + "_data": (
+        308_890_624,
+        "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0",
+    ),
+    "tokenizer.json": (
+        20_323_312,
+        "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+    ),
+}
+GEMMA_FILES: tuple[str, ...] = tuple(GEMMA_MANIFEST)
+# Versions before this one kept the files in `_GEMMA_DIR_PREFIX` itself, with no revision
+# anywhere in the path: moving GEMMA_REVISION would have kept serving the old weights
+# under a model name that claims to be the new ones. That folder is migrated, not
+# re-downloaded, the first time this runs.
+_GEMMA_DIR_PREFIX = "embeddinggemma-300m-onnx"
+# One lock for every revision, so two versions starting at once still exclude each other.
+_GEMMA_LOCK_NAME = f"{_GEMMA_DIR_PREFIX}.lock"
+_VERIFIED_STAMP = ".verified"
 GEMMA_DIMENSION = 768
 GEMMA_MAX_TOKENS = 512
 # Prompts from the EmbeddingGemma model card; the model is trained to expect them.
@@ -87,6 +114,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 _MIN_POOLED_NORM = 1e-6
 _EMBED_BATCH_SIZE = 32
 _MODEL_META_KEY = "embedding_model"
+_WEIGHTS_META_KEY = "embedding_weights_revision"
 _SKIPPED_DIRECTORIES = frozenset(
     {
         ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
@@ -103,6 +131,9 @@ class Embedder(Protocol):
 
     @property
     def dimension(self) -> int: ...
+
+    @property
+    def weights_revision(self) -> str | None: ...
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
 
@@ -132,6 +163,23 @@ class FastEmbedEmbedder:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def weights_revision(self) -> str | None:
+        """Which snapshot of the weights is on disk, when it can be read.
+
+        fastembed pins no revision, so a deleted cache can come back with different
+        weights under an unchanged model name - and stored passage vectors would then be
+        compared against query vectors from a different model, with nothing to notice it.
+        huggingface_hub records the snapshot it fetched in `refs/main`.
+        """
+        directory = fastembed_model_dir(self._cache_dir)
+        if directory is None:
+            return None
+        try:
+            return (directory / "refs" / "main").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
 
     def warm_up(self) -> None:
         """Load (and if necessary download) the model now instead of on first query."""
@@ -202,6 +250,137 @@ class FastEmbedEmbedder:
             return self._model
 
 
+def model_cache_root(cache_dir: Path | None = None) -> Path:
+    """Where every model this package downloads is kept."""
+    return cache_dir or Path.home() / ".cache" / "markdown-memory" / "models"
+
+
+def gemma_model_dir(cache_dir: Path | None = None) -> Path:
+    """The folder holding the pinned EmbeddingGemma revision.
+
+    A *sibling* of the unversioned folder older versions used, never a child, so the
+    migration can be one rename inside one directory - which no reader can catch
+    half-done.
+    """
+    return model_cache_root(cache_dir) / f"{_GEMMA_DIR_PREFIX}-{GEMMA_REVISION[:12]}"
+
+
+def fastembed_model_dir(cache_dir: Path | None) -> Path | None:
+    """The folder fastembed keeps bge-small in, or None when it cannot be derived.
+
+    Not guessable from the model name: fastembed downloads its own re-export of the
+    model (`qdrant/bge-small-en-v1.5-onnx-q`), so the repository is read out of its
+    registry rather than assumed.
+    """
+    if cache_dir is None:
+        return None
+    from fastembed import TextEmbedding
+
+    for entry in TextEmbedding.list_supported_models():
+        if not isinstance(entry, dict) or entry.get("model") != BGE_SMALL_MODEL_NAME:
+            continue
+        sources = entry.get("sources")
+        repository = sources.get("hf") if isinstance(sources, dict) else None
+        if isinstance(repository, str) and repository:
+            return cache_dir / ("models--" + repository.replace("/", "--"))
+    return None
+
+
+def _file_identity(path: Path) -> dict[str, int] | None:
+    """What a stamp remembers about one model file; None when it is not a plain file.
+
+    `ctime_ns` earns its place: `cp -p`, `tar x` and `rsync --inplace` all rewrite a
+    file's contents and then restore its old mtime, so size, mtime and inode can agree
+    across different bytes. Nothing in user space can set ctime back.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None  # a symlink into a blob store is not a file this cache vouches for
+    return {
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+        "inode": info.st_ino,
+        "device": info.st_dev,
+    }
+
+
+def _stamp_is_current(model_dir: Path) -> bool:
+    """Whether every file still looks exactly as it did when it was last verified.
+
+    Hashing 330 MB costs most of a second of one core, which is too much for every
+    server start when an editor starts one per session. This is a handful of `stat`
+    calls; anything that disagrees sends the files back to be hashed.
+    """
+    try:
+        stamp = json.loads((model_dir / _VERIFIED_STAMP).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(stamp, dict) or stamp.get("revision") != GEMMA_REVISION:
+        return False
+    recorded = stamp.get("files")
+    if not isinstance(recorded, dict):
+        return False
+    return all(recorded.get(name) == _file_identity(model_dir / name) for name in GEMMA_MANIFEST)
+
+
+def _write_stamp(model_dir: Path) -> None:
+    """Record what was just verified. Atomically: a half-written stamp is a false claim."""
+    stamp = {
+        "revision": GEMMA_REVISION,
+        "files": {name: _file_identity(model_dir / name) for name in GEMMA_MANIFEST},
+    }
+    temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
+    temporary.write_text(json.dumps(stamp), encoding="utf-8")
+    os.replace(temporary, model_dir / _VERIFIED_STAMP)
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _unverified(model_dir: Path) -> list[str]:
+    """The model files that are missing, the wrong size, or the wrong bytes."""
+    problems: list[str] = []
+    for name, (size, checksum) in GEMMA_MANIFEST.items():
+        path = model_dir / name
+        before = _file_identity(path)
+        if before is None or before["size"] != size:
+            problems.append(name)
+        elif _hash_file(path) != checksum or _file_identity(path) != before:
+            # Second identity: a file rewritten while it was being read was never hashed
+            # as it now stands, so the answer that came back means nothing.
+            problems.append(name)
+    return problems
+
+
+@contextlib.contextmanager
+def _model_cache_lock(cache_dir: Path | None, *, exclusive: bool) -> Iterator[None]:
+    """Serialise verification, repair and session construction across processes.
+
+    Shared while a verified cache is being opened, exclusive while it is being changed,
+    so nothing can repair files another process has verified but not yet handed to
+    onnxruntime. The kernel drops a `flock` when the process dies, so a crash leaves
+    nothing held. A model cache on NFS or SMB shared between machines is out of scope:
+    `flock` can be local-only there - the boundary SQLite's WAL already has.
+    """
+    root = model_cache_root(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / _GEMMA_LOCK_NAME).open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 class EmbeddingGemmaEmbedder:
     """Google's EmbeddingGemma-300m (quantized ONNX, 768 dimensions) run with onnxruntime.
 
@@ -212,8 +391,8 @@ class EmbeddingGemmaEmbedder:
     """
 
     def __init__(self, *, cache_dir: Path | None = None) -> None:
-        base = cache_dir or Path.home() / ".cache" / "markdown-memory" / "models"
-        self._model_dir = base / "embeddinggemma-300m-onnx"
+        self._cache_dir = cache_dir
+        self._model_dir = gemma_model_dir(cache_dir)
         self._lock = threading.Lock()
         self._session: _OrtSession | None = None
         self._tokenizer: Tokenizer | None = None
@@ -226,9 +405,14 @@ class EmbeddingGemmaEmbedder:
     def dimension(self) -> int:
         return GEMMA_DIMENSION
 
+    @property
+    def weights_revision(self) -> str | None:
+        return GEMMA_REVISION
+
     def warm_up(self) -> None:
         """Download (first run only) and load the model now instead of on first use."""
         self._load()
+        self._report_other_versions()
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return self._embed([GEMMA_DOCUMENT_PROMPT + text for text in texts])
@@ -269,40 +453,91 @@ class EmbeddingGemmaEmbedder:
 
     def _load(self) -> tuple[_OrtSession, Tokenizer]:
         with self._lock:
-            if self._session is None or self._tokenizer is None:
-                started = time.perf_counter()
-                try:
-                    import onnxruntime
-                    from tokenizers import Tokenizer
+            if self._session is not None and self._tokenizer is not None:
+                return self._session, self._tokenizer
+            started = time.perf_counter()
+            # Two passes at most: the first can find nothing worth trusting, and the
+            # second runs on a cache that was repaired under the exclusive lock in
+            # between - by this process or by whichever one held the lock first.
+            for attempt in range(2):
+                with _model_cache_lock(self._cache_dir, exclusive=False):
+                    if _stamp_is_current(self._model_dir):
+                        self._session, self._tokenizer = self._open()
+                        logger.info(
+                            "Loaded embedding model %s in %.2fs",
+                            GEMMA_REPOSITORY,
+                            time.perf_counter() - started,
+                        )
+                        return self._session, self._tokenizer
+                if attempt == 0:
+                    with _model_cache_lock(self._cache_dir, exclusive=True):
+                        self._repair()
+            raise ModelLoadError(
+                f"The files under {self._model_dir} still do not match {GEMMA_REPOSITORY} "
+                f"at {GEMMA_REVISION[:12]} after being replaced"
+            )
 
-                    self._download()
-                    tokenizer = Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))
-                    tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
-                    tokenizer.enable_padding()
-                    options = onnxruntime.SessionOptions()
-                    options.add_session_config_entry(*_SPIN_CONFIG)
-                    if threads := _inference_threads():
-                        options.intra_op_num_threads = threads
-                    self._session = onnxruntime.InferenceSession(
-                        str(self._model_dir / GEMMA_MODEL_FILE),
-                        options,
-                        providers=["CPUExecutionProvider"],
-                    )
-                    self._tokenizer = tokenizer
-                except Exception as exc:
-                    raise ModelLoadError(
-                        f"Cannot load embedding model {GEMMA_REPOSITORY}: {exc}"
-                    ) from exc
-                logger.info(
-                    "Loaded embedding model %s in %.2fs",
-                    GEMMA_REPOSITORY,
-                    time.perf_counter() - started,
+    def _open(self) -> tuple[_OrtSession, Tokenizer]:
+        """Build the tokenizer and session from files verification has just trusted.
+
+        A failure here is not a corruption signal, because these bytes were checked
+        against the manifest moments ago: nothing is deleted and nothing is downloaded.
+        What is left is an onnxruntime that cannot load this graph, a permission problem,
+        or a machine out of memory, and the original exception says which. (The server
+        still retries on the next request; what it will not do is fetch 330 MB again.)
+        """
+        try:
+            import onnxruntime
+            from tokenizers import Tokenizer
+
+            tokenizer = Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))
+            tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
+            tokenizer.enable_padding()
+            options = onnxruntime.SessionOptions()
+            options.add_session_config_entry(*_SPIN_CONFIG)
+            if threads := _inference_threads():
+                options.intra_op_num_threads = threads
+            session: _OrtSession = onnxruntime.InferenceSession(
+                str(self._model_dir / GEMMA_MODEL_FILE),
+                options,
+                providers=["CPUExecutionProvider"],
+            )
+        except Exception as exc:
+            raise ModelLoadError(f"Cannot load embedding model {GEMMA_REPOSITORY}: {exc}") from exc
+        return session, tokenizer
+
+    def _repair(self) -> None:
+        """Bring the cache up to the manifest. Runs under the exclusive lock."""
+        if _stamp_is_current(self._model_dir):
+            return  # another process did the work while this one waited for the lock
+        if not self._model_dir.exists():
+            self._migrate_unversioned()
+        self._model_dir.mkdir(parents=True, exist_ok=True)
+        wrong = _unverified(self._model_dir)
+        for name in wrong:
+            (self._model_dir / name).unlink(missing_ok=True)  # only what is proven wrong
+        if wrong:
+            self._fetch()
+            still_wrong = _unverified(self._model_dir)
+            if still_wrong:
+                raise ModelLoadError(
+                    f"Downloaded {GEMMA_REPOSITORY} at {GEMMA_REVISION[:12]}, but "
+                    f"{', '.join(sorted(still_wrong))} does not match the expected size "
+                    "and checksum"
                 )
-            return self._session, self._tokenizer
+        _write_stamp(self._model_dir)
 
-    def _download(self) -> None:
-        if all((self._model_dir / name).is_file() for name in GEMMA_FILES):
-            return
+    def _migrate_unversioned(self) -> None:
+        """Adopt the pre-versioning folder, if its bytes are the pinned revision's."""
+        legacy = model_cache_root(self._cache_dir) / _GEMMA_DIR_PREFIX
+        if not legacy.is_dir() or _unverified(legacy):
+            return  # nothing there, or bytes that have to be fetched anyway
+        # One rename, inside one directory: nobody sees half the files moved. Descriptors
+        # and mappings another process already holds keep reading the same inodes.
+        os.replace(legacy, self._model_dir)
+        logger.info("Moved the model cache %s to %s", legacy, self._model_dir)
+
+    def _fetch(self) -> None:
         from huggingface_hub import snapshot_download
 
         logger.info("Downloading %s (~330 MB, first run only)", GEMMA_REPOSITORY)
@@ -312,6 +547,30 @@ class EmbeddingGemmaEmbedder:
             allow_patterns=list(GEMMA_FILES),
             local_dir=self._model_dir,  # real files, not symlinks into a blob store
         )
+
+    def _report_other_versions(self) -> None:
+        """Say what other revisions cost, once, and never delete any of them.
+
+        Weights another checkout is using, or one pinned deliberately, are not this
+        process's to remove; saying how much room they take is.
+        """
+        others: dict[Path, int] = {}
+        for path in sorted(model_cache_root(self._cache_dir).glob(f"{_GEMMA_DIR_PREFIX}*")):
+            if path == self._model_dir or not path.is_dir():
+                continue
+            with contextlib.suppress(OSError):
+                others[path] = sum(
+                    entry.stat().st_size for entry in path.rglob("*") if entry.is_file()
+                )
+        if others:
+            logger.info(
+                "The model cache also holds %d older copy/copies of %s (%.0f MB in total): "
+                "%s. Nothing is deleted automatically; remove them to reclaim the space.",
+                len(others),
+                GEMMA_REPOSITORY,
+                sum(others.values()) / 1e6,
+                ", ".join(str(path) for path in others),
+            )
 
 
 class _OrtSession(Protocol):
@@ -667,6 +926,7 @@ class Indexer:
                     )
                 )
             self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
+            run_notes = self._check_weights_revision()
             # Whatever emptied the index (new format, new vector size, new model) left a
             # notice. They are dismissed only once the report carrying them exists: a run
             # that aborts - the model cannot be loaded - leaves them for the next one.
@@ -744,11 +1004,39 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notices.values()),
+                notes=tuple(notices.values()) + tuple(run_notes),
             )
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
         return report
+
+    def _check_weights_revision(self) -> list[str]:
+        """Compare the weights on disk with the ones the stored vectors came from.
+
+        A model *name* is not enough for bge-small: fastembed pins no revision, so a
+        re-download can bring different weights under the same name and nothing in the
+        index would notice. Recorded on an index that has nothing to lose, compared
+        afterwards, and never quietly overwritten - the recorded value describes the
+        stored vectors, so overwriting it would erase the discrepancy it exists to show.
+        Nothing is discarded: a rebuild costs a quarter of an hour and is the user's call.
+        """
+        weights = self._embedder.weights_revision
+        if weights is None:
+            return []
+        recorded = self._db.get_meta(_WEIGHTS_META_KEY)
+        if recorded is None or self._db.count_rows("documents") == 0:
+            self._db.set_meta(_WEIGHTS_META_KEY, weights)
+            return []
+        if recorded == weights:
+            return []
+        note = (
+            f"The weights behind {self._embedder.model_name} changed since this index was "
+            f"built ({recorded[:12]} -> {weights[:12]}). Stored vectors came from the "
+            "previous weights and are not comparable with new ones: re-index from scratch "
+            "to make them so. Nothing has been discarded."
+        )
+        logger.warning("%s", note)
+        return [note]
 
     def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
         """The subset of ``paths`` a walk of ``root`` would have visited.
