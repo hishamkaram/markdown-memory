@@ -840,7 +840,12 @@ async def main() -> int:
             print("        skipped: /proc is not available on this platform")
         else:
             print(f"        RSS now {memory[0]:.0f} MB, peak {memory[1]:.0f} MB")
-            test.check(memory[1] < 3072, "peak resident memory under 3 GB")
+            # A loose sentinel, not the memory gate: the real one is the VmHWM-delta
+            # test in tests/test_graph_patch.py, which measures one run in its own
+            # process. This is about twice the peak a whole indexing run takes with the
+            # vocabulary gathered before it is dequantized, and well under the ~1.6 GB it
+            # took before, so a silent return to the published graph fails here too.
+            test.check(memory[1] < 1200, "peak resident memory under 1.2 GB")
         print("        --- last server stderr lines ---")
         for line in log_text.strip().splitlines()[-4:]:
             print(f"        {line[:150]}")

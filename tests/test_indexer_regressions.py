@@ -51,8 +51,8 @@ def _config_entry(options: Any, key: str) -> str | None:
     return str(value)
 
 
-def _session_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Load a Gemma embedder against stub files; return the SessionOptions it built."""
+def _session_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Any]:
+    """Load a Gemma embedder against stub files; return what it asked onnxruntime for."""
     import onnxruntime
     import tokenizers
 
@@ -62,10 +62,10 @@ def _session_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         stub.write_bytes(b"")
     monkeypatch.setattr(tokenizers, "Tokenizer", _FakeTokenizer)
 
-    captured: list[Any] = []
+    captured: list[tuple[str, Any]] = []
 
     def fake_session(path: str, options: Any, **kwargs: Any) -> object:
-        captured.append(options)
+        captured.append((path, options))
         return object()
 
     monkeypatch.setattr(onnxruntime, "InferenceSession", fake_session)
@@ -82,7 +82,7 @@ def test_gemma_session_disables_intra_op_spinning(
     never recovered.
     """
     monkeypatch.delenv("MARKDOWN_MEMORY_THREADS", raising=False)
-    options = _session_options(tmp_path, monkeypatch)
+    _, options = _session_call(tmp_path, monkeypatch)
     assert _config_entry(options, _SPIN_KEY) == "0"
     # Unset override: the count stays onnxruntime's business, which is 0 in its terms.
     assert options.intra_op_num_threads == 0
@@ -92,7 +92,7 @@ def test_gemma_session_honours_the_thread_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MARKDOWN_MEMORY_THREADS", "3")
-    assert _session_options(tmp_path, monkeypatch).intra_op_num_threads == 3
+    assert _session_call(tmp_path, monkeypatch)[1].intra_op_num_threads == 3
 
 
 class _FakeTextEmbedding:
@@ -134,6 +134,8 @@ def test_fastembed_leaves_the_count_to_fastembed_when_the_override_is_unset(
 # --- The model cache: keyed by revision, verified before it is loaded -------------------
 
 _FILES = {"model.onnx": b"graph bytes", "nested/weights.bin": b"weights" * 100}
+#: What the stubbed rewrite produces from _FILES["model.onnx"].
+_DERIVED = b"the same graph, gathering first"
 
 
 @pytest.fixture
@@ -149,7 +151,10 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Cache:
     monkeypatch.setattr(indexer, "GEMMA_MANIFEST", manifest)
     monkeypatch.setattr(indexer, "GEMMA_FILES", tuple(manifest))
     monkeypatch.setattr(indexer, "GEMMA_MODEL_FILE", "model.onnx")
+    monkeypatch.setattr(indexer, "DERIVED_GRAPH_FILE", "derived.onnx")
+    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
     harness = _Cache(tmp_path)
+    monkeypatch.setattr(indexer, "gather_before_dequantize", harness.rewrite)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", harness.download)
     monkeypatch.setattr(EmbeddingGemmaEmbedder, "_open", lambda self: harness.open())
     return harness
@@ -168,6 +173,8 @@ class _Cache:
         self.opens = 0
         self.corrupt = False
         self.download_seconds = 0.0
+        self.rewrites = 0
+        self.refuse_rewrite = False
 
     def embedder(self) -> EmbeddingGemmaEmbedder:
         return EmbeddingGemmaEmbedder(cache_dir=self.root)
@@ -182,6 +189,10 @@ class _Cache:
         time.sleep(self.download_seconds)
         self.write(target, corrupt=self.corrupt)
         return str(target)
+
+    def rewrite(self, graph: bytes) -> bytes | None:
+        self.rewrites += 1
+        return None if self.refuse_rewrite else _DERIVED
 
     def download_count(self) -> int:
         return len(list((self.root / "downloads").glob("*")))
@@ -441,3 +452,60 @@ def test_the_bge_small_folder_is_the_one_fastembed_really_creates() -> None:
         pytest.skip(f"bge-small has not been downloaded into {cache_dir}")
     revision = FastEmbedEmbedder(BGE_SMALL_MODEL_NAME, cache_dir=cache_dir).weights_revision
     assert revision is not None and len(revision) == 40
+
+
+# --- The derived graph: generated here, never downloaded --------------------------------
+
+
+def test_the_derived_graph_is_written_once_and_then_left_alone(cache: _Cache) -> None:
+    derived = cache.model_dir / "derived.onnx"
+    cache.embedder().warm_up()
+    assert derived.read_bytes() == _DERIVED
+    assert cache.rewrites == 1
+
+    cache.embedder().warm_up()
+    assert cache.rewrites == 1  # the stamp covers it, so nothing is hashed or rebuilt
+
+
+def test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded(
+    cache: _Cache,
+) -> None:
+    """It never came off the Hub, so re-fetching 330 MB would not produce it."""
+    derived = cache.model_dir / "derived.onnx"
+    cache.embedder().warm_up()
+
+    derived.unlink()
+    cache.embedder().warm_up()
+    assert derived.read_bytes() == _DERIVED
+
+    derived.write_bytes(b"something else entirely")
+    cache.embedder().warm_up()
+    assert derived.read_bytes() == _DERIVED
+    assert len(cache.downloads) == 1
+
+
+def test_only_the_three_published_files_are_ever_asked_of_the_hub(cache: _Cache) -> None:
+    from markdown_memory.indexer import GEMMA_FILES
+
+    assert "derived.onnx" not in GEMMA_FILES
+
+
+def test_a_refused_rewrite_leaves_the_published_graph_running(cache: _Cache) -> None:
+    """A refusal costs the memory saving and nothing else: the server still starts."""
+    cache.refuse_rewrite = True
+    cache.embedder().warm_up()
+    assert not (cache.model_dir / "derived.onnx").exists()
+    assert cache.opens == 1
+
+
+def test_the_embedder_runs_the_derived_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of deriving it: ~1 GB per query lives in this one path."""
+    from markdown_memory.indexer import DERIVED_GRAPH_FILE, gemma_model_dir
+
+    derived = gemma_model_dir(tmp_path) / DERIVED_GRAPH_FILE
+    derived.parent.mkdir(parents=True, exist_ok=True)
+    derived.write_bytes(b"")
+    path, _ = _session_call(tmp_path, monkeypatch)
+    assert path == str(derived)

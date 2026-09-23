@@ -30,6 +30,7 @@ from markdown_memory.exceptions import (
     MarkdownMemoryError,
     ModelLoadError,
 )
+from markdown_memory.graph_patch import gather_before_dequantize
 from markdown_memory.models import FileFailure, IndexReport, SectionVectors
 from markdown_memory.parser import MarkdownParser
 
@@ -68,6 +69,13 @@ GEMMA_MANIFEST: Mapping[str, tuple[int, str]] = {
     ),
 }
 GEMMA_FILES: tuple[str, ...] = tuple(GEMMA_MANIFEST)
+# The graph the embedder actually runs is derived from the downloaded one on this machine:
+# the same weights, with the vocabulary gathered before it is dequantized, which is worth
+# about 1 GB per query (see graph_patch). It is never fetched, and it is regenerated - not
+# re-downloaded - whenever it is missing or does not match. Its sha256 is also the
+# rewrite's version: changing the rewriter changes this, and the tests say so.
+DERIVED_GRAPH_FILE = "onnx/model_quantized.gather_first.onnx"
+DERIVED_GRAPH_SHA256 = "ce47d05e0aa9abd97a474a7a951c2814060ddc2f9822dbb0ad30a407aa6e95ea"
 # Versions before this one kept the files in `_GEMMA_DIR_PREFIX` itself, with no revision
 # anywhere in the path: moving GEMMA_REVISION would have kept serving the old weights
 # under a model name that claims to be the new ones. That folder is migrated, not
@@ -308,6 +316,14 @@ def _file_identity(path: Path) -> dict[str, int] | None:
     }
 
 
+def _stamped_files(model_dir: Path) -> list[str]:
+    """Everything a stamp vouches for: the downloaded files, and the derived graph."""
+    names = list(GEMMA_MANIFEST)
+    if (model_dir / DERIVED_GRAPH_FILE).is_file():
+        names.append(DERIVED_GRAPH_FILE)
+    return names
+
+
 def _stamp_is_current(model_dir: Path) -> bool:
     """Whether every file still looks exactly as it did when it was last verified.
 
@@ -322,16 +338,16 @@ def _stamp_is_current(model_dir: Path) -> bool:
     if not isinstance(stamp, dict) or stamp.get("revision") != GEMMA_REVISION:
         return False
     recorded = stamp.get("files")
-    if not isinstance(recorded, dict):
-        return False
-    return all(recorded.get(name) == _file_identity(model_dir / name) for name in GEMMA_MANIFEST)
+    if not isinstance(recorded, dict) or set(recorded) != set(_stamped_files(model_dir)):
+        return False  # a derived graph that has gone missing is regenerated, not ignored
+    return all(recorded.get(name) == _file_identity(model_dir / name) for name in recorded)
 
 
 def _write_stamp(model_dir: Path) -> None:
     """Record what was just verified. Atomically: a half-written stamp is a false claim."""
     stamp = {
         "revision": GEMMA_REVISION,
-        "files": {name: _file_identity(model_dir / name) for name in GEMMA_MANIFEST},
+        "files": {name: _file_identity(model_dir / name) for name in _stamped_files(model_dir)},
     }
     temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
     temporary.write_text(json.dumps(stamp), encoding="utf-8")
@@ -497,8 +513,11 @@ class EmbeddingGemmaEmbedder:
             options.add_session_config_entry(*_SPIN_CONFIG)
             if threads := _inference_threads():
                 options.intra_op_num_threads = threads
+            graph = self._model_dir / DERIVED_GRAPH_FILE
+            if not graph.is_file():  # the rewrite was refused; the published graph is fine
+                graph = self._model_dir / GEMMA_MODEL_FILE
             session: _OrtSession = onnxruntime.InferenceSession(
-                str(self._model_dir / GEMMA_MODEL_FILE),
+                str(graph),
                 options,
                 providers=["CPUExecutionProvider"],
             )
@@ -525,7 +544,33 @@ class EmbeddingGemmaEmbedder:
                     f"{', '.join(sorted(still_wrong))} does not match the expected size "
                     "and checksum"
                 )
+        self._derive_graph()
         _write_stamp(self._model_dir)
+
+    def _derive_graph(self) -> None:
+        """Write the gather-first graph beside the downloaded one, from verified bytes.
+
+        It shares `model_quantized.onnx_data` untouched: the initializers name that file
+        relatively, and onnxruntime resolves it against the graph's own folder.
+        """
+        derived = self._model_dir / DERIVED_GRAPH_FILE
+        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:
+            return
+        derived.unlink(missing_ok=True)
+        rewritten = gather_before_dequantize((self._model_dir / GEMMA_MODEL_FILE).read_bytes())
+        if rewritten is None:
+            return  # refused, and graph_patch has said why: run the published graph
+        temporary = derived.with_name(f"{derived.name}.{os.getpid()}")
+        temporary.write_bytes(rewritten)
+        os.replace(temporary, derived)
+        if _hash_file(derived) != DERIVED_GRAPH_SHA256:
+            # The source was verified, so this is the rewriter and the pin disagreeing.
+            # Neither is worth refusing to start over: run the published graph instead.
+            logger.warning(
+                "The rewritten embedding graph does not match its pinned checksum; "
+                "running the published graph, which costs about 1 GB more per query"
+            )
+            derived.unlink(missing_ok=True)
 
     def _migrate_unversioned(self) -> None:
         """Adopt the pre-versioning folder, if its bytes are the pinned revision's."""
