@@ -12,7 +12,7 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
-from markdown_memory.db import WEIGHTS_META_KEY, Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.exceptions import SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
@@ -186,6 +186,33 @@ class TestSearchRobustness:
         status = db.index_status("/d")
         assert not status.verified
         assert "only keyword ranking is used" in (status.message() or "")
+
+    def test_weights_that_come_back_clear_the_mismatch_the_search_recorded(
+        self, db: Database
+    ) -> None:
+        """Nobody else can withdraw it. Weights that change back change no document, so
+
+        no indexing run follows to notice, and the index stayed unverified and
+        keyword-only for good over a disagreement that had ended.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            searcher.search("body number")
+            assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+        finally:
+            searcher.close()
+
+        healthy = HybridSearcher(db, _RevisedEmbedder("a" * 40))
+        try:
+            results = healthy.search("body number")
+        finally:
+            healthy.close()
+
+        assert any(r.vec_rank is not None for r in results)
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
 
     def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch

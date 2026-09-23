@@ -414,6 +414,12 @@ class HybridSearcher:
             return None  # no provenance to contradict
         weights = self._embedder.weights_revision
         if weights == recorded:
+            # Whoever recorded a mismatch - a search of this index, or an indexing run -
+            # cannot come back to withdraw it: weights that change back change no
+            # document, so no run follows. The query that finds them agreeing is the one
+            # in a position to say so.
+            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
+                self._db.record_weights_mismatch(None)
             return recorded
         message = (
             f"This index was built by weights {recorded[:12]} and the model answering now "

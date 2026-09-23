@@ -712,6 +712,24 @@ def test_the_revision_is_written_before_the_vectors_it_describes(
     assert seen == ["a" * 40]  # already true when the first vector was made
 
 
+def test_a_file_that_embeds_nothing_does_not_need_a_model_that_loads(
+    db: Database, tmp_path: Path
+) -> None:
+    """`embed_documents` returns without loading the model for a document of headings
+
+    alone. Asking which weights are running before it made that file need a model it
+    never uses, and the run failed where nothing could have gone wrong.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+
+    report = Indexer(db, _UnloadableModel()).index_directory(root)
+
+    assert report.files_indexed == 1
+    assert db.count_rows("documents") == 1
+
+
 def test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind(
     db: Database, tmp_path: Path
 ) -> None:

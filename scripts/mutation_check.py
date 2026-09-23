@@ -415,8 +415,8 @@ MUTATIONS = (
     Mutation(
         name="weights: embed with whatever model happens to be loaded",
         module="indexer.py",
-        old="        self._refuse_foreign_weights()\n",
-        new="",
+        old="            self._refuse_foreign_weights()\n",
+        new="            pass  # whichever model is loaded writes its vectors\n",
         tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
     ),
     Mutation(
@@ -462,7 +462,7 @@ MUTATIONS = (
         module="db.py",
         old="            _forget_weights_without_vectors(conn)\n        return Document(\n",
         new="        return Document(\n",
-        tests="test_a_document_that_embeds_nothing_records_no_provenance",
+        tests="test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind",
     ),
     Mutation(
         name="storage: keep a revision after purging the last document that had one",
@@ -498,6 +498,21 @@ MUTATIONS = (
         old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:\n",
         new="        if False:  # the status goes on calling the index healthy\n",
         tests="test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status",
+    ),
+    Mutation(
+        name="weights: demand a working model for a file that embeds nothing",
+        module="indexer.py",
+        old="        if texts:\n",
+        new="        if True:\n",
+        tests="test_a_file_that_embeds_nothing_does_not_need_a_model_that_loads",
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
+        name="search: leave a mismatch standing after the weights come back",
+        module="search.py",
+        old="            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:\n",
+        new="            if False:  # nobody withdraws it, so it stands for good\n",
+        tests="test_weights_that_come_back_clear_the_mismatch_the_search_recorded",
     ),
     Mutation(
         name="status: report a mismatched index as verified anyway",

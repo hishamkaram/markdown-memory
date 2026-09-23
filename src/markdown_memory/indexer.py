@@ -1343,7 +1343,12 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
-        self._refuse_foreign_weights()
+        if texts:
+            # Only when a vector is really about to exist. A document of headings alone
+            # embeds nothing, and `embed_documents` returns without loading the model for
+            # it - asking first would make a file that needs no model fail when none can
+            # be loaded.
+            self._refuse_foreign_weights()
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
