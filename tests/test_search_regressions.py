@@ -143,6 +143,31 @@ class TestSearchRobustness:
         finally:
             searcher.close()
 
+    def test_a_ranking_already_in_flight_when_the_weights_change_is_dropped(
+        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flag is read before the vector work is submitted, so an indexer can record
+
+        it while that work runs - against exactly the vectors it is about. Reading it
+        again once the ranking is in hand costs one query and drops a ranking that means
+        nothing.
+        """
+        store(db, fake_embedder, "/d/a.md")
+        searcher = HybridSearcher(db, fake_embedder)
+        original = searcher._vector_ranking
+
+        def rank_then_change(query: str, limit: int) -> tuple[list[int], dict[int, str]]:
+            result = original(query, limit)
+            db.record_weights_mismatch("the weights changed mid-search")
+            return result
+
+        monkeypatch.setattr(searcher, "_vector_ranking", rank_then_change)
+        try:
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+        finally:
+            searcher.close()
+
     def test_search_after_close_is_a_domain_error(
         self, db: Database, fake_embedder: FakeEmbedder
     ) -> None:

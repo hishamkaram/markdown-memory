@@ -78,6 +78,7 @@ def dequantize_then_gather(
     gather_axis: bool = False,
     gather_ref_attr: bool = False,
     collide_input: bool = False,
+    sparse_initializer: bool = False,
     collide_value_info: bool = False,
     indices_via_node: bool = False,
 ) -> bytes:
@@ -134,6 +135,10 @@ def dequantize_then_gather(
     graph += field(5, tensor("table", INT8, [4, 3], table))
     graph += field(5, tensor("scale", FLOAT, scale_dims or [1], scale))
     graph += field(5, tensor("zero", INT8, [1], b"\x02"))
+    if sparse_initializer:
+        # A SparseTensorProto: its values tensor carries the name, through a structure
+        # the rewrite does not read.
+        graph += field(15, field(1, tensor("table_f_rows", INT8, [2], b"\x00\x01")))
     graph += field(11, value_info("ids", INT64, [2]))
     if collide_input:
         graph += field(11, value_info("table_f_rows", INT64, [2]))
@@ -206,6 +211,10 @@ def test_a_dangling_value_info_for_the_dequantized_table_is_dropped() -> None:
         (
             "the name the rewrite introduces is declared in value_info",
             dequantize_then_gather(collide_value_info=True),
+        ),
+        (
+            "the graph has sparse initializers, whose names this cannot read",
+            dequantize_then_gather(sparse_initializer=True),
         ),
         (
             "the gather's axis is taken from somewhere else",

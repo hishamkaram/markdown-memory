@@ -305,6 +305,13 @@ class HybridSearcher:
             )
         else:
             (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
+            # An indexer can record the mismatch while this ranking is in flight, and the
+            # vectors it ranked are the ones the flag is about. Checking again once the
+            # work is in hand costs one read and drops a ranking that means nothing.
+            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
+                comparable = False
+                vec_ranking, passages, vec_error = [], {}, None
+                logger.warning("Discarding a vector ranking: the weights changed under it")
         # With vector ranking suppressed there is no other index to fall back on, so a
         # keyword failure is the whole search failing.
         if fts_error is not None and (vec_error is not None or not comparable):

@@ -36,8 +36,9 @@ _VARINT, _FIXED64, _LENGTH, _START_GROUP, _END_GROUP, _FIXED32 = range(6)
 
 # ModelProto.graph
 _MODEL_GRAPH = 7
-# GraphProto.node, .initializer, .input, .output, .value_info
+# GraphProto.node, .initializer, .sparse_initializer, .input, .output, .value_info
 _GRAPH_NODE, _GRAPH_INITIALIZER, _GRAPH_INPUT, _GRAPH_OUTPUT, _GRAPH_VALUE_INFO = 1, 5, 11, 12, 13
+_GRAPH_SPARSE_INITIALIZER = 15
 # NodeProto.input, .output, .name, .op_type, .attribute
 _NODE_INPUT, _NODE_OUTPUT, _NODE_NAME, _NODE_OP_TYPE, _NODE_ATTRIBUTE = 1, 2, 3, 4, 5
 _NODE_DOC_STRING, _NODE_DOMAIN = 6, 7
@@ -273,6 +274,10 @@ def _rewrite(model: bytes) -> bytes:
     if graph_field is None:
         raise _RefusedError("the model has no graph")
     graph = _fields(model, graph_field.value_start, graph_field.value_end)
+    if any(entry.number == _GRAPH_SPARSE_INITIALIZER for entry in graph):
+        # A sparse initializer names a tensor too, through a structure this does not read,
+        # so the name the rewrite introduces could collide with one unnoticed.
+        raise _RefusedError("the graph has sparse initializers, which this does not model")
     nodes = _nodes(model, graph)
     initializers = _initializers(model, graph)
 

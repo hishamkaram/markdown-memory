@@ -403,8 +403,27 @@ def _write_stamp(model_dir: Path) -> None:
         "files": {name: _file_identity(model_dir / name) for name in _stamped_files(model_dir)},
     }
     temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
-    temporary.write_text(json.dumps(stamp), encoding="utf-8")
+    _remove(temporary)  # a stamp left behind by a crash under this same pid
+    _write_new_file(temporary, json.dumps(stamp).encode("utf-8"))
     os.replace(temporary, model_dir / _VERIFIED_STAMP)
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    """Create ``path`` with its contents, refusing to follow a symlink or reuse a file.
+
+    The temporary names these writes use are predictable (the pid), and a plain write
+    follows a symlink planted at one of them: the caller would then overwrite whatever it
+    points at, anywhere the user can write. `O_EXCL | O_NOFOLLOW` makes both refusals the
+    kernel's.
+    """
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
 
 
 def _remove(path: Path) -> None:
@@ -556,7 +575,17 @@ class EmbeddingGemmaEmbedder:
                         return self._session, self._tokenizer
                 if attempt == 0:
                     with _model_cache_lock(self._cache_dir, exclusive=True):
-                        self._repair()
+                        try:
+                            self._repair()
+                        except MarkdownMemoryError:
+                            raise
+                        except Exception as exc:
+                            # Downloading, hashing and writing the stamp all raise things
+                            # the SDK would hide behind "Error executing tool": a full
+                            # disk, a revoked token, a read-only cache.
+                            raise ModelLoadError(
+                                f"Cannot prepare the model cache at {self._model_dir}: {exc}"
+                            ) from exc
             raise ModelLoadError(
                 f"The files under {self._model_dir} still do not match {GEMMA_REPOSITORY} "
                 f"at {GEMMA_REVISION[:12]} after being replaced"
@@ -639,7 +668,8 @@ class EmbeddingGemmaEmbedder:
         if rewritten is None:
             return  # refused, and graph_patch has said why: run the published graph
         temporary = derived.with_name(f"{derived.name}.{os.getpid()}")
-        temporary.write_bytes(rewritten)
+        _remove(temporary)
+        _write_new_file(temporary, rewritten)
         os.replace(temporary, derived)
         if _hash_file(derived) != DERIVED_GRAPH_SHA256:
             # The source was verified, so this is the rewriter and the pin disagreeing.
@@ -1061,7 +1091,20 @@ class Indexer:
             # Whether this run is the one that built everything in the index. Only then
             # can the weights it embedded with describe every vector stored.
             started_empty = self._db.count_rows("documents") == 0
-            self._refuse_foreign_weights(started_empty)
+            weights_checked = self._refuse_foreign_weights(started_empty, tolerate_unloadable=True)
+
+            def about_to_embed() -> None:
+                nonlocal weights_checked
+                if weights_checked:
+                    return
+                # The model would not load when the run started, so which weights built
+                # this index was never established. It is loading now - a transient
+                # failure, a cache repaired in between - and a vector is about to be
+                # written, which is exactly the moment the question has to be settled.
+                weights_checked = self._refuse_foreign_weights(
+                    started_empty, tolerate_unloadable=False
+                )
+
             generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
 
@@ -1084,7 +1127,12 @@ class Indexer:
                 file_path = str(path)
                 seen.add(file_path)
                 try:
-                    counts = self._index_file(path, known_hashes.get(file_path), about_to_write)
+                    counts = self._index_file(
+                        path,
+                        known_hashes.get(file_path),
+                        about_to_write,
+                        about_to_embed,
+                    )
                 except ModelLoadError:
                     raise  # not this file's fault: every other file would fail identically
                 except (MarkdownMemoryError, OSError) as exc:
@@ -1139,7 +1187,7 @@ class Indexer:
         logger.info(report.summary())
         return report
 
-    def _refuse_foreign_weights(self, started_empty: bool) -> None:
+    def _refuse_foreign_weights(self, started_empty: bool, *, tolerate_unloadable: bool) -> bool:
         """Stop before writing anything if the model is not the one that built the index.
 
         The embedder loads lazily, so this is where it is made to load: knowing afterwards
@@ -1148,26 +1196,36 @@ class Indexer:
         once. Nothing is discarded - a rebuild costs a quarter of an hour and is the
         user's to ask for - but nothing new is written either, and every `index_status`
         from here on says why until it is resolved.
+
+        Returns whether the comparison was actually made. It is not when the model will
+        not load, which is tolerated at the start of a run and not once a vector is about
+        to be embedded after all.
         """
         if started_empty:
-            return  # an index with nothing in it has nothing to be inconsistent with
+            # An index with nothing in it has nothing to be inconsistent with - including
+            # a mismatch recorded before whatever emptied it, which described vectors that
+            # no longer exist and would otherwise suppress ranking on the rebuilt index
+            # for good.
+            self._db.record_weights_mismatch(None)  # it described vectors now gone
+            return True
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if recorded is None:
-            return  # no provenance to contradict
+            return True  # no provenance to contradict
         try:
             self._embedder.warm_up()
         except ModelLoadError:
-            # The model cannot be loaded at all, so this run cannot write a vector even if
-            # every file changed; the first document that needs embedding raises on its
-            # own. Failing here instead would turn a run that had nothing to do into an
-            # error, and would do it on the one path - no model - where the index is in no
-            # danger whatsoever.
+            # The model cannot be loaded, so nothing can be embedded either: a run over
+            # unchanged files is in no danger, and one that does need the model is asked
+            # to check again the moment it is about to use it. Failing here instead turned
+            # a working no-op into an error on the one path where nothing could go wrong.
+            if not tolerate_unloadable:
+                raise
             logger.warning("Cannot check which weights built this index: the model will not load")
-            return
+            return False
         weights = self._embedder.weights_revision
         if weights == recorded:
             self._db.record_weights_mismatch(None)
-            return
+            return True
         if weights is None:
             # The model loaded, so something answered - but it cannot say which weights it
             # is. That is not "nothing to compare": vectors written now would be unlabelled
@@ -1287,6 +1345,7 @@ class Indexer:
         path: Path,
         known: tuple[str, int] | None,
         about_to_write: Callable[[], None],
+        about_to_embed: Callable[[], None],
     ) -> tuple[int, int] | None:
         """Index one file. Returns ``(sections, passages)``, or ``None`` when unchanged."""
         file_path = str(path)
@@ -1318,6 +1377,7 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
+        about_to_embed()
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")

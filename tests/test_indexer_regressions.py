@@ -407,6 +407,63 @@ def test_two_processes_starting_at_once_download_once_between_them(cache: _Cache
     assert cache.download_count() == 1
 
 
+def test_a_cache_that_cannot_be_repaired_fails_as_a_domain_error(
+    cache: _Cache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Downloading, hashing and stamping raise OSError and whatever the Hub raises. The
+
+    SDK hides anything that is not a MarkdownMemoryError behind "Error executing tool",
+    and the server's warm-up only catches that hierarchy, so a full disk or a read-only
+    cache used to escape as an opaque crash.
+    """
+
+    def refuse(*_arguments: object, **_keywords: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", refuse)
+
+    with pytest.raises(ModelLoadError, match="No space left on device"):
+        cache.embedder().warm_up()
+
+
+def test_a_symlink_planted_at_a_temporary_path_is_not_written_through(
+    cache: _Cache, tmp_path: Path
+) -> None:
+    """The temporary names are the pid, so they are guessable. A plain write follows a
+
+    symlink left at one of them and overwrites whatever it points at, anywhere the user
+    can write; creating the file exclusively, without following, makes that the kernel's
+    refusal.
+    """
+    treasure = tmp_path / "treasure.txt"
+    treasure.write_text("somebody else's file")
+    cache.model_dir.mkdir(parents=True)
+    (cache.model_dir / f".verified.{os.getpid()}").symlink_to(treasure)
+
+    cache.embedder().warm_up()
+
+    assert treasure.read_text() == "somebody else's file"
+    assert (cache.model_dir / ".verified").is_file()
+
+
+def test_the_helper_that_writes_those_files_refuses_a_symlink_outright(tmp_path: Path) -> None:
+    """Clearing the path first closes the window only until the next process opens one.
+
+    The refusal that holds is the kernel's, so it is asserted on the helper itself.
+    """
+    from markdown_memory.indexer import _write_new_file
+
+    treasure = tmp_path / "treasure.txt"
+    treasure.write_text("somebody else's file")
+    planted = tmp_path / "temporary"
+    planted.symlink_to(treasure)
+
+    with pytest.raises(OSError):
+        _write_new_file(planted, b"overwritten")
+
+    assert treasure.read_text() == "somebody else's file"
+
+
 def _warm_up(cache: _Cache) -> None:
     cache.embedder().warm_up()
 
@@ -528,6 +585,73 @@ def test_a_model_that_will_not_load_does_not_fail_a_run_that_needs_no_embedding(
     report = Indexer(db, _UnloadableModel()).index_directory(one_document)
 
     assert report.files_unchanged == 1
+    assert db.index_status(str(one_document)).verified
+
+
+class _WarmUpFailsOnce(FakeEmbedder):
+    """A model that will not load the first time it is asked, and loads the next."""
+
+    def __init__(self, revision: str) -> None:
+        super().__init__()
+        self._revision = revision
+        self.attempts = 0
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._revision
+
+    def warm_up(self) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ModelLoadError("not this time")
+
+
+def test_a_warm_up_that_fails_and_then_succeeds_is_still_checked_before_embedding(
+    db: Database, one_document: Path
+) -> None:
+    """Tolerating the failure at the start of a run is only safe while nothing is
+
+    embedded. A transient failure followed by a successful load would otherwise write
+    this model's vectors into an index another model built, with nothing recording it -
+    the exact mixture the guard exists to prevent.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
+
+    embedder = _WarmUpFailsOnce("b" * 40)
+    Indexer(db, embedder).index_directory(one_document)
+
+    assert embedder.attempts == 2  # asked again at the first vector, not trusted once
+    assert db.count_rows("documents") == 1  # the new file was never written
+    status = db.index_status(str(one_document))
+    assert not status.verified
+    assert "changed since this index was built" in (status.message() or "")
+    assert any(
+        "changed since this index was built" in failure.message for failure in status.failures
+    )
+
+
+def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
+    db: Database, one_document: Path
+) -> None:
+    """A mismatch describes the vectors that were stored. Discard them - a new embedding
+
+    size, a model change, a purge - and the flag describes nothing, while still marking
+    the index unverified and holding semantic ranking off for good.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    with pytest.raises(IndexingError):
+        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_mismatch") is not None
+
+    # Every path that empties the index without going through `clear()` - a purge of the
+    # last document, a rebuild for a new vector size, the old-format discard - used to
+    # leave the flag behind, describing vectors that no longer exist, so the rebuilt index
+    # stayed unverified and keyword-only for good.
+    db.delete_documents([str(one_document / "README.md")])
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+
+    assert db.get_meta("embedding_weights_mismatch") is None
     assert db.index_status(str(one_document)).verified
 
 

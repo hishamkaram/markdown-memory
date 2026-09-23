@@ -264,8 +264,9 @@ MUTATIONS = (
         old="            _remove(path)  # only what is proven wrong\n",
         new="            path.unlink(missing_ok=True)\n",
         tests="test_a_directory_where_a_model_file_belongs_is_repaired",
-        # The honest outcome of the bug is the exception the guard exists to prevent.
-        fails_with="IsADirectoryError",
+        # The honest outcome of the bug is the exception the guard exists to prevent,
+        # which the repair wrapper now reports as the domain error carrying its text.
+        fails_with="markdown_memory.exceptions.ModelLoadError",
     ),
     Mutation(
         name="cache: record the weights over an index this run did not build",
@@ -367,8 +368,11 @@ MUTATIONS = (
     Mutation(
         name="weights: notice the model changed only after re-embedding into the index",
         module="indexer.py",
-        old="            self._refuse_foreign_weights(started_empty)\n",
-        new="",
+        old=(
+            "            weights_checked = self._refuse_foreign_weights"
+            "(started_empty, tolerate_unloadable=True)\n"
+        ),
+        new="            weights_checked = True\n",
         tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
     ),
     Mutation(
@@ -422,6 +426,52 @@ MUTATIONS = (
         module="graph_patch.py",
         old="        if any(field.number not in _AXIS_FIELDS for field in inner):\n",
         new="        if False:  # the attribute is read as though it said what it appears to\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="weights: trust a warm-up that failed once and then embed anyway",
+        module="indexer.py",
+        old="        about_to_embed()\n",
+        new="",
+        tests="test_a_warm_up_that_fails_and_then_succeeds_is_still_checked_before_embedding",
+    ),
+    Mutation(
+        name="weights: keep a mismatch about vectors the index no longer holds",
+        module="indexer.py",
+        old="            self._db.record_weights_mismatch(None)  # it described vectors now gone\n",
+        new="",
+        tests="test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it",
+    ),
+    Mutation(
+        name="cache: let a repair failure escape as whatever the Hub raised",
+        module="indexer.py",
+        old="                        except Exception as exc:\n",
+        new="                        except MarkdownMemoryError as exc:\n",
+        tests="test_a_cache_that_cannot_be_repaired_fails_as_a_domain_error",
+        fails_with="OSError",
+    ),
+    Mutation(
+        name="cache: follow a symlink planted at a temporary path",
+        module="indexer.py",
+        old=(
+            "    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT "
+            "| os.O_EXCL | os.O_NOFOLLOW, 0o600)\n"
+        ),
+        new="    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n",
+        tests="test_the_helper_that_writes_those_files_refuses_a_symlink_outright",
+    ),
+    Mutation(
+        name="search: keep a vector ranking the weights changed under",
+        module="search.py",
+        old="            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:\n",
+        new="            if False:  # the ranking is used however old the vectors behind it are\n",
+        tests="test_a_ranking_already_in_flight_when_the_weights_change_is_dropped",
+    ),
+    Mutation(
+        name="graph: rewrite a graph whose sparse initializers name tensors unseen",
+        module="graph_patch.py",
+        old="    if any(entry.number == _GRAPH_SPARSE_INITIALIZER for entry in graph):\n",
+        new="    if False:  # sparse initializers are assumed to name nothing\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(
