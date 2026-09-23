@@ -16,7 +16,7 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
-from markdown_memory.exceptions import ModelLoadError
+from markdown_memory.exceptions import IndexingError, ModelLoadError
 from markdown_memory.indexer import (
     BGE_SMALL_MODEL_NAME,
     GEMMA_FILES,
@@ -434,24 +434,48 @@ def one_document(tmp_path: Path) -> Path:
     return root
 
 
-def test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared(
-    db: Database, one_document: Path, caplog: pytest.LogCaptureFixture
+def test_a_model_whose_weights_changed_may_not_write_into_the_index(
+    db: Database, one_document: Path
 ) -> None:
     """fastembed pins no revision, so a re-download can bring different weights under the
 
-    same model name. Nothing else in the index would notice: the stored passage vectors
-    and the new query vectors would simply come from different models.
+    same model name. Noticing that after the run is noticing it too late: the files that
+    changed have already been re-embedded, and the index holds two models' vectors with
+    nothing saying so. The run stops before writing anything instead.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") == "a" * 40
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
 
-    with caplog.at_level("WARNING", logger="markdown_memory.indexer"):
-        report = Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
-    assert any("changed since this index was built" in note for note in report.notes)
-    assert "changed since this index was built" in caplog.text
-    # Nothing is discarded, and the recorded revision still describes the stored vectors.
+    with pytest.raises(IndexingError, match="changed since this index was built"):
+        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+
+    # Nothing discarded, nothing added, and the record still describes what is stored.
     assert db.count_rows("documents") == 1
     assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+
+def test_an_index_answering_from_another_models_vectors_says_so_in_its_status(
+    db: Database, one_document: Path
+) -> None:
+    """Every search and listing carries `index_status`, and until this it could read
+
+    `verified` while the stored vectors and the query's came from different models.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    assert db.index_status(str(one_document)).verified
+
+    with pytest.raises(IndexingError):
+        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+
+    status = db.index_status(str(one_document))
+    assert not status.verified
+    assert status.to_dict()["coverage"] == "unknown"
+    assert "different models" in (status.message() or "")
+
+    # Back on the weights it was built with, the warning goes away on its own.
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    assert db.index_status(str(one_document)).verified
 
 
 def test_an_index_with_nothing_to_lose_records_the_weights_it_is_built_with(
@@ -479,7 +503,12 @@ def test_the_bge_small_folder_is_the_one_fastembed_really_creates() -> None:
     assert derived is not None
     if not derived.is_dir():
         pytest.skip(f"bge-small has not been downloaded into {cache_dir}")
-    revision = FastEmbedEmbedder(BGE_SMALL_MODEL_NAME, cache_dir=cache_dir).weights_revision
+    embedder = FastEmbedEmbedder(BGE_SMALL_MODEL_NAME, cache_dir=cache_dir)
+    # Read when the weights load, not on demand: the answer describes the model in
+    # memory, so before anything is loaded there is honestly nothing to say.
+    assert embedder.weights_revision is None
+    embedder.embed_query("what revision is this")
+    revision = embedder.weights_revision
     assert revision is not None and len(revision) == 40
 
 
@@ -586,23 +615,46 @@ def test_a_directory_where_a_model_file_belongs_is_repaired(cache: _Cache) -> No
     assert (cache.model_dir / "model.onnx").read_bytes() == _FILES["model.onnx"]
 
 
-def test_the_weights_are_not_recorded_before_anything_was_embedded_with_them(
+def test_the_weights_are_recorded_only_for_an_index_this_run_built_whole(
     db: Database, one_document: Path
 ) -> None:
-    """The embedder loads lazily, so on a fresh install the first run starts with no
+    """The embedder loads lazily, so the first run of a fresh install starts with no
 
-    revision to report. Recording one on the next run - when no vector of this run's came
-    from it - would put a revision on the file the previous run embedded blind.
+    revision to report. Recording one later - when the vectors were embedded blind, or by
+    somebody else - would put a revision on them that may simply be wrong.
     """
     Indexer(db, _LazyWeights(None)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") is None
 
-    # A later run that changes nothing knows the revision, but embedded nothing with it.
+    # The index is no longer empty, so this run cannot vouch for what is in it.
+    (one_document / "README.md").write_text("# Readme\n\nedited\n")
     Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") is None
 
-    (one_document / "README.md").write_text("# Readme\n\nedited\n")
+    # Built from nothing: now every vector came from these weights.
+    db.clear()
     Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_emptying_the_index_any_other_way_also_forgets_the_revision(
+    db: Database, one_document: Path
+) -> None:
+    """`clear()` is not the only way the rows go: a purge of the last document, a rebuild
+
+    for a new vector size and the old-format discard all empty it too. A revision left
+    behind by any of them makes every later run report a mismatch that is not real.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+    (one_document / "README.md").unlink()
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)  # purges the last one
+    assert db.count_rows("documents") == 0
+
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew\n")
+    report = Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    assert not any("changed since this index was built" in note for note in report.notes)
     assert db.get_meta("embedding_weights_revision") == "b" * 40
 
 
@@ -628,3 +680,44 @@ class _LazyWeights(FakeEmbedder):
     @property
     def weights_revision(self) -> str | None:
         return self._revision
+
+
+def test_a_symlinked_directory_on_the_way_is_never_written_through(
+    cache: _Cache, tmp_path: Path
+) -> None:
+    """`_file_identity` looks at the last component only, so a symlinked parent used to
+
+    be trusted - and then "repaired", which meant deleting and overwriting files that
+    were never in the cache at all.
+    """
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    treasure = outside / "nested" / "weights.bin"
+    treasure.write_bytes(b"somebody else's file")
+
+    cache.model_dir.mkdir(parents=True)
+    (cache.model_dir / "model.onnx").write_bytes(_FILES["model.onnx"])
+    (cache.model_dir / "nested").symlink_to(outside / "nested")
+
+    with pytest.raises(ModelLoadError, match="symlinked"):
+        cache.embedder().warm_up()
+    assert treasure.read_bytes() == b"somebody else's file"
+    assert cache.downloads == []
+
+
+def test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known(
+    cache: _Cache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal that quietly does nothing leaves the next step to fail without being
+
+    able to explain itself - or, worse, leaves the damaged file in place.
+    """
+    from markdown_memory import indexer
+
+    cache.model_dir.mkdir(parents=True)
+    (cache.model_dir / "model.onnx").write_bytes(b"damaged")
+    monkeypatch.setattr(indexer.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+    with pytest.raises(ModelLoadError, match="Cannot clear"):
+        cache.embedder().warm_up()

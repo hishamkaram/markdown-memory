@@ -38,6 +38,9 @@ class FakeEmbedder:
     def weights_revision(self) -> str | None:
         return None
 
+    def warm_up(self) -> None:
+        """Nothing to load: the vectors are computed from the text itself."""
+
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         self.document_calls.append(list(texts))
         return [self._embed(text) for text in texts]

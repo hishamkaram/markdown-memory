@@ -180,7 +180,14 @@ def _nodes(data: bytes, graph_fields: list[_Field]) -> list[_Node]:
                 extras=[
                     entry.number
                     for entry in inner
-                    if entry.number not in {_NODE_INPUT, _NODE_OUTPUT, _NODE_NAME, _NODE_OP_TYPE}
+                    if entry.number
+                    not in {
+                        _NODE_INPUT,
+                        _NODE_OUTPUT,
+                        _NODE_NAME,
+                        _NODE_OP_TYPE,
+                        _NODE_ATTRIBUTE,
+                    }
                 ],
             )
         )
@@ -271,12 +278,15 @@ def _rewrite(model: bytes) -> bytes:
     produced_by_graph = {
         _value_info_name(model, field) for field in graph if field.number == _GRAPH_OUTPUT
     }
+    written_by = {name: node.field.start for node in nodes for name in node.outputs}
+    # Every name already spoken for, so the one the rewrite introduces cannot shadow one.
+    taken = set(written_by) | set(consumers) | set(initializers) | produced_by_graph
     candidates = [
         (dequantize, gather)
         for dequantize in nodes
         if dequantize.op_type == "DequantizeLinear"
         for gather in _matching_gather(
-            model, dequantize, nodes, initializers, consumers, produced_by_graph
+            model, dequantize, nodes, initializers, consumers, produced_by_graph, taken, written_by
         )
     ]
     if len(candidates) != 1:
@@ -329,6 +339,8 @@ def _matching_gather(
     initializers: dict[str, tuple[int, list[int]]],
     consumers: dict[str, int],
     outputs: set[str],
+    taken: set[str],
+    written_by: dict[str, int],
 ) -> list[_Node]:
     """The one Gather this DequantizeLinear may swap with, if everything lines up."""
     if dequantize.attributes or not 2 <= len(dequantize.inputs) <= 3:
@@ -346,15 +358,17 @@ def _matching_gather(
         # element counts as per tensor by onnxruntime's rule, not by the ONNX spec's.
         if parameter is None or _elements(parameter[1]) != 1:
             return []
+    if len(dequantize.outputs) != 1:
+        return []
     produced = dequantize.outputs[0]
-    if len(dequantize.outputs) != 1 or consumers.get(produced) != 1:
+    if consumers.get(produced) != 1:
         return []
     if produced in outputs:
         # The graph hands the dequantized table out; removing its producer would leave an
         # output nothing writes.
         return []
-    if f"{produced}_rows" in consumers or f"{produced}_rows" in outputs:
-        return []  # the name the rewrite introduces is already taken
+    if f"{produced}_rows" in taken:
+        return []  # the name the rewrite introduces belongs to something already
     return [
         node
         for node in nodes
@@ -367,4 +381,7 @@ def _matching_gather(
         # Positions are kept, so swapping a Gather that comes first would put the
         # DequantizeLinear before the rows it reads and leave the graph unsorted.
         and node.field.start > dequantize.field.start
+        # The indices move up to the DequantizeLinear's position, so whatever produces
+        # them has to be there already: a graph input, an initializer, or a node above it.
+        and written_by.get(node.inputs[1], -1) < dequantize.field.start
     ]

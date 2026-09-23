@@ -74,17 +74,40 @@ def dequantize_then_gather(
     node_extra: bytes = b"",
     export_table: bool = False,
     collide: bool = False,
+    no_outputs: bool = False,
+    gather_axis: bool = False,
+    indices_via_node: bool = False,
 ) -> bytes:
     """The shipped pattern in miniature: an int8 table dequantized whole, then indexed."""
     table = bytes(range(12))
     scale = struct.pack("<f", 0.5) * (1 if scale_dims is None else max(1, scale_dims[0]))
+    axis = field(5, field(1, b"axis") + number_field(3, 0) + number_field(20, 2))
     nodes = [
         field(
             1,
-            node("DequantizeLinear", ["table", "scale", "zero"], ["table_f"], "dq", node_extra),
+            node(
+                "DequantizeLinear",
+                ["table", "scale", "zero"],
+                [] if no_outputs else ["table_f"],
+                "dq",
+                node_extra,
+            ),
         ),
-        field(1, node("Gather", ["table_f", "ids"], ["rows"], "gather")),
+        field(
+            1,
+            node(
+                "Gather",
+                ["table_f", "idx" if indices_via_node else "ids"],
+                ["rows"],
+                "gather",
+                axis if gather_axis else b"",
+            ),
+        ),
     ]
+    if indices_via_node:
+        # The indices are computed *between* the two nodes, so moving the Gather up to
+        # where the DequantizeLinear sits would read them before anything writes them.
+        nodes.insert(1, field(1, node("Identity", ["ids"], ["idx"], "indices")))
     if gather_first:
         nodes.reverse()
     outputs = [field(12, value_info("rows", FLOAT, [2, 3]))]
@@ -163,6 +186,8 @@ def test_a_dangling_value_info_for_the_dequantized_table_is_dropped() -> None:
         ("the graph exports the dequantized table", dequantize_then_gather(export_table=True)),
         ("the name the rewrite introduces is taken", dequantize_then_gather(collide=True)),
         ("field number zero", dequantize_then_gather(extra=varint(0 << 3 | 0) + b"\x01")),
+        ("a node with no outputs at all", dequantize_then_gather(no_outputs=True)),
+        ("the indices are not available that early", dequantize_then_gather(indices_via_node=True)),
     ],
 )
 def test_anything_but_the_expected_pattern_is_refused(description: str, graph: bytes) -> None:
@@ -171,6 +196,17 @@ def test_anything_but_the_expected_pattern_is_refused(description: str, graph: b
     would cost correctness, which is not a trade worth making for 1 GB.
     """
     assert gather_before_dequantize(graph) is None, description
+
+
+def test_a_gather_that_spells_out_axis_zero_is_still_rewritten() -> None:
+    """`axis=0` written out means what leaving it out means, and refusing it would cost
+
+    the memory saving over a difference that is only notation.
+    """
+    original = dequantize_then_gather(gather_axis=True)
+    rewritten = gather_before_dequantize(original)
+    assert rewritten is not None
+    assert np.array_equal(run(original)["rows"], run(rewritten)["rows"])
 
 
 def test_a_graph_too_large_to_be_this_one_is_refused() -> None:

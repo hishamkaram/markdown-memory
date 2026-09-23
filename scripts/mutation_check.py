@@ -208,24 +208,10 @@ MUTATIONS = (
         tests="test_two_processes_starting_at_once_download_once_between_them",
     ),
     Mutation(
-        name="cache: say nothing when the weights changed under the model name",
-        module="indexer.py",
-        old="        if recorded == weights:\n",
-        new="        if recorded != weights:\n",
-        tests="test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared",
-    ),
-    Mutation(
-        name="cache: overwrite the recorded weights on every run",
-        module="indexer.py",
-        old="        recorded = self._db.get_meta(WEIGHTS_META_KEY)\n",
-        new="        recorded = None\n",
-        tests="test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared",
-    ),
-    Mutation(
         name="graph: run the published graph and dequantize the whole vocabulary",
         module="indexer.py",
-        old="            graph = self._model_dir / DERIVED_GRAPH_FILE\n",
-        new="            graph = self._model_dir / GEMMA_MODEL_FILE\n",
+        old="            graph = derived if derived and _file_identity(derived) else None\n",
+        new="            graph = None\n",
         tests="test_the_embedder_runs_the_derived_graph",
     ),
     Mutation(
@@ -246,8 +232,8 @@ MUTATIONS = (
     Mutation(
         name="graph: swap the nodes with something else still reading the whole table",
         module="graph_patch.py",
-        old="    if len(dequantize.outputs) != 1 or consumers.get(produced) != 1:\n",
-        new="    if len(dequantize.outputs) != 1:\n",
+        old="    if consumers.get(produced) != 1:\n",
+        new="    if consumers.get(produced) is None:\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(
@@ -265,34 +251,43 @@ MUTATIONS = (
         tests="test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files",
     ),
     Mutation(
-        name="cache: let a file with no identity match a stamp that recorded none",
+        name="cache: keep a derived graph that is a symlink out of the cache",
         module="indexer.py",
-        old="        if identity is None or recorded[name] != identity:\n",
-        new="        if recorded[name] != identity:\n",
+        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
+        "DERIVED_GRAPH_SHA256:\n",
+        new="        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:\n",
         tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
     ),
     Mutation(
         name="cache: try to unlink a directory where a model file belongs",
         module="indexer.py",
-        old="            _remove(self._model_dir / name)  # only what is proven wrong\n",
-        new="            (self._model_dir / name).unlink(missing_ok=True)\n",
+        old="            _remove(path)  # only what is proven wrong\n",
+        new="            path.unlink(missing_ok=True)\n",
         tests="test_a_directory_where_a_model_file_belongs_is_repaired",
         # The honest outcome of the bug is the exception the guard exists to prevent.
         fails_with="IsADirectoryError",
     ),
     Mutation(
-        name="cache: record the weights even when this run embedded nothing with them",
+        name="cache: record the weights over an index this run did not build",
         module="indexer.py",
-        old="            if embedded:\n"
-        "                self._db.set_meta(WEIGHTS_META_KEY, weights)\n",
-        new="            self._db.set_meta(WEIGHTS_META_KEY, weights)\n",
-        tests="test_the_weights_are_not_recorded_before_anything_was_embedded_with_them",
+        old="        if started_empty and embedded and self._db.get_meta(WEIGHTS_META_KEY) "
+        "is None:\n",
+        new="        if embedded:\n",
+        tests="test_the_weights_are_recorded_only_for_an_index_this_run_built_whole",
+    ),
+    Mutation(
+        name="cache: keep a revision describing vectors that are all gone",
+        module="indexer.py",
+        old="            self._db.forget_weights_revision()\n",
+        new="            pass\n",
+        tests="test_emptying_the_index_any_other_way_also_forgets_the_revision",
     ),
     Mutation(
         name="storage: keep the weights revision after discarding every document",
         module="db.py",
-        old='            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))\n',
-        new="",
+        old="            # revision of a model whose output is already gone.\n"
+        '            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))\n',
+        new="            # revision of a model whose output is already gone.\n",
         tests="test_discarding_every_document_discards_the_revision_that_described_them",
     ),
     Mutation(
@@ -319,7 +314,7 @@ MUTATIONS = (
     Mutation(
         name="graph: introduce a name another node already writes",
         module="graph_patch.py",
-        old='    if f"{produced}_rows" in consumers or f"{produced}_rows" in outputs:\n',
+        old='    if f"{produced}_rows" in taken:\n',
         new="    if False:\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
     ),
@@ -329,6 +324,73 @@ MUTATIONS = (
         old='            raise _RefusedError("field number 0 does not exist")\n',
         new="            pass\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="cache: follow a symlinked directory out of the model cache",
+        module="indexer.py",
+        old="    current = model_dir\n",
+        new="    return model_dir / name\n    current = model_dir\n",
+        tests="test_a_symlinked_directory_on_the_way_is_never_written_through",
+    ),
+    Mutation(
+        name="cache: assume a removal that did nothing worked",
+        module="indexer.py",
+        old="    if path.exists() or path.is_symlink():\n",
+        new="    if False:\n",
+        tests="test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known",
+    ),
+    Mutation(
+        name="graph: refuse a Gather that spells out the axis it already has",
+        module="graph_patch.py",
+        old="                        _NODE_ATTRIBUTE,\n",
+        new="",
+        tests="test_a_gather_that_spells_out_axis_zero_is_still_rewritten",
+    ),
+    Mutation(
+        name="graph: index the outputs of a node that has none",
+        module="graph_patch.py",
+        old="    if len(dequantize.outputs) != 1:\n        return []\n    produced = "
+        "dequantize.outputs[0]\n",
+        new="    produced = dequantize.outputs[0]\n    if len(dequantize.outputs) != 1:\n"
+        "        return []\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+        # The bug is the IndexError escaping the refusal contract, which is the point.
+        fails_with="IndexError",
+    ),
+    Mutation(
+        name="graph: move indices above the node that produces them",
+        module="graph_patch.py",
+        old="        and written_by.get(node.inputs[1], -1) < dequantize.field.start\n",
+        new="",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="weights: notice the model changed only after re-embedding into the index",
+        module="indexer.py",
+        old="            self._refuse_foreign_weights(started_empty)\n",
+        new="",
+        tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
+    ),
+    Mutation(
+        name="weights: call an index verified while another model's vectors answer it",
+        module="indexer.py",
+        old="        self._db.record_weights_mismatch(message)\n",
+        new="",
+        tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
+    ),
+    Mutation(
+        name="weights: keep the warning after the model that built the index is back",
+        module="indexer.py",
+        old="            self._db.record_weights_mismatch(None)\n",
+        new="",
+        tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
+    ),
+    Mutation(
+        name="status: report a mismatched index as verified anyway",
+        module="db.py",
+        old="            verified=verified and weights_mismatch is None,\n",
+        new="            verified=verified,\n",
+        tests="TestAnIndexAnsweringFromAnotherModelsVectors",
     ),
     Mutation(
         name="indexer: let onnxruntime's intra-op pool spin-wait again",
@@ -391,7 +453,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 6320),',
+        old='    ("README.md", 6389),',
         new='    ("README.md", 5062),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

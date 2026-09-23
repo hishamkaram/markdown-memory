@@ -148,6 +148,8 @@ class Embedder(Protocol):
     @property
     def weights_revision(self) -> str | None: ...
 
+    def warm_up(self) -> None: ...
+
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -168,6 +170,7 @@ class FastEmbedEmbedder:
         self._dimension = dimension
         self._lock = threading.Lock()
         self._model: TextEmbedding | None = None
+        self._weights_revision: str | None = None
 
     @property
     def model_name(self) -> str:
@@ -179,13 +182,20 @@ class FastEmbedEmbedder:
 
     @property
     def weights_revision(self) -> str | None:
-        """Which snapshot of the weights is on disk, when it can be read.
+        """Which snapshot the loaded weights came from, or None before they are loaded.
 
         fastembed pins no revision, so a deleted cache can come back with different
         weights under an unchanged model name - and stored passage vectors would then be
         compared against query vectors from a different model, with nothing to notice it.
         huggingface_hub records the snapshot it fetched in `refs/main`.
+
+        Read once, when the model loads, and not on every call: the file can change under
+        a running process, and what matters is the weights that produced the vectors, not
+        whatever is on disk by the time somebody asks.
         """
+        return self._weights_revision
+
+    def _read_weights_revision(self) -> str | None:
         directory = fastembed_model_dir(self._cache_dir)
         if directory is None:
             return None
@@ -251,6 +261,7 @@ class FastEmbedEmbedder:
                         # here: at 4, a query cost 95 ms of CPU instead of 718 ms.
                         threads=_inference_threads() or None,
                     )
+                    self._weights_revision = self._read_weights_revision()
                 except Exception as exc:
                     raise ModelLoadError(
                         f"Cannot load embedding model {self._model_name}: {exc}"
@@ -299,6 +310,21 @@ def fastembed_model_dir(cache_dir: Path | None) -> Path | None:
     return None
 
 
+def _cache_path(model_dir: Path, name: str) -> Path | None:
+    """``model_dir/name``, or None when any directory on the way there is a symlink.
+
+    `_file_identity` only ever looked at the last component, so an `onnx` that pointed
+    somewhere else was trusted - and then repaired, which meant deleting and overwriting
+    files outside the cache entirely.
+    """
+    current = model_dir
+    for part in Path(name).parts:
+        if current.is_symlink():
+            return None
+        current = current / part
+    return current
+
+
 def _file_identity(path: Path) -> dict[str, int] | None:
     """What a stamp remembers about one model file; None when it is not a plain file.
 
@@ -324,9 +350,15 @@ def _file_identity(path: Path) -> dict[str, int] | None:
 def _stamped_files(model_dir: Path) -> list[str]:
     """Everything a stamp vouches for: the downloaded files, and the derived graph."""
     names = list(GEMMA_MANIFEST)
-    if _file_identity(model_dir / DERIVED_GRAPH_FILE) is not None:
+    if _identity_in(model_dir, DERIVED_GRAPH_FILE) is not None:
         names.append(DERIVED_GRAPH_FILE)
     return names
+
+
+def _identity_in(model_dir: Path, name: str) -> dict[str, int] | None:
+    """The identity of one cached file, refusing a path that leaves the cache."""
+    path = _cache_path(model_dir, name)
+    return None if path is None else _file_identity(path)
 
 
 def _stamp_is_current(model_dir: Path) -> bool:
@@ -347,11 +379,14 @@ def _stamp_is_current(model_dir: Path) -> bool:
     recorded = stamp.get("files")
     if not isinstance(recorded, dict) or set(recorded) != set(_stamped_files(model_dir)):
         return False  # a derived graph that has gone missing is regenerated, not ignored
+    if model_dir.is_symlink():
+        return False
     for name in recorded:
-        identity = _file_identity(model_dir / name)
-        # `None` means the path is not a regular file - a symlink, most likely. A stamp
-        # that recorded `None` would match `None` for ever, and a symlink whose target is
-        # swapped afterwards would stay trusted, so nothing without an identity is.
+        identity = _identity_in(model_dir, name)
+        # `None` means the path is not a regular file - a symlink, most likely. Nothing
+        # should be able to stamp one (`_stamped_files` leaves it out, `_unverified`
+        # calls it wrong and `_derive_graph` replaces it), and this is the line that
+        # makes a stamp that somehow recorded `None` stop matching `None` for ever.
         if identity is None or recorded[name] != identity:
             return False
     return True
@@ -382,6 +417,10 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     else:
         path.unlink(missing_ok=True)
+    if path.exists() or path.is_symlink():
+        # Say so here, where the path is known, rather than failing three lines later on
+        # a rename that cannot explain itself.
+        raise ModelLoadError(f"Cannot clear {path} to repair the model cache")
 
 
 def _hash_file(path: Path) -> str:
@@ -396,9 +435,9 @@ def _unverified(model_dir: Path) -> list[str]:
     """The model files that are missing, the wrong size, or the wrong bytes."""
     problems: list[str] = []
     for name, (size, checksum) in GEMMA_MANIFEST.items():
-        path = model_dir / name
-        before = _file_identity(path)
-        if before is None or before["size"] != size:
+        path = _cache_path(model_dir, name)
+        before = None if path is None else _file_identity(path)
+        if path is None or before is None or before["size"] != size:
             problems.append(name)
         elif _hash_file(path) != checksum or _file_identity(path) != before:
             # Second identity: a file rewritten while it was being read was never hashed
@@ -543,8 +582,9 @@ class EmbeddingGemmaEmbedder:
             options.add_session_config_entry(*_SPIN_CONFIG)
             if threads := _inference_threads():
                 options.intra_op_num_threads = threads
-            graph = self._model_dir / DERIVED_GRAPH_FILE
-            if _file_identity(graph) is None:  # refused, or not a regular file: use theirs
+            derived = _cache_path(self._model_dir, DERIVED_GRAPH_FILE)
+            graph = derived if derived and _file_identity(derived) else None
+            if graph is None:  # refused, or not a regular file inside the cache
                 graph = self._model_dir / GEMMA_MODEL_FILE
             session: _OrtSession = onnxruntime.InferenceSession(
                 str(graph),
@@ -564,7 +604,13 @@ class EmbeddingGemmaEmbedder:
         self._model_dir.mkdir(parents=True, exist_ok=True)
         wrong = _unverified(self._model_dir)
         for name in wrong:
-            _remove(self._model_dir / name)  # only what is proven wrong
+            path = _cache_path(self._model_dir, name)
+            if path is None:  # a symlinked directory on the way: refuse to write through it
+                raise ModelLoadError(
+                    f"{self._model_dir / name} leaves the model cache through a symlinked "
+                    "directory; move it aside by hand"
+                )
+            _remove(path)  # only what is proven wrong
         if wrong:
             self._fetch()
             still_wrong = _unverified(self._model_dir)
@@ -583,7 +629,9 @@ class EmbeddingGemmaEmbedder:
         It shares `model_quantized.onnx_data` untouched: the initializers name that file
         relatively, and onnxruntime resolves it against the graph's own folder.
         """
-        derived = self._model_dir / DERIVED_GRAPH_FILE
+        derived = _cache_path(self._model_dir, DERIVED_GRAPH_FILE)
+        if derived is None:
+            return  # the path leaves the cache; the published graph is still correct
         if _file_identity(derived) is not None and _hash_file(derived) == DERIVED_GRAPH_SHA256:
             return
         _remove(derived)
@@ -1010,6 +1058,10 @@ class Indexer:
             # measured a database that no longer exists. Captured any earlier and the run
             # counts its own model-change wipe as somebody else's, then refuses to certify
             # the index it just rebuilt from scratch.
+            # Whether this run is the one that built everything in the index. Only then
+            # can the weights it embedded with describe every vector stored.
+            started_empty = self._db.count_rows("documents") == 0
+            self._refuse_foreign_weights(started_empty)
             generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
 
@@ -1067,6 +1119,9 @@ class Indexer:
             # The walk finished, which is all this records; what it could not read is
             # recorded separately, and `index_status` refuses to call a tree whole while
             # anything under it is still listed there. Two facts, two places, one answer.
+            # Before the certificate, so a crash between the two leaves the tree
+            # honestly unvouched-for rather than vouched-for with no provenance.
+            self._record_weights_revision(started_empty, indexed)
             self._db.mark_scan_complete(str(root), generation)
             report = IndexReport(
                 directory=_printable(str(root)),
@@ -1078,46 +1133,65 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                # Checked here rather than before the walk: an embedder that has not
-                # loaded yet cannot say which weights it holds, and the first run of a
-                # fresh install is exactly that case.
-                notes=tuple(notices.values()) + tuple(self._check_weights_revision(indexed)),
+                notes=tuple(notices.values()),
             )
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
         return report
 
-    def _check_weights_revision(self, embedded: int) -> list[str]:
-        """Compare the weights on disk with the ones the stored vectors came from.
+    def _refuse_foreign_weights(self, started_empty: bool) -> None:
+        """Stop before writing anything if the model is not the one that built the index.
+
+        The embedder loads lazily, so this is where it is made to load: knowing afterwards
+        that the weights changed is knowing it too late, because the files that changed
+        have already been re-embedded and the index now holds vectors from two models at
+        once. Nothing is discarded - a rebuild costs a quarter of an hour and is the
+        user's to ask for - but nothing new is written either, and every `index_status`
+        from here on says why until it is resolved.
+        """
+        if started_empty:
+            return  # an index with nothing in it has nothing to be inconsistent with
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if recorded is None:
+            return  # no provenance to contradict
+        self._embedder.warm_up()
+        weights = self._embedder.weights_revision
+        if weights is None or weights == recorded:
+            self._db.record_weights_mismatch(None)
+            return
+        message = (
+            f"The weights behind {self._embedder.model_name} changed since this index was "
+            f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
+            "query would produce now come from different models. Nothing has been "
+            "discarded and nothing new is being indexed; re-index this documentation "
+            f"root from scratch (delete {self._db.path} and run index_directory) to make "
+            "them comparable again."
+        )
+        self._db.record_weights_mismatch(message)
+        self._db.revoke_coverage()
+        raise IndexingError(message)
+
+    def _record_weights_revision(self, started_empty: bool, embedded: int) -> None:
+        """Note which weights produced the vectors this index now holds.
 
         A model *name* is not enough for bge-small: fastembed pins no revision, so a
         re-download can bring different weights under the same name and nothing in the
-        index would notice. Recorded on an index that has nothing to lose, compared
-        afterwards, and never quietly overwritten - the recorded value describes the
-        stored vectors, so overwriting it would erase the discrepancy it exists to show.
-        Nothing is discarded: a rebuild costs a quarter of an hour and is the user's call.
+        index would notice. Only a run that built the index from nothing can say where
+        all of it came from, so only such a run records it; anything else would put a
+        provenance on vectors it never saw written. A run that finds a *different*
+        revision never reaches here - `_refuse_foreign_weights` stops it before the first
+        write, which is the only point at which stopping still helps.
         """
+        if started_empty:
+            # Nothing was here to lose. Whatever this run embedded - possibly nothing -
+            # is the whole index, so any revision recorded before it describes vectors
+            # that no longer exist, whether they were purged, rebuilt or discarded.
+            self._db.forget_weights_revision()
         weights = self._embedder.weights_revision
         if weights is None:
-            return []  # nothing to compare against, and nothing worth recording
-        recorded = self._db.get_meta(WEIGHTS_META_KEY)
-        if recorded is None:
-            # Only what this run embedded is known to have come from these weights. A run
-            # that wrote nothing says nothing about vectors somebody else wrote.
-            if embedded:
-                self._db.set_meta(WEIGHTS_META_KEY, weights)
-            return []
-        if recorded == weights:
-            return []
-        note = (
-            f"The weights behind {self._embedder.model_name} changed since this index was "
-            f"built ({recorded[:12]} -> {weights[:12]}). Stored vectors came from the "
-            "previous weights and are not comparable with new ones. Nothing has been "
-            "discarded, so every file re-indexed from here is stored with the new weights "
-            "while the rest keep the old: re-index from scratch to make them comparable."
-        )
-        logger.warning("%s", note)
-        return [note]
+            return  # nothing worth recording
+        if started_empty and embedded and self._db.get_meta(WEIGHTS_META_KEY) is None:
+            self._db.set_meta(WEIGHTS_META_KEY, weights)
 
     def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
         """The subset of ``paths`` a walk of ``root`` would have visited.
