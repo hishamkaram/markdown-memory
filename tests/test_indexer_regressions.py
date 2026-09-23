@@ -522,6 +522,7 @@ def test_an_index_answering_from_another_models_vectors_says_so_in_its_status(
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
     assert db.index_status(str(one_document)).verified
 
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
     with pytest.raises(IndexingError):
         Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
 
@@ -588,47 +589,90 @@ def test_a_model_that_will_not_load_does_not_fail_a_run_that_needs_no_embedding(
     assert db.index_status(str(one_document)).verified
 
 
-class _WarmUpFailsOnce(FakeEmbedder):
-    """A model that will not load the first time it is asked, and loads the next."""
+class _RevisionAfterLoading(FakeEmbedder):
+    """A real embedder shape: it only knows its weights once it has loaded them."""
 
     def __init__(self, revision: str) -> None:
         super().__init__()
         self._revision = revision
-        self.attempts = 0
+        self._loaded = False
 
     @property
     def weights_revision(self) -> str | None:
-        return self._revision
+        return self._revision if self._loaded else None
 
     def warm_up(self) -> None:
-        self.attempts += 1
-        if self.attempts == 1:
-            raise ModelLoadError("not this time")
+        self._loaded = True
 
 
-def test_a_warm_up_that_fails_and_then_succeeds_is_still_checked_before_embedding(
+def test_the_model_is_loaded_before_it_is_asked_which_weights_it_is(
     db: Database, one_document: Path
 ) -> None:
-    """Tolerating the failure at the start of a run is only safe while nothing is
+    """`weights_revision` is None until the model loads, which is indistinguishable from
 
-    embedded. A transient failure followed by a successful load would otherwise write
-    this model's vectors into an index another model built, with nothing recording it -
-    the exact mixture the guard exists to prevent.
+    a revision that cannot be read. Asking before loading turns every ordinary change of
+    weights into "could not be read" - true of nothing, and it sends the user to repair a
+    cache that is perfectly healthy.
     """
-    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    first = _RevisionAfterLoading("a" * 40)
+    first.warm_up()
+    Indexer(db, first).index_directory(one_document)
     (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
 
-    embedder = _WarmUpFailsOnce("b" * 40)
-    Indexer(db, embedder).index_directory(one_document)
+    with pytest.raises(IndexingError, match="changed since this index was built"):
+        Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
 
-    assert embedder.attempts == 2  # asked again at the first vector, not trusted once
-    assert db.count_rows("documents") == 1  # the new file was never written
-    status = db.index_status(str(one_document))
-    assert not status.verified
-    assert "changed since this index was built" in (status.message() or "")
-    assert any(
-        "changed since this index was built" in failure.message for failure in status.failures
-    )
+
+def test_a_cache_that_changes_while_no_document_does_still_stops_semantic_ranking(
+    db: Database, one_document: Path
+) -> None:
+    """The hole every earlier version of this guard had. fastembed re-downloads the
+
+    weights; no Markdown file has changed, so indexing is a clean no-op and nothing marks
+    the index. Every query was then embedded by the new model and ranked against the old
+    model's vectors, and the answer came back looking semantic.
+    """
+    from markdown_memory.search import HybridSearcher
+
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)  # nothing to embed
+
+    searcher = HybridSearcher(db, _PinnedWeights("b" * 40))
+    try:
+        results = searcher.search("hello")
+    finally:
+        searcher.close()
+    assert all(result.vec_rank is None for result in results)
+
+
+def test_a_run_with_nothing_to_embed_does_not_refuse_and_does_not_load_the_model(
+    db: Database, one_document: Path
+) -> None:
+    """The check runs where a vector is about to be produced, so a run over unchanged
+
+    files never reaches it - and never loads a model it does not need. Search is what
+    protects the reader in that case, by asking for itself rather than trusting a flag
+    this run would have had to write.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+
+    embedder = _CountingWarmUp("b" * 40)
+    report = Indexer(db, embedder).index_directory(one_document)
+
+    assert report.files_unchanged == 1
+    assert embedder.warm_ups == 0
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+
+class _CountingWarmUp(_PinnedWeights):
+    """A pinned embedder that counts how often it was asked to load."""
+
+    def __init__(self, revision: str) -> None:
+        super().__init__(revision)
+        self.warm_ups = 0
+
+    def warm_up(self) -> None:
+        self.warm_ups += 1
 
 
 def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
@@ -640,6 +684,7 @@ def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
     the index unverified and holding semantic ranking off for good.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
     with pytest.raises(IndexingError):
         Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_mismatch") is not None

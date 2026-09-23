@@ -277,13 +277,6 @@ MUTATIONS = (
         tests="test_the_weights_are_recorded_only_for_an_index_this_run_built_whole",
     ),
     Mutation(
-        name="cache: keep a revision describing vectors that are all gone",
-        module="indexer.py",
-        old="            self._db.forget_weights_revision()\n",
-        new="            pass\n",
-        tests="test_emptying_the_index_any_other_way_also_forgets_the_revision",
-    ),
-    Mutation(
         name="storage: keep the weights revision after discarding every document",
         module="db.py",
         old="            # revision of a model whose output is already gone.\n"
@@ -366,26 +359,9 @@ MUTATIONS = (
         tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(
-        name="weights: notice the model changed only after re-embedding into the index",
-        module="indexer.py",
-        old=(
-            "            weights_checked = self._refuse_foreign_weights"
-            "(started_empty, tolerate_unloadable=True)\n"
-        ),
-        new="            weights_checked = True\n",
-        tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
-    ),
-    Mutation(
         name="weights: call an index verified while another model's vectors answer it",
         module="indexer.py",
         old="        self._db.record_weights_mismatch(message)\n",
-        new="",
-        tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
-    ),
-    Mutation(
-        name="weights: keep the warning after the model that built the index is back",
-        module="indexer.py",
-        old="            self._db.record_weights_mismatch(None)\n",
         new="",
         tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
     ),
@@ -395,24 +371,6 @@ MUTATIONS = (
         old="        if weights == recorded:\n",
         new="        if weights is None or weights == recorded:\n",
         tests="test_weights_that_cannot_be_identified_are_not_assumed_to_be_the_right_ones",
-    ),
-    Mutation(
-        name="weights: fail a run with nothing to embed because the model will not load",
-        module="indexer.py",
-        old=(
-            '            logger.warning("Cannot check which weights built this index: '
-            'the model will not load")\n'
-        ),
-        new="            raise\n",
-        tests="test_a_model_that_will_not_load_does_not_fail_a_run_that_needs_no_embedding",
-        fails_with="markdown_memory.exceptions.ModelLoadError",
-    ),
-    Mutation(
-        name="search: rank this model's query against another model's vectors",
-        module="search.py",
-        old="        comparable = self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None\n",
-        new="        comparable = True\n",
-        tests="test_vectors_from_another_model_are_not_ranked_against_this_ones_query",
     ),
     Mutation(
         name="graph: let the rewrite shadow a name only the graph's inputs declare",
@@ -427,20 +385,6 @@ MUTATIONS = (
         old="        if any(field.number not in _AXIS_FIELDS for field in inner):\n",
         new="        if False:  # the attribute is read as though it said what it appears to\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="weights: trust a warm-up that failed once and then embed anyway",
-        module="indexer.py",
-        old="        about_to_embed()\n",
-        new="",
-        tests="test_a_warm_up_that_fails_and_then_succeeds_is_still_checked_before_embedding",
-    ),
-    Mutation(
-        name="weights: keep a mismatch about vectors the index no longer holds",
-        module="indexer.py",
-        old="            self._db.record_weights_mismatch(None)  # it described vectors now gone\n",
-        new="",
-        tests="test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it",
     ),
     Mutation(
         name="cache: let a repair failure escape as whatever the Hub raised",
@@ -461,18 +405,50 @@ MUTATIONS = (
         tests="test_the_helper_that_writes_those_files_refuses_a_symlink_outright",
     ),
     Mutation(
-        name="search: keep a vector ranking the weights changed under",
-        module="search.py",
-        old="            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:\n",
-        new="            if False:  # the ranking is used however old the vectors behind it are\n",
-        tests="test_a_ranking_already_in_flight_when_the_weights_change_is_dropped",
-    ),
-    Mutation(
         name="graph: rewrite a graph whose sparse initializers name tensors unseen",
         module="graph_patch.py",
         old="    if any(entry.number == _GRAPH_SPARSE_INITIALIZER for entry in graph):\n",
         new="    if False:  # sparse initializers are assumed to name nothing\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="weights: embed with whatever model happens to be loaded",
+        module="indexer.py",
+        old="        self._refuse_foreign_weights()\n",
+        new="",
+        tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
+    ),
+    Mutation(
+        name="weights: refuse a database whose recorded revision describes nothing",
+        module="indexer.py",
+        old='        if self._db.count_rows("documents") == 0:\n',
+        new="        if False:  # a revision outliving its vectors still speaks for them\n",
+        tests="test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
+    ),
+    Mutation(
+        name="weights: ask an unloaded model which weights it is",
+        module="indexer.py",
+        old="        self._embedder.warm_up()\n",
+        new="",
+        tests="test_the_model_is_loaded_before_it_is_asked_which_weights_it_is",
+    ),
+    Mutation(
+        name="search: rank this model's query against another model's vectors",
+        module="search.py",
+        old="        self._refuse_foreign_vectors()\n",
+        new="",
+        tests="test_a_cache_that_changes_while_no_document_does_still_stops_semantic_ranking",
+    ),
+    Mutation(
+        name="search: read the weights before the query has loaded the model",
+        module="search.py",
+        old="        embedding = self._embedder.embed_query(query)\n",
+        new=(
+            "        self._refuse_foreign_vectors()  # before the model has loaded\n"
+            "        embedding = self._embedder.embed_query(query)\n"
+        ),
+        tests="test_the_weights_are_read_after_the_query_is_embedded_not_before",
     ),
     Mutation(
         name="status: report a mismatched index as verified anyway",
@@ -542,7 +518,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 6478),',
+        old='    ("README.md", 6611),',
         new='    ("README.md", 5062),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

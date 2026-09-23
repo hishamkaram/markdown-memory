@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 12,291
+       alt="One question asked of four documentation files. Reading them whole costs 12,424
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,322 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,455 tokens - the
             one that answers is 401.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 12,291 tokens in all:
+`docs/evaluation-protocol.md`, 12,424 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   401 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  433 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  566 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
   397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,322 tokens instead of 12,291**, and the section that actually answers is 401 - a
+**2,455 tokens instead of 12,424**, and the section that actually answers is 401 - a
 thirtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -201,16 +201,25 @@ gather-first graph, and never touches the network.
 
 `bge-small` is downloaded by `fastembed`, which pins no revision: if that cache is deleted,
 it can come back with different weights under the same model name. The snapshot the index
-was built from is recorded, and a later run that finds different weights **stops before
-writing anything**: the stored vectors and the ones a query would produce now come from
-different models, and carrying on would leave both in the index at once. Nothing is
-discarded - re-indexing from scratch is yours to decide - and until you do,
-`index_status.coverage` reads `"unknown"` with a message saying why, so an agent is never
-told the index is healthy while it is not. Search keeps working in the meantime, on
-keywords alone: ranking a query's vector against vectors another model wrote measures
-nothing, so that half is switched off until the index is rebuilt. A model that loads but
-cannot say which weights it is stops the run for the same reason - unlabelled vectors
-beside labelled ones are exactly what this prevents.
+was built from is recorded, and both halves of the server check it where they would
+otherwise act on it:
+
+- **Indexing** compares the moment before it embeds - the moment the model has had to load,
+  and one a run with nothing to embed never reaches. On a difference it **stops before
+  writing anything**, because carrying on would leave two models' vectors in one index.
+  Nothing is discarded - re-indexing from scratch is yours to decide - and until you do,
+  `index_status.coverage` reads `"unknown"` with a message saying why, so an agent is never
+  told the index is healthy while it is not.
+- **Searching** compares for itself, after embedding the query, and falls back to keyword
+  ranking alone when the answer differs. It does not wait to be told: weights can change
+  while no Markdown file does, and then there is no indexing run to notice. Ranking a
+  query's vector against vectors another model wrote measures nothing, so that half is
+  switched off until the index is rebuilt.
+
+A model that loads but cannot say which weights it is counts as a difference, for the same
+reason: unlabelled vectors beside labelled ones are exactly what this prevents. An index
+with **no recorded provenance** - one built before this existed - is left alone rather than
+refused: unknown is not the same as wrong, and a rebuild is a poor answer to a suspicion.
 
 ### Presets
 

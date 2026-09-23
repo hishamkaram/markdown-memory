@@ -12,7 +12,7 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
-from markdown_memory.db import Database
+from markdown_memory.db import WEIGHTS_META_KEY, Database
 from markdown_memory.exceptions import SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
@@ -105,66 +105,61 @@ class TestSearchRobustness:
             searcher.close()
 
     def test_vectors_from_another_model_are_not_ranked_against_this_ones_query(
-        self, db: Database, fake_embedder: FakeEmbedder
+        self, db: Database, tmp_path: Path
     ) -> None:
-        """A recorded weights mismatch means the stored vectors and the vector this query
+        """Search asks which weights it is running for itself, rather than trusting a flag
 
-        would produce come from different models, so the distance between them measures
-        nothing. Indexing already refuses; searching used to go on ranking on them and
-        return the result as if it were semantic. Keyword ranking reads no vector, so it
-        still answers - and no query is embedded at all.
+        an indexing run would have had to write. A cache whose weights changed while no
+        document did leaves indexing a clean no-op, so no run would ever set that flag -
+        and every query would go on being ranked against vectors from another model.
         """
-        store(db, fake_embedder, "/d/a.md")
-        db.record_weights_mismatch("the weights changed")
-        searcher = HybridSearcher(db, fake_embedder)
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
         try:
-            embedded_before = len(fake_embedder.query_calls)
             results = searcher.search("body number")
             assert results and all(r.vec_rank is None for r in results)
-            assert len(fake_embedder.query_calls) == embedded_before
         finally:
             searcher.close()
 
     def test_a_keyword_failure_during_a_mismatch_is_the_whole_search_failing(
-        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With vector ranking suppressed there is no second index to degrade to."""
-        store(db, fake_embedder, "/d/a.md")
-        db.record_weights_mismatch("the weights changed")
+        """Losing one index degrades to the other; losing both is an error, and a
+
+        suppressed vector ranking is one of them lost.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
 
         def broken(*_arguments: object) -> list[int]:
             raise RuntimeError("not a domain error")
 
         monkeypatch.setattr(db, "fts_search", broken)
-        searcher = HybridSearcher(db, fake_embedder)
+        searcher = HybridSearcher(db, embedder)
         try:
             with pytest.raises(SearchError, match="RuntimeError: not a domain error"):
                 searcher.search("body number")
         finally:
             searcher.close()
 
-    def test_a_ranking_already_in_flight_when_the_weights_change_is_dropped(
-        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    def test_the_weights_are_read_after_the_query_is_embedded_not_before(
+        self, db: Database
     ) -> None:
-        """The flag is read before the vector work is submitted, so an indexer can record
+        """The embedder loads lazily and cannot say which weights it is until it has
 
-        it while that work runs - against exactly the vectors it is about. Reading it
-        again once the ranking is in hand costs one query and drops a ranking that means
-        nothing.
+        loaded, so asking first would suppress vector ranking on every first query of a
+        process - a healthy index answering as if it were broken.
         """
-        store(db, fake_embedder, "/d/a.md")
-        searcher = HybridSearcher(db, fake_embedder)
-        original = searcher._vector_ranking
-
-        def rank_then_change(query: str, limit: int) -> tuple[list[int], dict[int, str]]:
-            result = original(query, limit)
-            db.record_weights_mismatch("the weights changed mid-search")
-            return result
-
-        monkeypatch.setattr(searcher, "_vector_ranking", rank_then_change)
+        embedder = _RevisedEmbedder("a" * 40, lazy=True)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
         try:
             results = searcher.search("body number")
-            assert results and all(r.vec_rank is None for r in results)
+            assert any(r.vec_rank is not None for r in results)
         finally:
             searcher.close()
 
@@ -175,6 +170,23 @@ class TestSearchRobustness:
         searcher.close()
         with pytest.raises(SearchError, match="shut down"):
             searcher.search("anything")
+
+
+class _RevisedEmbedder(FakeEmbedder):
+    """A FakeEmbedder that reports a weights revision, optionally only once loaded."""
+
+    def __init__(self, revision: str, *, lazy: bool = False) -> None:
+        super().__init__()
+        self._revision = revision
+        self._loaded = not lazy
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._revision if self._loaded else None
+
+    def embed_query(self, text: str) -> list[float]:
+        self._loaded = True  # the query is what loads the model
+        return super().embed_query(text)
 
 
 def keyword_sections(results: Sequence[SearchResult]) -> set[str]:

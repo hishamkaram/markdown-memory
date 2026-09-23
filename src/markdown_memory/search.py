@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
-from markdown_memory.db import WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.db import WEIGHTS_META_KEY, Database
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.indexer import Embedder
 from markdown_memory.models import SearchResult
@@ -282,39 +282,14 @@ class HybridSearcher:
     def _search_once(self, query: str, limit: int) -> tuple[list[SearchResult], bool]:
         """One ranking pass: the results, and whether a better-ranked section had vanished."""
         candidates = max(self._candidates, limit)
-        # Stored vectors and the one this query would produce come from different models,
-        # so the distance between them measures nothing. Keyword ranking reads no vector
-        # and stays exactly as accurate as it was, so the search still answers - with the
-        # half of it that is still true. `index_status` carries the reason to the agent.
-        comparable = self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None
         try:
             fts_future = self._pool.submit(self._keyword_ranking, query, candidates)
-            vec_future = (
-                self._pool.submit(self._vector_ranking, query, candidates) if comparable else None
-            )
+            vec_future = self._pool.submit(self._vector_ranking, query, candidates)
         except RuntimeError as exc:  # the executor refuses work after close()
             raise SearchError("The search engine has been shut down") from exc
         fts_ranking, fts_error = _settle(fts_future, [])
-        vec_ranking: list[int] = []
-        passages: dict[int, str] = {}
-        vec_error: MarkdownMemoryError | None = None
-        if vec_future is None:
-            logger.warning(
-                "Ranking on keywords alone: the stored vectors were not built by the model "
-                "answering now"
-            )
-        else:
-            (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
-            # An indexer can record the mismatch while this ranking is in flight, and the
-            # vectors it ranked are the ones the flag is about. Checking again once the
-            # work is in hand costs one read and drops a ranking that means nothing.
-            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
-                comparable = False
-                vec_ranking, passages, vec_error = [], {}, None
-                logger.warning("Discarding a vector ranking: the weights changed under it")
-        # With vector ranking suppressed there is no other index to fall back on, so a
-        # keyword failure is the whole search failing.
-        if fts_error is not None and (vec_error is not None or not comparable):
+        (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
+        if fts_error is not None and vec_error is not None:
             raise fts_error
         for name, error in (("keyword", fts_error), ("vector", vec_error)):
             if error is not None:
@@ -398,11 +373,43 @@ class HybridSearcher:
         return [hit for hit in hits if hit in exact or coverage(hit) >= KEYWORD_GATE]
 
     def _vector_ranking(self, query: str, limit: int) -> tuple[list[int], dict[int, str]]:
-        """Sections by their closest vector, plus each section's best-matching passage."""
+        """Sections by their closest vector, plus each section's best-matching passage.
+
+        Empty when the stored vectors came from other weights than the ones answering
+        now: the distance between two models' vectors measures nothing, and returning it
+        as a semantic result is worse than returning no semantic result at all. Keyword
+        ranking reads no vector and is unaffected, so the search still answers - with the
+        half of it that is still true, and `index_status` carries the reason.
+        """
         embedding = self._embedder.embed_query(query)
+        # After the embedding, never before: the embedder loads lazily and cannot say
+        # which weights it is until it has loaded, so asking first would suppress
+        # ranking on every first query of a process.
+        self._refuse_foreign_vectors()
         best, passages = self._nearest(embedding, limit)
         ranking = sorted(best, key=lambda section_id: (best[section_id], section_id))[:limit]
         return ranking, {sid: passages[sid] for sid in ranking if sid in passages}
+
+    def _refuse_foreign_vectors(self) -> None:
+        """Fail this ranking if the loaded model is not the one that built the vectors.
+
+        Search asks for itself rather than trusting a flag an indexing run would have had
+        to write: a cache whose weights changed while no document did leaves indexing a
+        clean no-op, and nothing would ever have set that flag. Failing rather than
+        returning nothing puts it on the path that already exists for one index being
+        unusable - the other index answers alone, and only losing both is an error.
+        """
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if recorded is None:
+            return  # no provenance to contradict
+        weights = self._embedder.weights_revision
+        if weights == recorded:
+            return
+        raise SearchError(
+            f"This index was built by weights {recorded[:12]} and the model answering now "
+            f"reports {weights[:12] if weights else 'no readable revision'}: the distance "
+            "between two models' vectors measures nothing, so only keyword ranking is used"
+        )
 
     def _nearest(
         self, embedding: list[float], limit: int

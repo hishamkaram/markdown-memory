@@ -31,6 +31,7 @@ from markdown_memory.db import (
 )
 from markdown_memory.exceptions import (
     EmbeddingError,
+    ForeignWeightsError,
     IndexBusyError,
     IndexingError,
     MarkdownMemoryError,
@@ -1091,20 +1092,6 @@ class Indexer:
             # Whether this run is the one that built everything in the index. Only then
             # can the weights it embedded with describe every vector stored.
             started_empty = self._db.count_rows("documents") == 0
-            weights_checked = self._refuse_foreign_weights(started_empty, tolerate_unloadable=True)
-
-            def about_to_embed() -> None:
-                nonlocal weights_checked
-                if weights_checked:
-                    return
-                # The model would not load when the run started, so which weights built
-                # this index was never established. It is loading now - a transient
-                # failure, a cache repaired in between - and a vector is about to be
-                # written, which is exactly the moment the question has to be settled.
-                weights_checked = self._refuse_foreign_weights(
-                    started_empty, tolerate_unloadable=False
-                )
-
             generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
 
@@ -1127,13 +1114,8 @@ class Indexer:
                 file_path = str(path)
                 seen.add(file_path)
                 try:
-                    counts = self._index_file(
-                        path,
-                        known_hashes.get(file_path),
-                        about_to_write,
-                        about_to_embed,
-                    )
-                except ModelLoadError:
+                    counts = self._index_file(path, known_hashes.get(file_path), about_to_write)
+                except (ModelLoadError, ForeignWeightsError):
                     raise  # not this file's fault: every other file would fail identically
                 except (MarkdownMemoryError, OSError) as exc:
                     logger.warning("Failed to index %s: %s", _printable(file_path), exc)
@@ -1187,49 +1169,39 @@ class Indexer:
         logger.info(report.summary())
         return report
 
-    def _refuse_foreign_weights(self, started_empty: bool, *, tolerate_unloadable: bool) -> bool:
-        """Stop before writing anything if the model is not the one that built the index.
+    def _refuse_foreign_weights(self) -> None:
+        """Stop before embedding if the model is not the one whose vectors are stored.
 
-        The embedder loads lazily, so this is where it is made to load: knowing afterwards
-        that the weights changed is knowing it too late, because the files that changed
-        have already been re-embedded and the index now holds vectors from two models at
-        once. Nothing is discarded - a rebuild costs a quarter of an hour and is the
-        user's to ask for - but nothing new is written either, and every `index_status`
-        from here on says why until it is resolved.
-
-        Returns whether the comparison was actually made. It is not when the model will
-        not load, which is tolerated at the start of a run and not once a vector is about
-        to be embedded after all.
+        Called at the point of use - the line before a vector is produced - because that
+        is the only place a lazily-loaded embedder can be asked what it is without making
+        a run that needs no model load one. Nothing is discarded; a rebuild costs a
+        quarter of an hour and is the user's to ask for. But nothing new is written
+        either, and every `index_status` says why until it is resolved.
         """
-        if started_empty:
-            # An index with nothing in it has nothing to be inconsistent with - including
-            # a mismatch recorded before whatever emptied it, which described vectors that
-            # no longer exist and would otherwise suppress ranking on the rebuilt index
-            # for good.
-            self._db.record_weights_mismatch(None)  # it described vectors now gone
-            return True
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if recorded is None:
-            return True  # no provenance to contradict
-        try:
-            self._embedder.warm_up()
-        except ModelLoadError:
-            # The model cannot be loaded, so nothing can be embedded either: a run over
-            # unchanged files is in no danger, and one that does need the model is asked
-            # to check again the moment it is about to use it. Failing here instead turned
-            # a working no-op into an error on the one path where nothing could go wrong.
-            if not tolerate_unloadable:
-                raise
-            logger.warning("Cannot check which weights built this index: the model will not load")
-            return False
+            return  # no provenance to contradict
+        if self._db.count_rows("documents") == 0:
+            # The revision describes vectors that are gone: `delete_documents` and the
+            # rebuild for a new vector size empty the index without touching the meta
+            # keys. Left standing, it would refuse every future run over a database with
+            # nothing in it to protect - and keep a mismatch flag that suppresses ranking
+            # on whatever is built next.
+            self._db.forget_weights_revision()
+            self._db.record_weights_mismatch(None)
+            return
+        # The load this run is about to do anyway. A model that will not load raises here
+        # exactly as it would one line later, and a run with nothing to embed never
+        # arrives.
+        self._embedder.warm_up()
         weights = self._embedder.weights_revision
         if weights == recorded:
             self._db.record_weights_mismatch(None)
-            return True
+            return
         if weights is None:
-            # The model loaded, so something answered - but it cannot say which weights it
-            # is. That is not "nothing to compare": vectors written now would be unlabelled
-            # and indistinguishable from the ones already stored, which is precisely the
+            # The model loaded, so something answered - it just cannot say which weights
+            # it is. That is not "nothing to compare": the vectors written now would be
+            # unlabelled and indistinguishable from the ones already stored, which is the
             # state this guard exists to prevent.
             message = (
                 f"Which weights {self._embedder.model_name} is running could not be read, so "
@@ -1248,7 +1220,7 @@ class Indexer:
             )
         self._db.record_weights_mismatch(message)
         self._db.revoke_coverage()
-        raise IndexingError(message)
+        raise ForeignWeightsError(message)
 
     def _record_weights_revision(self, started_empty: bool, embedded: int) -> None:
         """Note which weights produced the vectors this index now holds.
@@ -1258,8 +1230,8 @@ class Indexer:
         index would notice. Only a run that built the index from nothing can say where
         all of it came from, so only such a run records it; anything else would put a
         provenance on vectors it never saw written. A run that finds a *different*
-        revision never reaches here - `_refuse_foreign_weights` stops it before the first
-        write, which is the only point at which stopping still helps.
+        revision never reaches here - `_refuse_foreign_weights` aborts it at the vector
+        that would have been the first, which is the last point at which stopping helps.
         """
         if started_empty:
             # Nothing was here to lose. Whatever this run embedded - possibly nothing -
@@ -1345,7 +1317,6 @@ class Indexer:
         path: Path,
         known: tuple[str, int] | None,
         about_to_write: Callable[[], None],
-        about_to_embed: Callable[[], None],
     ) -> tuple[int, int] | None:
         """Index one file. Returns ``(sections, passages)``, or ``None`` when unchanged."""
         file_path = str(path)
@@ -1377,7 +1348,7 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
-        about_to_embed()
+        self._refuse_foreign_weights()
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
