@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
-from markdown_memory.db import WEIGHTS_META_KEY, Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.indexer import Embedder
 from markdown_memory.models import SearchResult
@@ -415,11 +415,18 @@ class HybridSearcher:
         weights = self._embedder.weights_revision
         if weights == recorded:
             return recorded
-        raise SearchError(
+        message = (
             f"This index was built by weights {recorded[:12]} and the model answering now "
             f"reports {weights[:12] if weights else 'no readable revision'}: the distance "
-            "between two models' vectors measures nothing, so only keyword ranking is used"
+            "between two models' vectors measures nothing, so only keyword ranking is used "
+            "until this documentation root is re-indexed from scratch."
         )
+        # Persisted, because the answer this query is about to give is half of one, and
+        # the agent reading it is told the index is healthy by an `index_status` that no
+        # indexing run will correct - weights can change while no document does.
+        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:
+            self._db.record_weights_mismatch(message)
+        raise SearchError(message)
 
     def _nearest(
         self, embedding: list[float], limit: int

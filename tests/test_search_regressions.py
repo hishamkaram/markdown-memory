@@ -163,6 +163,30 @@ class TestSearchRobustness:
         finally:
             searcher.close()
 
+    def test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status(
+        self, db: Database
+    ) -> None:
+        """Weights can change while no document does, so no indexing run will ever write
+
+        that down. Without this the agent got keyword-only results and an `index_status`
+        still calling the index verified - told it was healthy by the one field that
+        exists to say otherwise.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        assert "keyword ranking" not in (db.index_status("/d").message() or "")
+
+        searcher = HybridSearcher(db, embedder)
+        try:
+            searcher.search("body number")
+        finally:
+            searcher.close()
+
+        status = db.index_status("/d")
+        assert not status.verified
+        assert "only keyword ranking is used" in (status.message() or "")
+
     def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:

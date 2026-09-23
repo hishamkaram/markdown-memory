@@ -682,8 +682,56 @@ def test_a_revision_left_over_a_vectorless_index_does_not_refuse_the_next_model(
     (root / "GUIDE.md").write_text("# Guide\n\nreal prose that embeds\n")
     Indexer(db, _PinnedWeights("b" * 40)).index_directory(root)
 
+    # And the vectors it wrote are its own: an index that held none had nothing for this
+    # run not to have built, whatever the document rows above them said.
     assert db.count_rows("units_vec") > 0
-    assert db.get_meta("embedding_weights_revision") is None  # this run did not build it all
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_the_revision_is_written_before_the_vectors_it_describes(
+    db: Database, one_document: Path
+) -> None:
+    """Recorded at the end of the run, the provenance did not exist while the run was
+
+    writing: another process reading those vectors in between found nothing saying where
+    they came from, and ranked its own model's query against them. It is claimed before
+    the first vector instead - and a run that dies in between leaves a revision over no
+    vectors, which the next one clears.
+    """
+    seen: list[str | None] = []
+    embedder = _PinnedWeights("a" * 40)
+    original = embedder.embed_documents
+
+    def watch(texts: object) -> list[list[float]]:
+        seen.append(db.get_meta("embedding_weights_revision"))
+        return original(texts)  # type: ignore[arg-type]
+
+    embedder.embed_documents = watch  # type: ignore[method-assign]
+    Indexer(db, embedder).index_directory(one_document)
+
+    assert seen == ["a" * 40]  # already true when the first vector was made
+
+
+def test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind(
+    db: Database, tmp_path: Path
+) -> None:
+    """Replacing a document removes its old sections, and with them its vectors. When it
+
+    held the last of them, the index is left with none - and a revision describing them
+    would have search fall back to keywords over an index with nothing in it to compare.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    page = root / "README.md"
+    page.write_text("# Readme\n\nprose that embeds\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+    page.write_text("# Readme\n\n## Only headings\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
 
 
 def test_purging_the_last_document_forgets_what_its_vectors_came_from(
@@ -937,6 +985,15 @@ def test_the_weights_are_recorded_only_for_an_index_this_run_built_whole(
     db.clear()
     Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+    # A revision left over an index with no vectors - by an older version, or a run that
+    # died between claiming it and writing them - and a model that cannot say what it is.
+    # Nothing replaces it, so it has to go rather than be left describing the next model's
+    # vectors.
+    db.clear()
+    db.set_meta("embedding_weights_revision", "c" * 40)
+    Indexer(db, _LazyWeights(None)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") is None
 
 
 def test_emptying_the_index_any_other_way_also_forgets_the_revision(

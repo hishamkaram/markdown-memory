@@ -924,6 +924,10 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_SECTION_ID_META_KEY, str(section_id + 1)),
             )
+            # This write can remove the last vector in the index as well as add one: a
+            # document whose prose became headings alone embeds nothing, and its old
+            # vectors went with its old sections.
+            _forget_weights_without_vectors(conn)
         return Document(
             id=doc_id,
             file_path=file_path,

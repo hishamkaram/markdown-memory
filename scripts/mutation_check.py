@@ -271,8 +271,11 @@ MUTATIONS = (
     Mutation(
         name="cache: record the weights over an index this run did not build",
         module="indexer.py",
-        old='        if not (started_empty and embedded and self._db.count_rows("units_vec")):\n',
-        new="        if not embedded:\n",
+        old=(
+            "        self._db.forget_weights_revision()\n"
+            "        self._db.record_weights_mismatch(None)\n"
+        ),
+        new="        self._db.record_weights_mismatch(None)\n",
         tests="test_the_weights_are_recorded_only_for_an_index_this_run_built_whole",
     ),
     Mutation(
@@ -427,8 +430,14 @@ MUTATIONS = (
     Mutation(
         name="weights: ask an unloaded model which weights it is",
         module="indexer.py",
-        old="        self._embedder.warm_up()\n",
-        new="",
+        old=(
+            "        self._embedder.warm_up()\n"
+            "        weights = self._embedder.weights_revision\n"
+            "        if weights == recorded:\n"
+        ),
+        new=(
+            "        weights = self._embedder.weights_revision\n        if weights == recorded:\n"
+        ),
         tests="test_the_model_is_loaded_before_it_is_asked_which_weights_it_is",
     ),
     Mutation(
@@ -450,9 +459,9 @@ MUTATIONS = (
     ),
     Mutation(
         name="weights: put a revision on an index that holds no vector",
-        module="indexer.py",
-        old='        if not (started_empty and embedded and self._db.count_rows("units_vec")):\n',
-        new="        if not (started_empty and embedded):\n",
+        module="db.py",
+        old="            _forget_weights_without_vectors(conn)\n        return Document(\n",
+        new="        return Document(\n",
         tests="test_a_document_that_embeds_nothing_records_no_provenance",
     ),
     Mutation(
@@ -475,6 +484,20 @@ MUTATIONS = (
         old="        if self._model_name != BGE_SMALL_MODEL_NAME:\n",
         new="        if False:  # every model is assumed to live in that one folder\n",
         tests="test_only_the_model_whose_cache_it_can_find_reports_a_revision",
+    ),
+    Mutation(
+        name="weights: claim the index only once its vectors are already written",
+        module="indexer.py",
+        old="            self._claim_empty_index()\n",
+        new="            return\n",
+        tests="test_the_revision_is_written_before_the_vectors_it_describes",
+    ),
+    Mutation(
+        name="search: keep the mismatch to itself while the status says all is well",
+        module="search.py",
+        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:\n",
+        new="        if False:  # the status goes on calling the index healthy\n",
+        tests="test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status",
     ),
     Mutation(
         name="status: report a mismatched index as verified anyway",

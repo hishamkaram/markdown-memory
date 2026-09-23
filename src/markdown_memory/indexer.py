@@ -1094,9 +1094,6 @@ class Indexer:
             # measured a database that no longer exists. Captured any earlier and the run
             # counts its own model-change wipe as somebody else's, then refuses to certify
             # the index it just rebuilt from scratch.
-            # Whether this run is the one that built everything in the index. Only then
-            # can the weights it embedded with describe every vector stored.
-            started_empty = self._db.count_rows("documents") == 0
             generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
 
@@ -1154,9 +1151,6 @@ class Indexer:
             # The walk finished, which is all this records; what it could not read is
             # recorded separately, and `index_status` refuses to call a tree whole while
             # anything under it is still listed there. Two facts, two places, one answer.
-            # Before the certificate, so a crash between the two leaves the tree
-            # honestly unvouched-for rather than vouched-for with no provenance.
-            self._record_weights_revision(started_empty, indexed)
             self._db.mark_scan_complete(str(root), generation)
             report = IndexReport(
                 directory=_printable(str(root)),
@@ -1184,17 +1178,18 @@ class Indexer:
         either, and every `index_status` says why until it is resolved.
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if self._db.count_rows("units_vec") == 0:
+            # No vector here for any of this to be about. Documents are the wrong
+            # question: a file of nothing but headings is stored and embeds nothing, so an
+            # index can hold documents and no vectors at all. Whatever this run is about
+            # to write is therefore the whole of it, and it may say so - before the write
+            # rather than after, so that another process reading these vectors a moment
+            # from now finds them labelled. A run that dies in between leaves a revision
+            # over no vectors, which the next one clears exactly here.
+            self._claim_empty_index()
+            return
         if recorded is None:
             return  # no provenance to contradict
-        if self._db.count_rows("units_vec") == 0:
-            # There is no vector here for this to be about. Documents are the wrong
-            # question: a file of nothing but headings is stored and embeds nothing, so an
-            # index can hold documents and no vectors at all. Left standing, the revision
-            # would refuse every future run over a database with nothing to protect, and
-            # keep a mismatch flag that suppresses ranking on whatever is built next.
-            self._db.forget_weights_revision()
-            self._db.record_weights_mismatch(None)
-            return
         # The load this run is about to do anyway. A model that will not load raises here
         # exactly as it would one line later, and a run with nothing to embed never
         # arrives.
@@ -1227,30 +1222,21 @@ class Indexer:
         self._db.revoke_coverage()
         raise ForeignWeightsError(message)
 
-    def _record_weights_revision(self, started_empty: bool, embedded: int) -> None:
-        """Note which weights produced the vectors this index now holds.
+    def _claim_empty_index(self) -> None:
+        """Take ownership of an index that holds no vectors, and drop what described none.
 
         A model *name* is not enough for bge-small: fastembed pins no revision, so a
         re-download can bring different weights under the same name and nothing in the
-        index would notice. Only a run that built the index from nothing can say where
-        all of it came from, so only such a run records it; anything else would put a
-        provenance on vectors it never saw written. A run that finds a *different*
-        revision never reaches here - `_refuse_foreign_weights` aborts it at the vector
-        that would have been the first, which is the last point at which stopping helps.
+        index would notice. This is the one moment a revision can honestly be written -
+        the vectors that follow are all there will be, and there are none yet to
+        contradict. A model that cannot say which weights it is records nothing, and the
+        index carries no provenance rather than a provenance that might be wrong.
         """
-        if started_empty:
-            # Nothing was here to lose. Whatever this run embedded - possibly nothing -
-            # is the whole index, so any revision recorded before it describes vectors
-            # that no longer exist, whether they were purged, rebuilt or discarded.
-            self._db.forget_weights_revision()
+        self._db.forget_weights_revision()
+        self._db.record_weights_mismatch(None)
+        self._embedder.warm_up()
         weights = self._embedder.weights_revision
-        if weights is None:
-            return  # nothing worth recording
-        # `embedded` counts files, and a file of headings alone embeds nothing: only
-        # vectors on disk make a revision true of anything.
-        if not (started_empty and embedded and self._db.count_rows("units_vec")):
-            return
-        if self._db.get_meta(WEIGHTS_META_KEY) is None:
+        if weights is not None:
             self._db.set_meta(WEIGHTS_META_KEY, weights)
 
     def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
