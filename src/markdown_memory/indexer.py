@@ -62,12 +62,21 @@ GEMMA_DOCUMENT_PROMPT = "title: none | text: "
 # that runs beside an editor. Sorting by token count instead of characters was measured
 # too: worth ~30% at batch 4 only, which a second tokenisation pass cancels out.
 _GEMMA_BATCH_SIZE = 4
-# Thread count is left to onnxruntime. Pinning it was measured from 4 to 16 threads and
-# every value sat inside the run-to-run noise, except the full logical count, which was
-# consistently worse. Deriving it from the CPU topology is a trap: this machine reports 16
-# physical cores and 16 is the one value that loses. Only a machine that disagrees with
-# the default needs MARKDOWN_MEMORY_THREADS.
+# Thread count is left to onnxruntime; what is *not* left to it is spinning (see
+# _SPIN_CONFIG). Pinning the count was measured from 4 to 16 threads and every value sat
+# inside the run-to-run noise on wall time. That measurement missed the cost that matters
+# for a tool running beside an editor: with spinning off, 16 threads and 4 threads differ
+# by ~30% of CPU and nothing in wall time, so the count stays onnxruntime's business and
+# only a machine that disagrees with it needs MARKDOWN_MEMORY_THREADS.
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
+# onnxruntime's intra-op threads spin-wait between operators by default. That is a good
+# trade for a server answering back-to-back requests and a bad one here: measured on a
+# 16-core machine, one warm query cost 7.2 s of CPU across 16 spinning threads, and the
+# pool kept burning ~0.5 core-seconds per second *after* the query returned. Turning
+# spinning off made the same query 0.6 s of CPU and ~40% faster in wall time, because the
+# spinners were competing with the thread doing the work. Queries here arrive seconds
+# apart, so the wake-up cost spinning buys is never recovered.
+_SPIN_CONFIG = ("session.intra_op.allow_spinning", "0")
 #: What ``_printable`` leaves where it could not decode a byte of a file name.
 _UNDECODABLE = "�"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
@@ -173,6 +182,13 @@ class FastEmbedEmbedder:
                     self._model = TextEmbedding(
                         model_name=self._model_name,
                         cache_dir=None if self._cache_dir is None else str(self._cache_dir),
+                        # fastembed builds its own session, so the override reaches it only
+                        # through this argument; without it MARKDOWN_MEMORY_THREADS was
+                        # documented but ignored for this preset. fastembed exposes no
+                        # spinning switch (its add_extra_session_options knows only
+                        # enable_cpu_mem_arena), so capping the threads is the whole lever
+                        # here: at 4, a query cost 95 ms of CPU instead of 718 ms.
+                        threads=_inference_threads() or None,
                     )
                 except Exception as exc:
                     raise ModelLoadError(
@@ -264,6 +280,7 @@ class EmbeddingGemmaEmbedder:
                     tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
                     tokenizer.enable_padding()
                     options = onnxruntime.SessionOptions()
+                    options.add_session_config_entry(*_SPIN_CONFIG)
                     if threads := _inference_threads():
                         options.intra_op_num_threads = threads
                     self._session = onnxruntime.InferenceSession(
@@ -324,6 +341,12 @@ def _inference_threads() -> int:
     Deriving it from the machine was tried and rejected: on a 16-core VM the topology
     says 16, which measured worse than the default, while every count from 4 to 12 sat
     inside the run-to-run noise. A wrong number is slower than no number.
+
+    That comparison was wall time only, which is the smaller half of the story. Once
+    spinning is off (``_SPIN_CONFIG``), the count barely moves wall time but does move
+    CPU: indexing the same passages took ~52 s of CPU at onnxruntime's count and ~37 s
+    capped at 4. The default stays onnxruntime's, because the right cap depends on what
+    else the machine is doing; this is the knob for saying so.
     """
     override = os.environ.get(_THREADS_ENV, "").strip()
     return int(override) if override.isdigit() and int(override) > 0 else 0

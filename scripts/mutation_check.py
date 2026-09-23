@@ -159,6 +159,20 @@ MUTATIONS = (
         tests="TestSectionIdsOnAnUpgradedDatabase or TestMigratingARealOldDatabase",
     ),
     Mutation(
+        name="indexer: let onnxruntime's intra-op pool spin-wait again",
+        module="indexer.py",
+        old="                    options.add_session_config_entry(*_SPIN_CONFIG)\n",
+        new="",
+        tests="test_gemma_session_disables_intra_op_spinning",
+    ),
+    Mutation(
+        name="indexer: document MARKDOWN_MEMORY_THREADS for bge-small but drop it again",
+        module="indexer.py",
+        old="                        threads=_inference_threads() or None,\n",
+        new="",
+        tests="test_fastembed_passes_the_thread_override",
+    ),
+    Mutation(
         name="indexer: consume the index-discarded notice before the report carries it",
         module="indexer.py",
         old="            self._db.dismiss_notices(notices)\n",
