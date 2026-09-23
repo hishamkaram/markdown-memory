@@ -51,15 +51,44 @@ def _config_entry(options: Any, key: str) -> str | None:
     return str(value)
 
 
-def _session_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Any]:
-    """Load a Gemma embedder against stub files; return what it asked onnxruntime for."""
+def _session_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, derived: bool = True
+) -> tuple[str, Any]:
+    """Load a Gemma embedder against stub files; return what it asked onnxruntime for.
+
+    The stubs are written where the code now looks - the revision-keyed folder - and the
+    manifest is stubbed to match them, so verification passes offline. `snapshot_download`
+    is replaced by a failure: a test about session options has no business fetching
+    330 MB, and before this was pinned these tests only passed on a machine whose
+    Hugging Face cache happened to be warm.
+    """
+    import huggingface_hub
     import onnxruntime
     import tokenizers
 
-    for name in GEMMA_FILES:
-        stub = tmp_path / "embeddinggemma-300m-onnx" / name
+    from markdown_memory import indexer
+
+    manifest = {
+        name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in _FILES.items()
+    }
+    monkeypatch.setattr(indexer, "GEMMA_MANIFEST", manifest)
+    monkeypatch.setattr(indexer, "GEMMA_FILES", tuple(manifest))
+    monkeypatch.setattr(indexer, "GEMMA_MODEL_FILE", "model.onnx")
+    monkeypatch.setattr(indexer, "DERIVED_GRAPH_FILE", "derived.onnx")
+    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
+    monkeypatch.setattr(
+        indexer, "gather_before_dequantize", lambda graph: _DERIVED if derived else None
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda *a, **k: pytest.fail("the model cache was verified, so nothing may be fetched"),
+    )
+    model_dir = indexer.gemma_model_dir(tmp_path)
+    for name, data in _FILES.items():
+        stub = model_dir / name
         stub.parent.mkdir(parents=True, exist_ok=True)
-        stub.write_bytes(b"")
+        stub.write_bytes(data)
     monkeypatch.setattr(tokenizers, "Tokenizer", _FakeTokenizer)
 
     captured: list[tuple[str, Any]] = []
@@ -485,27 +514,117 @@ def test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded(
 
 
 def test_only_the_three_published_files_are_ever_asked_of_the_hub(cache: _Cache) -> None:
-    from markdown_memory.indexer import GEMMA_FILES
-
+    """The derived graph is made here, so it may never appear in what the Hub is asked for."""
     assert "derived.onnx" not in GEMMA_FILES
-
-
-def test_a_refused_rewrite_leaves_the_published_graph_running(cache: _Cache) -> None:
-    """A refusal costs the memory saving and nothing else: the server still starts."""
-    cache.refuse_rewrite = True
-    cache.embedder().warm_up()
-    assert not (cache.model_dir / "derived.onnx").exists()
-    assert cache.opens == 1
 
 
 def test_the_embedder_runs_the_derived_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole point of deriving it: ~1 GB per query lives in this one path."""
-    from markdown_memory.indexer import DERIVED_GRAPH_FILE, gemma_model_dir
+    from markdown_memory.indexer import gemma_model_dir
 
-    derived = gemma_model_dir(tmp_path) / DERIVED_GRAPH_FILE
-    derived.parent.mkdir(parents=True, exist_ok=True)
-    derived.write_bytes(b"")
     path, _ = _session_call(tmp_path, monkeypatch)
-    assert path == str(derived)
+    assert path == str(gemma_model_dir(tmp_path) / "derived.onnx")
+
+
+def test_a_refused_rewrite_falls_back_to_the_published_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal costs the memory saving; it must not cost a server that starts."""
+    from markdown_memory.indexer import gemma_model_dir
+
+    path, _ = _session_call(tmp_path, monkeypatch, derived=False)
+    assert path == str(gemma_model_dir(tmp_path) / "model.onnx")
+
+
+def test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files(
+    cache: _Cache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upgrade that changes the rewrite must take effect on an existing cache.
+
+    Every file identity still matches after the package changes, so without the pin in
+    the stamp the old derived graph would keep being loaded for ever.
+    """
+    from markdown_memory import indexer
+
+    cache.embedder().warm_up()
+    assert cache.rewrites == 1
+
+    newer = b"a differently rewritten graph"
+    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(newer).hexdigest())
+    monkeypatch.setattr(indexer, "gather_before_dequantize", lambda graph: newer)
+    cache.embedder().warm_up()
+    assert (cache.model_dir / "derived.onnx").read_bytes() == newer
+    assert cache.downloads == [cache.model_dir]  # regenerated, never re-fetched
+
+
+def test_a_derived_graph_that_is_a_symlink_is_never_trusted(cache: _Cache) -> None:
+    """lstat records no identity for a symlink, and `None == None` would match for ever,
+
+    leaving a target that is swapped afterwards trusted without ever being verified.
+    """
+    cache.embedder().warm_up()
+    derived = cache.model_dir / "derived.onnx"
+    elsewhere = cache.root / "elsewhere.onnx"
+    elsewhere.write_bytes(_DERIVED)
+    derived.unlink()
+    derived.symlink_to(elsewhere)
+
+    cache.embedder().warm_up()
+    assert not derived.is_symlink()
+    assert derived.read_bytes() == _DERIVED
+
+
+def test_a_directory_where_a_model_file_belongs_is_repaired(cache: _Cache) -> None:
+    """`unlink` cannot clear a directory, and the exception left the cache unusable."""
+    cache.model_dir.mkdir(parents=True)
+    (cache.model_dir / "model.onnx").mkdir()
+    (cache.model_dir / "model.onnx" / "stray.txt").write_text("")
+
+    cache.embedder().warm_up()
+    assert (cache.model_dir / "model.onnx").read_bytes() == _FILES["model.onnx"]
+
+
+def test_the_weights_are_not_recorded_before_anything_was_embedded_with_them(
+    db: Database, one_document: Path
+) -> None:
+    """The embedder loads lazily, so on a fresh install the first run starts with no
+
+    revision to report. Recording one on the next run - when no vector of this run's came
+    from it - would put a revision on the file the previous run embedded blind.
+    """
+    Indexer(db, _LazyWeights(None)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") is None
+
+    # A later run that changes nothing knows the revision, but embedded nothing with it.
+    Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") is None
+
+    (one_document / "README.md").write_text("# Readme\n\nedited\n")
+    Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_discarding_every_document_discards_the_revision_that_described_them(
+    db: Database, one_document: Path
+) -> None:
+    """Otherwise a switch to a model whose cache is not downloaded yet leaves the old
+
+    revision behind, and every later run reports a mismatch that is not real.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    db.clear()
+    assert db.get_meta("embedding_weights_revision") is None
+
+
+class _LazyWeights(FakeEmbedder):
+    """An embedder that only knows its weights once it has been loaded."""
+
+    def __init__(self, revision: str | None) -> None:
+        super().__init__()
+        self._revision = revision
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._revision

@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import stat
 import threading
 import time
@@ -22,7 +23,12 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from markdown_memory.db import DEFAULT_EMBEDDING_DIM, VECTOR_FORMAT, Database
+from markdown_memory.db import (
+    DEFAULT_EMBEDDING_DIM,
+    VECTOR_FORMAT,
+    WEIGHTS_META_KEY,
+    Database,
+)
 from markdown_memory.exceptions import (
     EmbeddingError,
     IndexBusyError,
@@ -122,7 +128,6 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 _MIN_POOLED_NORM = 1e-6
 _EMBED_BATCH_SIZE = 32
 _MODEL_META_KEY = "embedding_model"
-_WEIGHTS_META_KEY = "embedding_weights_revision"
 _SKIPPED_DIRECTORIES = frozenset(
     {
         ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
@@ -319,7 +324,7 @@ def _file_identity(path: Path) -> dict[str, int] | None:
 def _stamped_files(model_dir: Path) -> list[str]:
     """Everything a stamp vouches for: the downloaded files, and the derived graph."""
     names = list(GEMMA_MANIFEST)
-    if (model_dir / DERIVED_GRAPH_FILE).is_file():
+    if _file_identity(model_dir / DERIVED_GRAPH_FILE) is not None:
         names.append(DERIVED_GRAPH_FILE)
     return names
 
@@ -337,21 +342,46 @@ def _stamp_is_current(model_dir: Path) -> bool:
         return False
     if not isinstance(stamp, dict) or stamp.get("revision") != GEMMA_REVISION:
         return False
+    if stamp.get("derived") != DERIVED_GRAPH_SHA256:
+        return False
     recorded = stamp.get("files")
     if not isinstance(recorded, dict) or set(recorded) != set(_stamped_files(model_dir)):
         return False  # a derived graph that has gone missing is regenerated, not ignored
-    return all(recorded.get(name) == _file_identity(model_dir / name) for name in recorded)
+    for name in recorded:
+        identity = _file_identity(model_dir / name)
+        # `None` means the path is not a regular file - a symlink, most likely. A stamp
+        # that recorded `None` would match `None` for ever, and a symlink whose target is
+        # swapped afterwards would stay trusted, so nothing without an identity is.
+        if identity is None or recorded[name] != identity:
+            return False
+    return True
 
 
 def _write_stamp(model_dir: Path) -> None:
     """Record what was just verified. Atomically: a half-written stamp is a false claim."""
     stamp = {
         "revision": GEMMA_REVISION,
+        # The rewrite's version. Without it, a package update that moves the pin - or
+        # fixes the rewriter - leaves the old derived graph in place, because the file
+        # itself has not changed and every identity still matches.
+        "derived": DERIVED_GRAPH_SHA256,
         "files": {name: _file_identity(model_dir / name) for name in _stamped_files(model_dir)},
     }
     temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
     temporary.write_text(json.dumps(stamp), encoding="utf-8")
     os.replace(temporary, model_dir / _VERIFIED_STAMP)
+
+
+def _remove(path: Path) -> None:
+    """Delete whatever sits at ``path``, file or directory.
+
+    A directory where a model file belongs is not something `unlink` can clear, and a
+    cache that cannot be repaired is a server that never starts again.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _hash_file(path: Path) -> str:
@@ -514,7 +544,7 @@ class EmbeddingGemmaEmbedder:
             if threads := _inference_threads():
                 options.intra_op_num_threads = threads
             graph = self._model_dir / DERIVED_GRAPH_FILE
-            if not graph.is_file():  # the rewrite was refused; the published graph is fine
+            if _file_identity(graph) is None:  # refused, or not a regular file: use theirs
                 graph = self._model_dir / GEMMA_MODEL_FILE
             session: _OrtSession = onnxruntime.InferenceSession(
                 str(graph),
@@ -534,7 +564,7 @@ class EmbeddingGemmaEmbedder:
         self._model_dir.mkdir(parents=True, exist_ok=True)
         wrong = _unverified(self._model_dir)
         for name in wrong:
-            (self._model_dir / name).unlink(missing_ok=True)  # only what is proven wrong
+            _remove(self._model_dir / name)  # only what is proven wrong
         if wrong:
             self._fetch()
             still_wrong = _unverified(self._model_dir)
@@ -554,9 +584,9 @@ class EmbeddingGemmaEmbedder:
         relatively, and onnxruntime resolves it against the graph's own folder.
         """
         derived = self._model_dir / DERIVED_GRAPH_FILE
-        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:
+        if _file_identity(derived) is not None and _hash_file(derived) == DERIVED_GRAPH_SHA256:
             return
-        derived.unlink(missing_ok=True)
+        _remove(derived)
         rewritten = gather_before_dequantize((self._model_dir / GEMMA_MODEL_FILE).read_bytes())
         if rewritten is None:
             return  # refused, and graph_patch has said why: run the published graph
@@ -971,7 +1001,6 @@ class Indexer:
                     )
                 )
             self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
-            run_notes = self._check_weights_revision()
             # Whatever emptied the index (new format, new vector size, new model) left a
             # notice. They are dismissed only once the report carrying them exists: a run
             # that aborts - the model cannot be loaded - leaves them for the next one.
@@ -1049,13 +1078,16 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notices.values()) + tuple(run_notes),
+                # Checked here rather than before the walk: an embedder that has not
+                # loaded yet cannot say which weights it holds, and the first run of a
+                # fresh install is exactly that case.
+                notes=tuple(notices.values()) + tuple(self._check_weights_revision(indexed)),
             )
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
         return report
 
-    def _check_weights_revision(self) -> list[str]:
+    def _check_weights_revision(self, embedded: int) -> list[str]:
         """Compare the weights on disk with the ones the stored vectors came from.
 
         A model *name* is not enough for bge-small: fastembed pins no revision, so a
@@ -1067,18 +1099,22 @@ class Indexer:
         """
         weights = self._embedder.weights_revision
         if weights is None:
-            return []
-        recorded = self._db.get_meta(_WEIGHTS_META_KEY)
-        if recorded is None or self._db.count_rows("documents") == 0:
-            self._db.set_meta(_WEIGHTS_META_KEY, weights)
+            return []  # nothing to compare against, and nothing worth recording
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if recorded is None:
+            # Only what this run embedded is known to have come from these weights. A run
+            # that wrote nothing says nothing about vectors somebody else wrote.
+            if embedded:
+                self._db.set_meta(WEIGHTS_META_KEY, weights)
             return []
         if recorded == weights:
             return []
         note = (
             f"The weights behind {self._embedder.model_name} changed since this index was "
             f"built ({recorded[:12]} -> {weights[:12]}). Stored vectors came from the "
-            "previous weights and are not comparable with new ones: re-index from scratch "
-            "to make them so. Nothing has been discarded."
+            "previous weights and are not comparable with new ones. Nothing has been "
+            "discarded, so every file re-indexed from here is stored with the new weights "
+            "while the rest keep the old: re-index from scratch to make them comparable."
         )
         logger.warning("%s", note)
         return [note]

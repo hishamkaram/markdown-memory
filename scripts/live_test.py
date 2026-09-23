@@ -761,7 +761,10 @@ class LiveTest:
         # And what the first query after that idle costs. Named for what it is: after two
         # seconds any spin window has long closed, so this is not the wake-up trade-off,
         # it is the latency a client actually sees, since queries arrive in gaps.
-        _, _, after_idle_ms = await self.call("search_docs", query="ENOSPC")
+        payload, _, after_idle_ms = await self.call("search_docs", query="ENOSPC")
+        # `call` returns None for a tool error, and a latency recorded for a query that
+        # failed is a number describing nothing.
+        self.check(payload is not None, "the query after a long idle still answers")
         self.metrics["query_after_idle_ms"] = after_idle_ms
 
     def files_text(self, relative: str) -> str:

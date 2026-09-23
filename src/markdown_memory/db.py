@@ -55,6 +55,9 @@ SCHEMA_VERSION = 4
 #: the new one is left alone - a format change repairs a tree file by file, and resumes
 #: where it stopped if it is interrupted.
 VECTOR_FORMAT = 2
+#: Meta key holding the weights revision the stored vectors were built from. It lives here
+#: because `clear()` has to forget it in the same transaction that deletes them.
+WEIGHTS_META_KEY = "embedding_weights_revision"
 _LEGACY_VECTORS = 1
 
 _SECTION_ID_META_KEY = "next_section_id"
@@ -922,6 +925,10 @@ class Database:
         """
         with self.transaction() as conn:
             discarded = conn.execute("DELETE FROM documents").rowcount
+            # Which weights produced the vectors is a fact about the vectors. With none
+            # left, keeping it would make the next run compare a new model against the
+            # revision of a model whose output is already gone.
+            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
             self.revoke_coverage(conn)
             if discarded and notice is not None:
                 _add_notice(conn, notice(discarded))

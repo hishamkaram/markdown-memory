@@ -70,15 +70,29 @@ def dequantize_then_gather(
     second_consumer: bool = False,
     extra: bytes = b"",
     outer: bytes = b"",
+    gather_first: bool = False,
+    node_extra: bytes = b"",
+    export_table: bool = False,
+    collide: bool = False,
 ) -> bytes:
     """The shipped pattern in miniature: an int8 table dequantized whole, then indexed."""
     table = bytes(range(12))
     scale = struct.pack("<f", 0.5) * (1 if scale_dims is None else max(1, scale_dims[0]))
     nodes = [
-        field(1, node("DequantizeLinear", ["table", "scale", "zero"], ["table_f"], "dq")),
+        field(
+            1,
+            node("DequantizeLinear", ["table", "scale", "zero"], ["table_f"], "dq", node_extra),
+        ),
         field(1, node("Gather", ["table_f", "ids"], ["rows"], "gather")),
     ]
+    if gather_first:
+        nodes.reverse()
     outputs = [field(12, value_info("rows", FLOAT, [2, 3]))]
+    if export_table:
+        outputs.append(field(12, value_info("table_f", FLOAT, [4, 3])))
+    if collide:
+        nodes.append(field(1, node("Identity", ["ids"], ["table_f_rows"], "collision")))
+        outputs.append(field(12, value_info("table_f_rows", INT64, [2])))
     if second_consumer:
         nodes.append(field(1, node("Identity", ["table_f"], ["copy"], "identity")))
         outputs.append(field(12, value_info("copy", FLOAT, [4, 3])))
@@ -140,6 +154,15 @@ def test_a_dangling_value_info_for_the_dequantized_table_is_dropped() -> None:
             dequantize_then_gather(second_consumer=True),
         ),
         ("a group, which this does not model", dequantize_then_gather(extra=varint(99 << 3 | 3))),
+        ("the gather comes first", dequantize_then_gather(gather_first=True)),
+        ("the node names another domain", dequantize_then_gather(node_extra=field(7, b"com.ms"))),
+        (
+            "a doc string the rebuild would drop",
+            dequantize_then_gather(node_extra=field(6, b"why")),
+        ),
+        ("the graph exports the dequantized table", dequantize_then_gather(export_table=True)),
+        ("the name the rewrite introduces is taken", dequantize_then_gather(collide=True)),
+        ("field number zero", dequantize_then_gather(extra=varint(0 << 3 | 0) + b"\x01")),
     ],
 )
 def test_anything_but_the_expected_pattern_is_refused(description: str, graph: bytes) -> None:
@@ -162,7 +185,20 @@ def test_everything_it_does_not_own_survives_byte_for_byte() -> None:
     rewritten = gather_before_dequantize(original)
     assert rewritten is not None
     for kept in (producer, metadata, field(10, b"a doc string")):
-        assert kept in rewritten
+        assert original.count(kept) == 1
+        assert rewritten.count(kept) == 1, "a preserved field was dropped or duplicated"
+    # Order too: spans are copied where they were, so relative order cannot drift.
+    assert rewritten.index(producer) < rewritten.index(metadata)
+    # Everything the rewrite does not own is still there, byte for byte: the only
+    # difference is the two nodes and the value_info that described the dequantized table.
+    initializers = (
+        field(5, tensor("table", INT8, [4, 3], bytes(range(12)))),
+        field(5, tensor("scale", FLOAT, [1], struct.pack("<f", 0.5))),
+        field(5, tensor("zero", INT8, [1], b"\x02")),
+    )
+    for initializer in initializers:
+        assert original.count(initializer) == 1
+        assert rewritten.count(initializer) == 1, "an initializer was dropped or duplicated"
     assert np.array_equal(run(original)["rows"], run(rewritten)["rows"])
 
 

@@ -217,8 +217,8 @@ MUTATIONS = (
     Mutation(
         name="cache: overwrite the recorded weights on every run",
         module="indexer.py",
-        old='        if recorded is None or self._db.count_rows("documents") == 0:\n',
-        new="        if True:\n",
+        old="        recorded = self._db.get_meta(WEIGHTS_META_KEY)\n",
+        new="        recorded = None\n",
         tests="test_the_weights_behind_an_unchanged_model_name_are_recorded_and_compared",
     ),
     Mutation(
@@ -231,8 +231,9 @@ MUTATIONS = (
     Mutation(
         name="graph: keep a derived graph that does not match its pin",
         module="indexer.py",
-        old="        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:\n",
-        new="        if derived.is_file():\n",
+        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
+        "DERIVED_GRAPH_SHA256:\n",
+        new="        if _file_identity(derived) is not None:\n",
         tests="test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded",
     ),
     Mutation(
@@ -254,6 +255,79 @@ MUTATIONS = (
         module="graph_patch.py",
         old='            raise _RefusedError(f"wire type {wire} is not modelled")\n',
         new="            value_start, position = position, position\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="cache: keep the stamp valid when the derived graph's pin moves",
+        module="indexer.py",
+        old='    if stamp.get("derived") != DERIVED_GRAPH_SHA256:\n        return False\n',
+        new="",
+        tests="test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files",
+    ),
+    Mutation(
+        name="cache: let a file with no identity match a stamp that recorded none",
+        module="indexer.py",
+        old="        if identity is None or recorded[name] != identity:\n",
+        new="        if recorded[name] != identity:\n",
+        tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
+    ),
+    Mutation(
+        name="cache: try to unlink a directory where a model file belongs",
+        module="indexer.py",
+        old="            _remove(self._model_dir / name)  # only what is proven wrong\n",
+        new="            (self._model_dir / name).unlink(missing_ok=True)\n",
+        tests="test_a_directory_where_a_model_file_belongs_is_repaired",
+        # The honest outcome of the bug is the exception the guard exists to prevent.
+        fails_with="IsADirectoryError",
+    ),
+    Mutation(
+        name="cache: record the weights even when this run embedded nothing with them",
+        module="indexer.py",
+        old="            if embedded:\n"
+        "                self._db.set_meta(WEIGHTS_META_KEY, weights)\n",
+        new="            self._db.set_meta(WEIGHTS_META_KEY, weights)\n",
+        tests="test_the_weights_are_not_recorded_before_anything_was_embedded_with_them",
+    ),
+    Mutation(
+        name="storage: keep the weights revision after discarding every document",
+        module="db.py",
+        old='            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))\n',
+        new="",
+        tests="test_discarding_every_document_discards_the_revision_that_described_them",
+    ),
+    Mutation(
+        name="graph: swap two nodes that are the wrong way round",
+        module="graph_patch.py",
+        old="        and node.field.start > dequantize.field.start\n",
+        new="        and node.field.start != dequantize.field.start\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: rewrite a node carrying a domain or a doc string",
+        module="graph_patch.py",
+        old="    if dequantize.extras:\n",
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: remove the producer of a value the graph exports",
+        module="graph_patch.py",
+        old="    if produced in outputs:\n",
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: introduce a name another node already writes",
+        module="graph_patch.py",
+        old='    if f"{produced}_rows" in consumers or f"{produced}_rows" in outputs:\n',
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: accept field number zero as a field",
+        module="graph_patch.py",
+        old='            raise _RefusedError("field number 0 does not exist")\n',
+        new="            pass\n",
         tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(

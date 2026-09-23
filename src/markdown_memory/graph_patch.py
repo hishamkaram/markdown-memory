@@ -36,10 +36,11 @@ _VARINT, _FIXED64, _LENGTH, _START_GROUP, _END_GROUP, _FIXED32 = range(6)
 
 # ModelProto.graph
 _MODEL_GRAPH = 7
-# GraphProto.node, .initializer, .value_info
-_GRAPH_NODE, _GRAPH_INITIALIZER, _GRAPH_VALUE_INFO = 1, 5, 13
+# GraphProto.node, .initializer, .output, .value_info
+_GRAPH_NODE, _GRAPH_INITIALIZER, _GRAPH_OUTPUT, _GRAPH_VALUE_INFO = 1, 5, 12, 13
 # NodeProto.input, .output, .name, .op_type, .attribute
 _NODE_INPUT, _NODE_OUTPUT, _NODE_NAME, _NODE_OP_TYPE, _NODE_ATTRIBUTE = 1, 2, 3, 4, 5
+_NODE_DOC_STRING, _NODE_DOMAIN = 6, 7
 # TensorProto.dims, .data_type, .name
 _TENSOR_DIMS, _TENSOR_DATA_TYPE, _TENSOR_NAME = 1, 2, 8
 # AttributeProto.name, .i
@@ -70,6 +71,8 @@ def _read_varint(data: bytes, position: int, end: int) -> tuple[int, int]:
     while position < end:
         byte = data[position]
         position += 1
+        if shift == 63 and byte > 1:
+            raise _RefusedError("varint does not fit in 64 bits")
         result |= (byte & 0x7F) << shift
         if not byte & 0x80:
             return result, position
@@ -87,6 +90,8 @@ def _fields(data: bytes, start: int, end: int) -> list[_Field]:
         tag_start = position
         tag, position = _read_varint(data, position, end)
         number, wire = tag >> 3, tag & 7
+        if number == 0:
+            raise _RefusedError("field number 0 does not exist")
         if wire == _LENGTH:
             length, position = _read_varint(data, position, end)
             value_start, position = position, position + length
@@ -151,6 +156,9 @@ class _Node:
     inputs: list[str]
     outputs: list[str]
     attributes: list[_Field]
+    #: Anything beyond input, output, name and op_type. The replacements are rebuilt from
+    #: those four, so a node carrying more than them is one this must not rewrite.
+    extras: list[int]
 
 
 def _nodes(data: bytes, graph_fields: list[_Field]) -> list[_Node]:
@@ -169,6 +177,11 @@ def _nodes(data: bytes, graph_fields: list[_Field]) -> list[_Node]:
                 inputs=_strings(data, inner, _NODE_INPUT),
                 outputs=_strings(data, inner, _NODE_OUTPUT),
                 attributes=[entry for entry in inner if entry.number == _NODE_ATTRIBUTE],
+                extras=[
+                    entry.number
+                    for entry in inner
+                    if entry.number not in {_NODE_INPUT, _NODE_OUTPUT, _NODE_NAME, _NODE_OP_TYPE}
+                ],
             )
         )
     return parsed
@@ -255,11 +268,16 @@ def _rewrite(model: bytes) -> bytes:
         for name in node.inputs:
             consumers[name] = consumers.get(name, 0) + 1
 
+    produced_by_graph = {
+        _value_info_name(model, field) for field in graph if field.number == _GRAPH_OUTPUT
+    }
     candidates = [
         (dequantize, gather)
         for dequantize in nodes
         if dequantize.op_type == "DequantizeLinear"
-        for gather in _matching_gather(model, dequantize, nodes, initializers, consumers)
+        for gather in _matching_gather(
+            model, dequantize, nodes, initializers, consumers, produced_by_graph
+        )
     ]
     if len(candidates) != 1:
         raise _RefusedError(f"{len(candidates)} nodes match the pattern, expected exactly one")
@@ -310,10 +328,15 @@ def _matching_gather(
     nodes: list[_Node],
     initializers: dict[str, tuple[int, list[int]]],
     consumers: dict[str, int],
+    outputs: set[str],
 ) -> list[_Node]:
     """The one Gather this DequantizeLinear may swap with, if everything lines up."""
     if dequantize.attributes or not 2 <= len(dequantize.inputs) <= 3:
         return []  # `axis` or `block_size` would make the swap change the values
+    if dequantize.extras:
+        # A domain puts the operator in another namespace, and a doc string would be
+        # dropped by the rebuild. Either way this is not the node this knows how to move.
+        return []
     table = initializers.get(dequantize.inputs[0])
     if table is None or table[0] != _TENSOR_INT8 or len(table[1]) != 2:
         return []
@@ -326,13 +349,22 @@ def _matching_gather(
     produced = dequantize.outputs[0]
     if len(dequantize.outputs) != 1 or consumers.get(produced) != 1:
         return []
-    gathers = [
+    if produced in outputs:
+        # The graph hands the dequantized table out; removing its producer would leave an
+        # output nothing writes.
+        return []
+    if f"{produced}_rows" in consumers or f"{produced}_rows" in outputs:
+        return []  # the name the rewrite introduces is already taken
+    return [
         node
         for node in nodes
         if node.op_type == "Gather"
         and node.inputs[:1] == [produced]
         and len(node.inputs) == 2
         and len(node.outputs) == 1
+        and not node.extras
         and _axis_is_zero(model, node)
+        # Positions are kept, so swapping a Gather that comes first would put the
+        # DequantizeLinear before the rows it reads and leave the graph unsorted.
+        and node.field.start > dequantize.field.start
     ]
-    return gathers
