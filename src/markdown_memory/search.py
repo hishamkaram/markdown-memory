@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
-from markdown_memory.db import Database
+from markdown_memory.db import WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.indexer import Embedder
 from markdown_memory.models import SearchResult
@@ -282,14 +282,32 @@ class HybridSearcher:
     def _search_once(self, query: str, limit: int) -> tuple[list[SearchResult], bool]:
         """One ranking pass: the results, and whether a better-ranked section had vanished."""
         candidates = max(self._candidates, limit)
+        # Stored vectors and the one this query would produce come from different models,
+        # so the distance between them measures nothing. Keyword ranking reads no vector
+        # and stays exactly as accurate as it was, so the search still answers - with the
+        # half of it that is still true. `index_status` carries the reason to the agent.
+        comparable = self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None
         try:
             fts_future = self._pool.submit(self._keyword_ranking, query, candidates)
-            vec_future = self._pool.submit(self._vector_ranking, query, candidates)
+            vec_future = (
+                self._pool.submit(self._vector_ranking, query, candidates) if comparable else None
+            )
         except RuntimeError as exc:  # the executor refuses work after close()
             raise SearchError("The search engine has been shut down") from exc
         fts_ranking, fts_error = _settle(fts_future, [])
-        (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
-        if fts_error is not None and vec_error is not None:
+        vec_ranking: list[int] = []
+        passages: dict[int, str] = {}
+        vec_error: MarkdownMemoryError | None = None
+        if vec_future is None:
+            logger.warning(
+                "Ranking on keywords alone: the stored vectors were not built by the model "
+                "answering now"
+            )
+        else:
+            (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
+        # With vector ranking suppressed there is no other index to fall back on, so a
+        # keyword failure is the whole search failing.
+        if fts_error is not None and (vec_error is not None or not comparable):
             raise fts_error
         for name, error in (("keyword", fts_error), ("vector", vec_error)):
             if error is not None:

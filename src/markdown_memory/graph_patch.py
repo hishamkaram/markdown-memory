@@ -36,15 +36,19 @@ _VARINT, _FIXED64, _LENGTH, _START_GROUP, _END_GROUP, _FIXED32 = range(6)
 
 # ModelProto.graph
 _MODEL_GRAPH = 7
-# GraphProto.node, .initializer, .output, .value_info
-_GRAPH_NODE, _GRAPH_INITIALIZER, _GRAPH_OUTPUT, _GRAPH_VALUE_INFO = 1, 5, 12, 13
+# GraphProto.node, .initializer, .input, .output, .value_info
+_GRAPH_NODE, _GRAPH_INITIALIZER, _GRAPH_INPUT, _GRAPH_OUTPUT, _GRAPH_VALUE_INFO = 1, 5, 11, 12, 13
 # NodeProto.input, .output, .name, .op_type, .attribute
 _NODE_INPUT, _NODE_OUTPUT, _NODE_NAME, _NODE_OP_TYPE, _NODE_ATTRIBUTE = 1, 2, 3, 4, 5
 _NODE_DOC_STRING, _NODE_DOMAIN = 6, 7
 # TensorProto.dims, .data_type, .name
 _TENSOR_DIMS, _TENSOR_DATA_TYPE, _TENSOR_NAME = 1, 2, 8
-# AttributeProto.name, .i
-_ATTRIBUTE_NAME, _ATTRIBUTE_INT = 1, 3
+# AttributeProto.name, .i, .type
+_ATTRIBUTE_NAME, _ATTRIBUTE_INT, _ATTRIBUTE_TYPE = 1, 3, 20
+#: The only fields an `axis = 0` attribute may carry. Anything else - `ref_attr_name`
+#: above all, which makes the value come from elsewhere at instantiation - means the
+#: attribute does not say what it appears to say.
+_AXIS_FIELDS = frozenset({_ATTRIBUTE_NAME, _ATTRIBUTE_INT, _ATTRIBUTE_TYPE})
 # ValueInfoProto.name
 _VALUE_INFO_NAME = 1
 _TENSOR_INT8 = 3
@@ -233,6 +237,8 @@ def _elements(shape: list[int]) -> int:
 def _axis_is_zero(data: bytes, node: _Node) -> bool:
     for attribute in node.attributes:
         inner = _fields(data, attribute.value_start, attribute.value_end)
+        if any(field.number not in _AXIS_FIELDS for field in inner):
+            return False  # an attribute carrying more than a plain integer value
         name = _only(inner, _ATTRIBUTE_NAME)
         if name is None or _text(data, name) != "axis":
             return False  # an attribute this does not model
@@ -280,7 +286,14 @@ def _rewrite(model: bytes) -> bytes:
     }
     written_by = {name: node.field.start for node in nodes for name in node.outputs}
     # Every name already spoken for, so the one the rewrite introduces cannot shadow one.
-    taken = set(written_by) | set(consumers) | set(initializers) | produced_by_graph
+    # Graph inputs and `value_info` entries name tensors no node writes, so a name can be
+    # declared there and still be free of every other set here.
+    declared = {
+        _value_info_name(model, field)
+        for field in graph
+        if field.number in (_GRAPH_INPUT, _GRAPH_VALUE_INFO)
+    }
+    taken = set(written_by) | set(consumers) | set(initializers) | produced_by_graph | declared
     candidates = [
         (dequantize, gather)
         for dequantize in nodes

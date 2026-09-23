@@ -386,6 +386,45 @@ MUTATIONS = (
         tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
     ),
     Mutation(
+        name="weights: treat a model that cannot say which weights it is as the right one",
+        module="indexer.py",
+        old="        if weights == recorded:\n",
+        new="        if weights is None or weights == recorded:\n",
+        tests="test_weights_that_cannot_be_identified_are_not_assumed_to_be_the_right_ones",
+    ),
+    Mutation(
+        name="weights: fail a run with nothing to embed because the model will not load",
+        module="indexer.py",
+        old=(
+            '            logger.warning("Cannot check which weights built this index: '
+            'the model will not load")\n'
+        ),
+        new="            raise\n",
+        tests="test_a_model_that_will_not_load_does_not_fail_a_run_that_needs_no_embedding",
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
+        name="search: rank this model's query against another model's vectors",
+        module="search.py",
+        old="        comparable = self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None\n",
+        new="        comparable = True\n",
+        tests="test_vectors_from_another_model_are_not_ranked_against_this_ones_query",
+    ),
+    Mutation(
+        name="graph: let the rewrite shadow a name only the graph's inputs declare",
+        module="graph_patch.py",
+        old="        if field.number in (_GRAPH_INPUT, _GRAPH_VALUE_INFO)\n",
+        new="        if False\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: read an axis that is taken from somewhere else as a plain zero",
+        module="graph_patch.py",
+        old="        if any(field.number not in _AXIS_FIELDS for field in inner):\n",
+        new="        if False:  # the attribute is read as though it said what it appears to\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
         name="status: report a mismatched index as verified anyway",
         module="db.py",
         old="            verified=verified and weights_mismatch is None,\n",
@@ -453,7 +492,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 6389),',
+        old='    ("README.md", 6478),',
         new='    ("README.md", 5062),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

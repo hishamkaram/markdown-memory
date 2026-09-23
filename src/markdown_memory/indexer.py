@@ -1154,19 +1154,40 @@ class Indexer:
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if recorded is None:
             return  # no provenance to contradict
-        self._embedder.warm_up()
+        try:
+            self._embedder.warm_up()
+        except ModelLoadError:
+            # The model cannot be loaded at all, so this run cannot write a vector even if
+            # every file changed; the first document that needs embedding raises on its
+            # own. Failing here instead would turn a run that had nothing to do into an
+            # error, and would do it on the one path - no model - where the index is in no
+            # danger whatsoever.
+            logger.warning("Cannot check which weights built this index: the model will not load")
+            return
         weights = self._embedder.weights_revision
-        if weights is None or weights == recorded:
+        if weights == recorded:
             self._db.record_weights_mismatch(None)
             return
-        message = (
-            f"The weights behind {self._embedder.model_name} changed since this index was "
-            f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
-            "query would produce now come from different models. Nothing has been "
-            "discarded and nothing new is being indexed; re-index this documentation "
-            f"root from scratch (delete {self._db.path} and run index_directory) to make "
-            "them comparable again."
-        )
+        if weights is None:
+            # The model loaded, so something answered - but it cannot say which weights it
+            # is. That is not "nothing to compare": vectors written now would be unlabelled
+            # and indistinguishable from the ones already stored, which is precisely the
+            # state this guard exists to prevent.
+            message = (
+                f"Which weights {self._embedder.model_name} is running could not be read, so "
+                "there is no way to tell whether they are the ones that built this index "
+                f"({recorded[:12]}). Nothing has been discarded and nothing new is being "
+                "indexed; repair the model cache and run index_directory again."
+            )
+        else:
+            message = (
+                f"The weights behind {self._embedder.model_name} changed since this index was "
+                f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
+                "query would produce now come from different models. Nothing has been "
+                "discarded and nothing new is being indexed; re-index this documentation "
+                f"root from scratch (delete {self._db.path} and run index_directory) to make "
+                "them comparable again."
+            )
         self._db.record_weights_mismatch(message)
         self._db.revoke_coverage()
         raise IndexingError(message)

@@ -478,6 +478,59 @@ def test_an_index_answering_from_another_models_vectors_says_so_in_its_status(
     assert db.index_status(str(one_document)).verified
 
 
+class _UnreadableWeights(FakeEmbedder):
+    """An embedder that loads, and still cannot say which weights it loaded."""
+
+    @property
+    def weights_revision(self) -> str | None:
+        return None
+
+
+class _UnloadableModel(FakeEmbedder):
+    """An embedder whose model cannot be loaded at all."""
+
+    def warm_up(self) -> None:
+        raise ModelLoadError("the model will not load")
+
+
+def test_weights_that_cannot_be_identified_are_not_assumed_to_be_the_right_ones(
+    db: Database, one_document: Path
+) -> None:
+    """The model loaded, so something answered - it just cannot say which weights it is.
+
+    Treating that as "nothing to compare" wrote unlabelled vectors beside labelled ones
+    and cleared the very flag that said they might not match, which is the state this
+    guard exists to prevent.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
+
+    with pytest.raises(IndexingError, match="could not be read"):
+        Indexer(db, _UnreadableWeights()).index_directory(one_document)
+
+    assert db.count_rows("documents") == 1
+    status = db.index_status(str(one_document))
+    assert not status.verified
+    assert "could not be read" in (status.message() or "")
+
+
+def test_a_model_that_will_not_load_does_not_fail_a_run_that_needs_no_embedding(
+    db: Database, one_document: Path
+) -> None:
+    """The check loads the model to ask it which weights it is. When loading fails, this
+
+    run cannot write a vector whatever it does, so the index is in no danger - and an
+    incremental run over unchanged files has nothing to embed anyway. Failing here turned
+    a working no-op into an error on the one path where nothing could go wrong.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+
+    report = Indexer(db, _UnloadableModel()).index_directory(one_document)
+
+    assert report.files_unchanged == 1
+    assert db.index_status(str(one_document)).verified
+
+
 def test_an_index_with_nothing_to_lose_records_the_weights_it_is_built_with(
     db: Database, one_document: Path
 ) -> None:

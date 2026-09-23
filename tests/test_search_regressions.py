@@ -104,6 +104,45 @@ class TestSearchRobustness:
         finally:
             searcher.close()
 
+    def test_vectors_from_another_model_are_not_ranked_against_this_ones_query(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """A recorded weights mismatch means the stored vectors and the vector this query
+
+        would produce come from different models, so the distance between them measures
+        nothing. Indexing already refuses; searching used to go on ranking on them and
+        return the result as if it were semantic. Keyword ranking reads no vector, so it
+        still answers - and no query is embedded at all.
+        """
+        store(db, fake_embedder, "/d/a.md")
+        db.record_weights_mismatch("the weights changed")
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            embedded_before = len(fake_embedder.query_calls)
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+            assert len(fake_embedder.query_calls) == embedded_before
+        finally:
+            searcher.close()
+
+    def test_a_keyword_failure_during_a_mismatch_is_the_whole_search_failing(
+        self, db: Database, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With vector ranking suppressed there is no second index to degrade to."""
+        store(db, fake_embedder, "/d/a.md")
+        db.record_weights_mismatch("the weights changed")
+
+        def broken(*_arguments: object) -> list[int]:
+            raise RuntimeError("not a domain error")
+
+        monkeypatch.setattr(db, "fts_search", broken)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            with pytest.raises(SearchError, match="RuntimeError: not a domain error"):
+                searcher.search("body number")
+        finally:
+            searcher.close()
+
     def test_search_after_close_is_a_domain_error(
         self, db: Database, fake_embedder: FakeEmbedder
     ) -> None:

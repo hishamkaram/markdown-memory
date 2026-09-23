@@ -76,12 +76,22 @@ def dequantize_then_gather(
     collide: bool = False,
     no_outputs: bool = False,
     gather_axis: bool = False,
+    gather_ref_attr: bool = False,
+    collide_input: bool = False,
+    collide_value_info: bool = False,
     indices_via_node: bool = False,
 ) -> bytes:
     """The shipped pattern in miniature: an int8 table dequantized whole, then indexed."""
     table = bytes(range(12))
     scale = struct.pack("<f", 0.5) * (1 if scale_dims is None else max(1, scale_dims[0]))
     axis = field(5, field(1, b"axis") + number_field(3, 0) + number_field(20, 2))
+    if gather_ref_attr:
+        # `ref_attr_name` makes the value come from the enclosing function at
+        # instantiation, so the `i` written here is not what the node will run with.
+        axis = field(
+            5,
+            field(1, b"axis") + number_field(3, 0) + number_field(20, 2) + field(21, b"axis_ref"),
+        )
     nodes = [
         field(
             1,
@@ -100,7 +110,7 @@ def dequantize_then_gather(
                 ["table_f", "idx" if indices_via_node else "ids"],
                 ["rows"],
                 "gather",
-                axis if gather_axis else b"",
+                axis if gather_axis or gather_ref_attr else b"",
             ),
         ),
     ]
@@ -125,8 +135,12 @@ def dequantize_then_gather(
     graph += field(5, tensor("scale", FLOAT, scale_dims or [1], scale))
     graph += field(5, tensor("zero", INT8, [1], b"\x02"))
     graph += field(11, value_info("ids", INT64, [2]))
+    if collide_input:
+        graph += field(11, value_info("table_f_rows", INT64, [2]))
     graph += b"".join(outputs)
     graph += field(13, value_info("table_f", FLOAT, [4, 3]))
+    if collide_value_info:
+        graph += field(13, value_info("table_f_rows", FLOAT, [2, 3]))
     graph += extra
     return model(graph, outer)
 
@@ -185,6 +199,18 @@ def test_a_dangling_value_info_for_the_dequantized_table_is_dropped() -> None:
         ),
         ("the graph exports the dequantized table", dequantize_then_gather(export_table=True)),
         ("the name the rewrite introduces is taken", dequantize_then_gather(collide=True)),
+        (
+            "the name the rewrite introduces is a graph input",
+            dequantize_then_gather(collide_input=True),
+        ),
+        (
+            "the name the rewrite introduces is declared in value_info",
+            dequantize_then_gather(collide_value_info=True),
+        ),
+        (
+            "the gather's axis is taken from somewhere else",
+            dequantize_then_gather(gather_ref_attr=True),
+        ),
         ("field number zero", dequantize_then_gather(extra=varint(0 << 3 | 0) + b"\x01")),
         ("a node with no outputs at all", dequantize_then_gather(no_outputs=True)),
         ("the indices are not available that early", dequantize_then_gather(indices_via_node=True)),
