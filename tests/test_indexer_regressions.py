@@ -973,6 +973,22 @@ def test_a_derived_graph_that_is_a_symlink_is_never_trusted(cache: _Cache) -> No
     assert derived.read_bytes() == _DERIVED
 
 
+def test_a_directory_where_the_stamp_belongs_is_repaired(cache: _Cache) -> None:
+    """`os.replace` will not put a file where a directory is, and the stamp reads back as
+
+    simply invalid, so the verification it ends would run again on every start and end the
+    same way - a cache holding perfectly good model files that can never be loaded.
+    """
+    cache.model_dir.mkdir(parents=True)
+    cache.write(cache.model_dir)
+    (cache.model_dir / ".verified").mkdir()
+    (cache.model_dir / ".verified" / "stray.txt").write_text("")
+
+    cache.embedder().warm_up()
+
+    assert (cache.model_dir / ".verified").is_file()
+
+
 def test_a_directory_where_a_model_file_belongs_is_repaired(cache: _Cache) -> None:
     """`unlink` cannot clear a directory, and the exception left the cache unusable."""
     cache.model_dir.mkdir(parents=True)

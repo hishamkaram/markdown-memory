@@ -259,6 +259,14 @@ MUTATIONS = (
         tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
     ),
     Mutation(
+        name="cache: leave a directory sitting where the stamp goes",
+        module="indexer.py",
+        old="    if stamped.is_dir() and not stamped.is_symlink():\n",
+        new="    if False:  # a directory there is somebody else's problem\n",
+        tests="test_a_directory_where_the_stamp_belongs_is_repaired",
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
         name="cache: try to unlink a directory where a model file belongs",
         module="indexer.py",
         old="            _remove(path)  # only what is proven wrong\n",

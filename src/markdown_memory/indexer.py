@@ -411,7 +411,13 @@ def _write_stamp(model_dir: Path) -> None:
     temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
     _remove(temporary)  # a stamp left behind by a crash under this same pid
     _write_new_file(temporary, json.dumps(stamp).encode("utf-8"))
-    os.replace(temporary, model_dir / _VERIFIED_STAMP)
+    stamped = model_dir / _VERIFIED_STAMP
+    if stamped.is_dir() and not stamped.is_symlink():
+        # `os.replace` will not put a file where a directory is, and the stamp is read
+        # back as simply invalid, so the repair it ends would run again on every start
+        # and end the same way. Nothing of ours is ever a directory here.
+        _remove(stamped)
+    os.replace(temporary, stamped)
 
 
 def _write_new_file(path: Path, payload: bytes) -> None:
