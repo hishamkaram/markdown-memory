@@ -13,7 +13,6 @@ from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.exceptions import DatabaseError, IndexingError
 from markdown_memory.indexer import (
     GEMMA_DOCUMENT_PROMPT,
-    GEMMA_FILES,
     GEMMA_QUERY_PROMPT,
     Embedder,
     EmbeddingGemmaEmbedder,
@@ -453,25 +452,6 @@ class TestEmbedderPresets:
             "title: none | text: ",
             "task: search result | query: ",
         )
-
-    def test_nothing_is_downloaded_when_the_files_are_present(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import huggingface_hub
-
-        def forbidden(*args: object, **kwargs: object) -> str:
-            raise AssertionError("network access attempted")
-
-        monkeypatch.setattr(huggingface_hub, "snapshot_download", forbidden)
-        embedder = EmbeddingGemmaEmbedder(cache_dir=tmp_path)
-        for name in GEMMA_FILES:
-            target = tmp_path / "embeddinggemma-300m-onnx" / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(b"x")
-        embedder._download()  # must not raise
-        (tmp_path / "embeddinggemma-300m-onnx" / GEMMA_FILES[0]).unlink()
-        with pytest.raises(AssertionError, match="network access attempted"):
-            embedder._download()
 
     def test_bge_queries_get_the_retrieval_instruction(
         self, monkeypatch: pytest.MonkeyPatch

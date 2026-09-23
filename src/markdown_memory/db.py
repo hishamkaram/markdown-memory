@@ -55,6 +55,13 @@ SCHEMA_VERSION = 4
 #: the new one is left alone - a format change repairs a tree file by file, and resumes
 #: where it stopped if it is interrupted.
 VECTOR_FORMAT = 2
+#: Meta key holding the weights revision the stored vectors were built from. It lives here
+#: because `clear()` has to forget it in the same transaction that deletes them.
+WEIGHTS_META_KEY = "embedding_weights_revision"
+#: Set when the weights behind an unchanged model name changed under an existing index.
+#: It holds the sentence an agent is shown, because the index is then answering from
+#: vectors one model built while the next query would be embedded by another.
+WEIGHTS_MISMATCH_KEY = "embedding_weights_mismatch"
 _LEGACY_VECTORS = 1
 
 _SECTION_ID_META_KEY = "next_section_id"
@@ -224,6 +231,24 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
         (_GENERATION_META_KEY,),
     )
+
+
+def _forget_weights_without_vectors(conn: sqlite3.Connection) -> None:
+    """Drop the weights metadata once the vectors it describes are gone.
+
+    Which weights produced the vectors is a fact about the vectors, so it belongs to the
+    same transaction that removes them - a purge of the last document, a rebuild for a new
+    vector size, a discard for a changed model. Kept behind, it would have the next run
+    compare a new model against the revision of a model whose output no longer exists, and
+    have search rank on keywords alone over an index with nothing wrong with it.
+
+    Heading-only documents hold no vectors, so the test is the vectors themselves rather
+    than the document rows above them.
+    """
+    if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None:
+        return
+    conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
+    conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
 
 
 def _directory_prefix(directory: str) -> str:
@@ -487,6 +512,7 @@ class Database:
         )
         with self.transaction() as tx:
             dropped = tx.execute("DELETE FROM documents").rowcount
+            _forget_weights_without_vectors(tx)
             # Every root's documents are gone, including roots this process never looked
             # at; a certificate that survived would vouch for an empty tree.
             self.revoke_coverage(tx)
@@ -681,6 +707,11 @@ class Database:
                 certificate = conn.execute(
                     "SELECT verified FROM index_coverage WHERE root = ?", (root,)
                 ).fetchone()
+                # In the same snapshot as the rest: a verdict that mixes one moment's
+                # certificate with another's provenance describes no moment at all.
+                mismatch = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,)
+                ).fetchone()
                 stale_vectors = int(
                     conn.execute(
                         "SELECT COUNT(*) FROM documents "
@@ -711,7 +742,15 @@ class Database:
             FileFailure(file_path=str(path), message=str(message)) for path, message in rows
         )
         verified = certificate is not None and bool(certificate[0]) and whole
-        return IndexStatus(verified=verified, failures=failures, stale_vectors=stale_vectors)
+        weights_mismatch = str(mismatch[0]) if mismatch else None
+        return IndexStatus(
+            # A walk that read every file still cannot vouch for vectors built by a
+            # model that is no longer the one answering.
+            verified=verified and weights_mismatch is None,
+            failures=failures,
+            stale_vectors=stale_vectors,
+            weights_mismatch=weights_mismatch,
+        )
 
     def dismiss_notices(self, keys: Iterable[str]) -> None:
         """Forget the notices that have been delivered; any added since are kept."""
@@ -885,6 +924,10 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_SECTION_ID_META_KEY, str(section_id + 1)),
             )
+            # This write can remove the last vector in the index as well as add one: a
+            # document whose prose became headings alone embeds nothing, and its old
+            # vectors went with its old sections.
+            _forget_weights_without_vectors(conn)
         return Document(
             id=doc_id,
             file_path=file_path,
@@ -912,6 +955,7 @@ class Database:
                 deleted += conn.execute(
                     "DELETE FROM documents WHERE file_path = ?", (path,)
                 ).rowcount
+            _forget_weights_without_vectors(conn)
         return deleted
 
     def clear(self, notice: Callable[[int], str] | None = None) -> int:
@@ -922,12 +966,40 @@ class Database:
         """
         with self.transaction() as conn:
             discarded = conn.execute("DELETE FROM documents").rowcount
+            _forget_weights_without_vectors(conn)
             self.revoke_coverage(conn)
             if discarded and notice is not None:
                 _add_notice(conn, notice(discarded))
             return discarded
 
     # ------------------------------------------------------------------ sections
+
+    def record_weights_mismatch(self, message: str | None) -> None:
+        """Remember (or clear) that the index and the loaded model disagree.
+
+        Persisted rather than held in memory: every `search_docs` and `list_documents`
+        answer carries an `index_status`, and a fact this serious may not depend on
+        which process, or which run, happens to have noticed it.
+        """
+        with self.transaction() as conn:
+            if message is None:
+                conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
+            else:
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (WEIGHTS_MISMATCH_KEY, message),
+                )
+
+    def forget_weights_revision(self) -> None:
+        """Drop the recorded weights revision: no documents, so nothing it can describe.
+
+        `clear()` does this in the same transaction as the delete. This exists for every
+        other way the index empties - a purge of the last document, a rebuild for a new
+        vector size, the v1 format discard - where the rows go without going through it.
+        """
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
 
     def get_sections(self, doc_id: int) -> list[Section]:
         """Every section of a document in source order."""

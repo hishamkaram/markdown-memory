@@ -12,7 +12,7 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
-from markdown_memory.db import Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.exceptions import SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
@@ -104,6 +104,142 @@ class TestSearchRobustness:
         finally:
             searcher.close()
 
+    def test_vectors_from_another_model_are_not_ranked_against_this_ones_query(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """Search asks which weights it is running for itself, rather than trusting a flag
+
+        an indexing run would have had to write. A cache whose weights changed while no
+        document did leaves indexing a clean no-op, so no run would ever set that flag -
+        and every query would go on being ranked against vectors from another model.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+        finally:
+            searcher.close()
+
+    def test_a_keyword_failure_during_a_mismatch_is_the_whole_search_failing(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Losing one index degrades to the other; losing both is an error, and a
+
+        suppressed vector ranking is one of them lost.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+
+        def broken(*_arguments: object) -> list[int]:
+            raise RuntimeError("not a domain error")
+
+        monkeypatch.setattr(db, "fts_search", broken)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            with pytest.raises(SearchError, match="RuntimeError: not a domain error"):
+                searcher.search("body number")
+        finally:
+            searcher.close()
+
+    def test_the_weights_are_read_after_the_query_is_embedded_not_before(
+        self, db: Database
+    ) -> None:
+        """The embedder loads lazily and cannot say which weights it is until it has
+
+        loaded, so asking first would suppress vector ranking on every first query of a
+        process - a healthy index answering as if it were broken.
+        """
+        embedder = _RevisedEmbedder("a" * 40, lazy=True)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            results = searcher.search("body number")
+            assert any(r.vec_rank is not None for r in results)
+        finally:
+            searcher.close()
+
+    def test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status(
+        self, db: Database
+    ) -> None:
+        """Weights can change while no document does, so no indexing run will ever write
+
+        that down. Without this the agent got keyword-only results and an `index_status`
+        still calling the index verified - told it was healthy by the one field that
+        exists to say otherwise.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        assert "keyword ranking" not in (db.index_status("/d").message() or "")
+
+        searcher = HybridSearcher(db, embedder)
+        try:
+            searcher.search("body number")
+        finally:
+            searcher.close()
+
+        status = db.index_status("/d")
+        assert not status.verified
+        assert "only keyword ranking is used" in (status.message() or "")
+
+    def test_weights_that_come_back_clear_the_mismatch_the_search_recorded(
+        self, db: Database
+    ) -> None:
+        """Nobody else can withdraw it. Weights that change back change no document, so
+
+        no indexing run follows to notice, and the index stayed unverified and
+        keyword-only for good over a disagreement that had ended.
+        """
+        embedder = _RevisedEmbedder("b" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            searcher.search("body number")
+            assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+        finally:
+            searcher.close()
+
+        healthy = HybridSearcher(db, _RevisedEmbedder("a" * 40))
+        try:
+            results = healthy.search("body number")
+        finally:
+            healthy.close()
+
+        assert any(r.vec_rank is not None for r in results)
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+
+    def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checking the revision does not freeze it. A model *name* change in another
+
+        process discards every vector and rebuilds it, and rows read after the check are
+        not the rows it vouched for - the query was embedded by one model and the vectors
+        it is measured against were written by another.
+        """
+        embedder = _RevisedEmbedder("a" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        original = db.vec_search
+
+        def rebuild_then_search(*arguments: object) -> list[tuple[int, float]]:
+            db.set_meta(WEIGHTS_META_KEY, "b" * 40)  # another process got there first
+            return original(*arguments)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(db, "vec_search", rebuild_then_search)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+        finally:
+            searcher.close()
+
     def test_search_after_close_is_a_domain_error(
         self, db: Database, fake_embedder: FakeEmbedder
     ) -> None:
@@ -111,6 +247,23 @@ class TestSearchRobustness:
         searcher.close()
         with pytest.raises(SearchError, match="shut down"):
             searcher.search("anything")
+
+
+class _RevisedEmbedder(FakeEmbedder):
+    """A FakeEmbedder that reports a weights revision, optionally only once loaded."""
+
+    def __init__(self, revision: str, *, lazy: bool = False) -> None:
+        super().__init__()
+        self._revision = revision
+        self._loaded = not lazy
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._revision if self._loaded else None
+
+    def embed_query(self, text: str) -> list[float]:
+        self._loaded = True  # the query is what loads the model
+        return super().embed_query(text)
 
 
 def keyword_sections(results: Sequence[SearchResult]) -> set[str]:

@@ -10,25 +10,34 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import logging
 import math
 import os
+import shutil
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from markdown_memory.db import DEFAULT_EMBEDDING_DIM, VECTOR_FORMAT, Database
+from markdown_memory.db import (
+    DEFAULT_EMBEDDING_DIM,
+    VECTOR_FORMAT,
+    WEIGHTS_META_KEY,
+    Database,
+)
 from markdown_memory.exceptions import (
     EmbeddingError,
+    ForeignWeightsError,
     IndexBusyError,
     IndexingError,
     MarkdownMemoryError,
     ModelLoadError,
 )
+from markdown_memory.graph_patch import gather_before_dequantize
 from markdown_memory.models import FileFailure, IndexReport, SectionVectors
 from markdown_memory.parser import MarkdownParser
 
@@ -48,7 +57,40 @@ GEMMA_REPOSITORY = "onnx-community/embeddinggemma-300m-ONNX"
 # Pinned so that an upstream re-export can never silently change stored vectors.
 GEMMA_REVISION = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
 GEMMA_MODEL_FILE = "onnx/model_quantized.onnx"
-GEMMA_FILES = (GEMMA_MODEL_FILE, GEMMA_MODEL_FILE + "_data", "tokenizer.json")
+# Size and sha256 of every file at GEMMA_REVISION, from the Hub's paths-info API. This is
+# what stands between a damaged cache and onnxruntime: huggingface_hub checks only the
+# size of what it downloads, and hands back a file that is already on disk without reading
+# it at all.
+GEMMA_MANIFEST: Mapping[str, tuple[int, str]] = {
+    GEMMA_MODEL_FILE: (
+        567_874,
+        "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8",
+    ),
+    GEMMA_MODEL_FILE + "_data": (
+        308_890_624,
+        "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0",
+    ),
+    "tokenizer.json": (
+        20_323_312,
+        "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+    ),
+}
+GEMMA_FILES: tuple[str, ...] = tuple(GEMMA_MANIFEST)
+# The graph the embedder actually runs is derived from the downloaded one on this machine:
+# the same weights, with the vocabulary gathered before it is dequantized, which is worth
+# about 1 GB per query (see graph_patch). It is never fetched, and it is regenerated - not
+# re-downloaded - whenever it is missing or does not match. Its sha256 is also the
+# rewrite's version: changing the rewriter changes this, and the tests say so.
+DERIVED_GRAPH_FILE = "onnx/model_quantized.gather_first.onnx"
+DERIVED_GRAPH_SHA256 = "ce47d05e0aa9abd97a474a7a951c2814060ddc2f9822dbb0ad30a407aa6e95ea"
+# Versions before this one kept the files in `_GEMMA_DIR_PREFIX` itself, with no revision
+# anywhere in the path: moving GEMMA_REVISION would have kept serving the old weights
+# under a model name that claims to be the new ones. That folder is migrated, not
+# re-downloaded, the first time this runs.
+_GEMMA_DIR_PREFIX = "embeddinggemma-300m-onnx"
+# One lock for every revision, so two versions starting at once still exclude each other.
+_GEMMA_LOCK_NAME = f"{_GEMMA_DIR_PREFIX}.lock"
+_VERIFIED_STAMP = ".verified"
 GEMMA_DIMENSION = 768
 GEMMA_MAX_TOKENS = 512
 # Prompts from the EmbeddingGemma model card; the model is trained to expect them.
@@ -62,12 +104,21 @@ GEMMA_DOCUMENT_PROMPT = "title: none | text: "
 # that runs beside an editor. Sorting by token count instead of characters was measured
 # too: worth ~30% at batch 4 only, which a second tokenisation pass cancels out.
 _GEMMA_BATCH_SIZE = 4
-# Thread count is left to onnxruntime. Pinning it was measured from 4 to 16 threads and
-# every value sat inside the run-to-run noise, except the full logical count, which was
-# consistently worse. Deriving it from the CPU topology is a trap: this machine reports 16
-# physical cores and 16 is the one value that loses. Only a machine that disagrees with
-# the default needs MARKDOWN_MEMORY_THREADS.
+# Thread count is left to onnxruntime; what is *not* left to it is spinning (see
+# _SPIN_CONFIG). Pinning the count was measured from 4 to 16 threads and every value sat
+# inside the run-to-run noise on wall time. That measurement missed the cost that matters
+# for a tool running beside an editor: with spinning off, 16 threads and 4 threads differ
+# by ~30% of CPU and nothing in wall time, so the count stays onnxruntime's business and
+# only a machine that disagrees with it needs MARKDOWN_MEMORY_THREADS.
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
+# onnxruntime's intra-op threads spin-wait between operators by default. That is a good
+# trade for a server answering back-to-back requests and a bad one here: measured on a
+# 16-core machine, one warm query cost 7.2 s of CPU across 16 spinning threads, and the
+# pool kept burning ~0.5 core-seconds per second *after* the query returned. Turning
+# spinning off made the same query 0.6 s of CPU and ~40% faster in wall time, because the
+# spinners were competing with the thread doing the work. Queries here arrive seconds
+# apart, so the wake-up cost spinning buys is never recovered.
+_SPIN_CONFIG = ("session.intra_op.allow_spinning", "0")
 #: What ``_printable`` leaves where it could not decode a byte of a file name.
 _UNDECODABLE = "�"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
@@ -95,6 +146,11 @@ class Embedder(Protocol):
     @property
     def dimension(self) -> int: ...
 
+    @property
+    def weights_revision(self) -> str | None: ...
+
+    def warm_up(self) -> None: ...
+
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -115,6 +171,7 @@ class FastEmbedEmbedder:
         self._dimension = dimension
         self._lock = threading.Lock()
         self._model: TextEmbedding | None = None
+        self._weights_revision: str | None = None
 
     @property
     def model_name(self) -> str:
@@ -123,6 +180,35 @@ class FastEmbedEmbedder:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def weights_revision(self) -> str | None:
+        """Which snapshot the loaded weights came from, or None before they are loaded.
+
+        fastembed pins no revision, so a deleted cache can come back with different
+        weights under an unchanged model name - and stored passage vectors would then be
+        compared against query vectors from a different model, with nothing to notice it.
+        huggingface_hub records the snapshot it fetched in `refs/main`.
+
+        Read once, when the model loads, and not on every call: the file can change under
+        a running process, and what matters is the weights that produced the vectors, not
+        whatever is on disk by the time somebody asks.
+        """
+        return self._weights_revision
+
+    def _read_weights_revision(self) -> str | None:
+        if self._model_name != BGE_SMALL_MODEL_NAME:
+            # `fastembed_model_dir` resolves one model's folder. Reading it for a
+            # different model would report a revision belonging to weights that are not
+            # the ones answering - worse than reporting none, which is merely unknown.
+            return None
+        directory = fastembed_model_dir(self._cache_dir)
+        if directory is None:
+            return None
+        try:
+            return (directory / "refs" / "main").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
 
     def warm_up(self) -> None:
         """Load (and if necessary download) the model now instead of on first query."""
@@ -173,7 +259,15 @@ class FastEmbedEmbedder:
                     self._model = TextEmbedding(
                         model_name=self._model_name,
                         cache_dir=None if self._cache_dir is None else str(self._cache_dir),
+                        # fastembed builds its own session, so the override reaches it only
+                        # through this argument; without it MARKDOWN_MEMORY_THREADS was
+                        # documented but ignored for this preset. fastembed exposes no
+                        # spinning switch (its add_extra_session_options knows only
+                        # enable_cpu_mem_arena), so capping the threads is the whole lever
+                        # here: at 4, a query cost 95 ms of CPU instead of 718 ms.
+                        threads=_inference_threads() or None,
                     )
+                    self._weights_revision = self._read_weights_revision()
                 except Exception as exc:
                     raise ModelLoadError(
                         f"Cannot load embedding model {self._model_name}: {exc}"
@@ -186,6 +280,223 @@ class FastEmbedEmbedder:
             return self._model
 
 
+def model_cache_root(cache_dir: Path | None = None) -> Path:
+    """Where every model this package downloads is kept."""
+    return cache_dir or Path.home() / ".cache" / "markdown-memory" / "models"
+
+
+def gemma_model_dir(cache_dir: Path | None = None) -> Path:
+    """The folder holding the pinned EmbeddingGemma revision.
+
+    A *sibling* of the unversioned folder older versions used, never a child, so the
+    migration can be one rename inside one directory - which no reader can catch
+    half-done.
+    """
+    return model_cache_root(cache_dir) / f"{_GEMMA_DIR_PREFIX}-{GEMMA_REVISION[:12]}"
+
+
+def fastembed_model_dir(cache_dir: Path | None) -> Path | None:
+    """The folder fastembed keeps bge-small in, or None when it cannot be derived.
+
+    Not guessable from the model name: fastembed downloads its own re-export of the
+    model (`qdrant/bge-small-en-v1.5-onnx-q`), so the repository is read out of its
+    registry rather than assumed.
+    """
+    if cache_dir is None:
+        return None
+    from fastembed import TextEmbedding
+
+    for entry in TextEmbedding.list_supported_models():
+        if not isinstance(entry, dict) or entry.get("model") != BGE_SMALL_MODEL_NAME:
+            continue
+        sources = entry.get("sources")
+        repository = sources.get("hf") if isinstance(sources, dict) else None
+        if isinstance(repository, str) and repository:
+            return cache_dir / ("models--" + repository.replace("/", "--"))
+    return None
+
+
+def _cache_path(model_dir: Path, name: str) -> Path | None:
+    """``model_dir/name``, or None when any directory on the way there is a symlink.
+
+    `_file_identity` only ever looked at the last component, so an `onnx` that pointed
+    somewhere else was trusted - and then repaired, which meant deleting and overwriting
+    files outside the cache entirely.
+    """
+    current = model_dir
+    for part in Path(name).parts:
+        if current.is_symlink():
+            return None
+        current = current / part
+    return current
+
+
+def _file_identity(path: Path) -> dict[str, int] | None:
+    """What a stamp remembers about one model file; None when it is not a plain file.
+
+    `ctime_ns` earns its place: `cp -p`, `tar x` and `rsync --inplace` all rewrite a
+    file's contents and then restore its old mtime, so size, mtime and inode can agree
+    across different bytes. Nothing in user space can set ctime back.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None  # a symlink into a blob store is not a file this cache vouches for
+    return {
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+        "inode": info.st_ino,
+        "device": info.st_dev,
+    }
+
+
+def _stamped_files(model_dir: Path) -> list[str]:
+    """Everything a stamp vouches for: the downloaded files, and the derived graph."""
+    names = list(GEMMA_MANIFEST)
+    if _identity_in(model_dir, DERIVED_GRAPH_FILE) is not None:
+        names.append(DERIVED_GRAPH_FILE)
+    return names
+
+
+def _identity_in(model_dir: Path, name: str) -> dict[str, int] | None:
+    """The identity of one cached file, refusing a path that leaves the cache."""
+    path = _cache_path(model_dir, name)
+    return None if path is None else _file_identity(path)
+
+
+def _stamp_is_current(model_dir: Path) -> bool:
+    """Whether every file still looks exactly as it did when it was last verified.
+
+    Hashing 330 MB costs most of a second of one core, which is too much for every
+    server start when an editor starts one per session. This is a handful of `stat`
+    calls; anything that disagrees sends the files back to be hashed.
+    """
+    try:
+        stamp = json.loads((model_dir / _VERIFIED_STAMP).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(stamp, dict) or stamp.get("revision") != GEMMA_REVISION:
+        return False
+    if stamp.get("derived") != DERIVED_GRAPH_SHA256:
+        return False
+    recorded = stamp.get("files")
+    if not isinstance(recorded, dict) or set(recorded) != set(_stamped_files(model_dir)):
+        return False  # a derived graph that has gone missing is regenerated, not ignored
+    if model_dir.is_symlink():
+        return False
+    for name in recorded:
+        identity = _identity_in(model_dir, name)
+        # `None` means the path is not a regular file - a symlink, most likely. Nothing
+        # should be able to stamp one (`_stamped_files` leaves it out, `_unverified`
+        # calls it wrong and `_derive_graph` replaces it), and this is the line that
+        # makes a stamp that somehow recorded `None` stop matching `None` for ever.
+        if identity is None or recorded[name] != identity:
+            return False
+    return True
+
+
+def _write_stamp(model_dir: Path) -> None:
+    """Record what was just verified. Atomically: a half-written stamp is a false claim."""
+    stamp = {
+        "revision": GEMMA_REVISION,
+        # The rewrite's version. Without it, a package update that moves the pin - or
+        # fixes the rewriter - leaves the old derived graph in place, because the file
+        # itself has not changed and every identity still matches.
+        "derived": DERIVED_GRAPH_SHA256,
+        "files": {name: _file_identity(model_dir / name) for name in _stamped_files(model_dir)},
+    }
+    temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
+    _remove(temporary)  # a stamp left behind by a crash under this same pid
+    _write_new_file(temporary, json.dumps(stamp).encode("utf-8"))
+    stamped = model_dir / _VERIFIED_STAMP
+    if stamped.is_dir() and not stamped.is_symlink():
+        # `os.replace` will not put a file where a directory is, and the stamp is read
+        # back as simply invalid, so the repair it ends would run again on every start
+        # and end the same way. Nothing of ours is ever a directory here.
+        _remove(stamped)
+    os.replace(temporary, stamped)
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    """Create ``path`` with its contents, refusing to follow a symlink or reuse a file.
+
+    The temporary names these writes use are predictable (the pid), and a plain write
+    follows a symlink planted at one of them: the caller would then overwrite whatever it
+    points at, anywhere the user can write. `O_EXCL | O_NOFOLLOW` makes both refusals the
+    kernel's.
+    """
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
+
+
+def _remove(path: Path) -> None:
+    """Delete whatever sits at ``path``, file or directory.
+
+    A directory where a model file belongs is not something `unlink` can clear, and a
+    cache that cannot be repaired is a server that never starts again.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+    if path.exists() or path.is_symlink():
+        # Say so here, where the path is known, rather than failing three lines later on
+        # a rename that cannot explain itself.
+        raise ModelLoadError(f"Cannot clear {path} to repair the model cache")
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _unverified(model_dir: Path) -> list[str]:
+    """The model files that are missing, the wrong size, or the wrong bytes."""
+    problems: list[str] = []
+    for name, (size, checksum) in GEMMA_MANIFEST.items():
+        path = _cache_path(model_dir, name)
+        before = None if path is None else _file_identity(path)
+        if path is None or before is None or before["size"] != size:
+            problems.append(name)
+        elif _hash_file(path) != checksum or _file_identity(path) != before:
+            # Second identity: a file rewritten while it was being read was never hashed
+            # as it now stands, so the answer that came back means nothing.
+            problems.append(name)
+    return problems
+
+
+@contextlib.contextmanager
+def _model_cache_lock(cache_dir: Path | None, *, exclusive: bool) -> Iterator[None]:
+    """Serialise verification, repair and session construction across processes.
+
+    Shared while a verified cache is being opened, exclusive while it is being changed,
+    so nothing can repair files another process has verified but not yet handed to
+    onnxruntime. The kernel drops a `flock` when the process dies, so a crash leaves
+    nothing held. A model cache on NFS or SMB shared between machines is out of scope:
+    `flock` can be local-only there - the boundary SQLite's WAL already has.
+    """
+    root = model_cache_root(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / _GEMMA_LOCK_NAME).open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 class EmbeddingGemmaEmbedder:
     """Google's EmbeddingGemma-300m (quantized ONNX, 768 dimensions) run with onnxruntime.
 
@@ -196,8 +507,8 @@ class EmbeddingGemmaEmbedder:
     """
 
     def __init__(self, *, cache_dir: Path | None = None) -> None:
-        base = cache_dir or Path.home() / ".cache" / "markdown-memory" / "models"
-        self._model_dir = base / "embeddinggemma-300m-onnx"
+        self._cache_dir = cache_dir
+        self._model_dir = gemma_model_dir(cache_dir)
         self._lock = threading.Lock()
         self._session: _OrtSession | None = None
         self._tokenizer: Tokenizer | None = None
@@ -210,9 +521,14 @@ class EmbeddingGemmaEmbedder:
     def dimension(self) -> int:
         return GEMMA_DIMENSION
 
+    @property
+    def weights_revision(self) -> str | None:
+        return GEMMA_REVISION
+
     def warm_up(self) -> None:
         """Download (first run only) and load the model now instead of on first use."""
         self._load()
+        self._report_other_versions()
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return self._embed([GEMMA_DOCUMENT_PROMPT + text for text in texts])
@@ -253,39 +569,140 @@ class EmbeddingGemmaEmbedder:
 
     def _load(self) -> tuple[_OrtSession, Tokenizer]:
         with self._lock:
-            if self._session is None or self._tokenizer is None:
-                started = time.perf_counter()
-                try:
-                    import onnxruntime
-                    from tokenizers import Tokenizer
+            if self._session is not None and self._tokenizer is not None:
+                return self._session, self._tokenizer
+            started = time.perf_counter()
+            # Two passes at most: the first can find nothing worth trusting, and the
+            # second runs on a cache that was repaired under the exclusive lock in
+            # between - by this process or by whichever one held the lock first.
+            for attempt in range(2):
+                with _model_cache_lock(self._cache_dir, exclusive=False):
+                    if _stamp_is_current(self._model_dir):
+                        self._session, self._tokenizer = self._open()
+                        logger.info(
+                            "Loaded embedding model %s in %.2fs",
+                            GEMMA_REPOSITORY,
+                            time.perf_counter() - started,
+                        )
+                        return self._session, self._tokenizer
+                if attempt == 0:
+                    with _model_cache_lock(self._cache_dir, exclusive=True):
+                        try:
+                            self._repair()
+                        except MarkdownMemoryError:
+                            raise
+                        except Exception as exc:
+                            # Downloading, hashing and writing the stamp all raise things
+                            # the SDK would hide behind "Error executing tool": a full
+                            # disk, a revoked token, a read-only cache.
+                            raise ModelLoadError(
+                                f"Cannot prepare the model cache at {self._model_dir}: {exc}"
+                            ) from exc
+            raise ModelLoadError(
+                f"The files under {self._model_dir} still do not match {GEMMA_REPOSITORY} "
+                f"at {GEMMA_REVISION[:12]} after being replaced"
+            )
 
-                    self._download()
-                    tokenizer = Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))
-                    tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
-                    tokenizer.enable_padding()
-                    options = onnxruntime.SessionOptions()
-                    if threads := _inference_threads():
-                        options.intra_op_num_threads = threads
-                    self._session = onnxruntime.InferenceSession(
-                        str(self._model_dir / GEMMA_MODEL_FILE),
-                        options,
-                        providers=["CPUExecutionProvider"],
-                    )
-                    self._tokenizer = tokenizer
-                except Exception as exc:
-                    raise ModelLoadError(
-                        f"Cannot load embedding model {GEMMA_REPOSITORY}: {exc}"
-                    ) from exc
-                logger.info(
-                    "Loaded embedding model %s in %.2fs",
-                    GEMMA_REPOSITORY,
-                    time.perf_counter() - started,
+    def _open(self) -> tuple[_OrtSession, Tokenizer]:
+        """Build the tokenizer and session from files verification has just trusted.
+
+        A failure here is not a corruption signal, because these bytes were checked
+        against the manifest moments ago: nothing is deleted and nothing is downloaded.
+        What is left is an onnxruntime that cannot load this graph, a permission problem,
+        or a machine out of memory, and the original exception says which. (The server
+        still retries on the next request; what it will not do is fetch 330 MB again.)
+        """
+        try:
+            import onnxruntime
+            from tokenizers import Tokenizer
+
+            tokenizer = Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))
+            tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
+            tokenizer.enable_padding()
+            options = onnxruntime.SessionOptions()
+            options.add_session_config_entry(*_SPIN_CONFIG)
+            if threads := _inference_threads():
+                options.intra_op_num_threads = threads
+            derived = _cache_path(self._model_dir, DERIVED_GRAPH_FILE)
+            graph = derived if derived and _file_identity(derived) else None
+            if graph is None:  # refused, or not a regular file inside the cache
+                graph = self._model_dir / GEMMA_MODEL_FILE
+            session: _OrtSession = onnxruntime.InferenceSession(
+                str(graph),
+                options,
+                providers=["CPUExecutionProvider"],
+            )
+        except Exception as exc:
+            raise ModelLoadError(f"Cannot load embedding model {GEMMA_REPOSITORY}: {exc}") from exc
+        return session, tokenizer
+
+    def _repair(self) -> None:
+        """Bring the cache up to the manifest. Runs under the exclusive lock."""
+        if _stamp_is_current(self._model_dir):
+            return  # another process did the work while this one waited for the lock
+        if not self._model_dir.exists():
+            self._migrate_unversioned()
+        self._model_dir.mkdir(parents=True, exist_ok=True)
+        wrong = _unverified(self._model_dir)
+        for name in wrong:
+            path = _cache_path(self._model_dir, name)
+            if path is None:  # a symlinked directory on the way: refuse to write through it
+                raise ModelLoadError(
+                    f"{self._model_dir / name} leaves the model cache through a symlinked "
+                    "directory; move it aside by hand"
                 )
-            return self._session, self._tokenizer
+            _remove(path)  # only what is proven wrong
+        if wrong:
+            self._fetch()
+            still_wrong = _unverified(self._model_dir)
+            if still_wrong:
+                raise ModelLoadError(
+                    f"Downloaded {GEMMA_REPOSITORY} at {GEMMA_REVISION[:12]}, but "
+                    f"{', '.join(sorted(still_wrong))} does not match the expected size "
+                    "and checksum"
+                )
+        self._derive_graph()
+        _write_stamp(self._model_dir)
 
-    def _download(self) -> None:
-        if all((self._model_dir / name).is_file() for name in GEMMA_FILES):
+    def _derive_graph(self) -> None:
+        """Write the gather-first graph beside the downloaded one, from verified bytes.
+
+        It shares `model_quantized.onnx_data` untouched: the initializers name that file
+        relatively, and onnxruntime resolves it against the graph's own folder.
+        """
+        derived = _cache_path(self._model_dir, DERIVED_GRAPH_FILE)
+        if derived is None:
+            return  # the path leaves the cache; the published graph is still correct
+        if _file_identity(derived) is not None and _hash_file(derived) == DERIVED_GRAPH_SHA256:
             return
+        _remove(derived)
+        rewritten = gather_before_dequantize((self._model_dir / GEMMA_MODEL_FILE).read_bytes())
+        if rewritten is None:
+            return  # refused, and graph_patch has said why: run the published graph
+        temporary = derived.with_name(f"{derived.name}.{os.getpid()}")
+        _remove(temporary)
+        _write_new_file(temporary, rewritten)
+        os.replace(temporary, derived)
+        if _hash_file(derived) != DERIVED_GRAPH_SHA256:
+            # The source was verified, so this is the rewriter and the pin disagreeing.
+            # Neither is worth refusing to start over: run the published graph instead.
+            logger.warning(
+                "The rewritten embedding graph does not match its pinned checksum; "
+                "running the published graph, which costs about 1 GB more per query"
+            )
+            derived.unlink(missing_ok=True)
+
+    def _migrate_unversioned(self) -> None:
+        """Adopt the pre-versioning folder, if its bytes are the pinned revision's."""
+        legacy = model_cache_root(self._cache_dir) / _GEMMA_DIR_PREFIX
+        if not legacy.is_dir() or _unverified(legacy):
+            return  # nothing there, or bytes that have to be fetched anyway
+        # One rename, inside one directory: nobody sees half the files moved. Descriptors
+        # and mappings another process already holds keep reading the same inodes.
+        os.replace(legacy, self._model_dir)
+        logger.info("Moved the model cache %s to %s", legacy, self._model_dir)
+
+    def _fetch(self) -> None:
         from huggingface_hub import snapshot_download
 
         logger.info("Downloading %s (~330 MB, first run only)", GEMMA_REPOSITORY)
@@ -295,6 +712,30 @@ class EmbeddingGemmaEmbedder:
             allow_patterns=list(GEMMA_FILES),
             local_dir=self._model_dir,  # real files, not symlinks into a blob store
         )
+
+    def _report_other_versions(self) -> None:
+        """Say what other revisions cost, once, and never delete any of them.
+
+        Weights another checkout is using, or one pinned deliberately, are not this
+        process's to remove; saying how much room they take is.
+        """
+        others: dict[Path, int] = {}
+        for path in sorted(model_cache_root(self._cache_dir).glob(f"{_GEMMA_DIR_PREFIX}*")):
+            if path == self._model_dir or not path.is_dir():
+                continue
+            with contextlib.suppress(OSError):
+                others[path] = sum(
+                    entry.stat().st_size for entry in path.rglob("*") if entry.is_file()
+                )
+        if others:
+            logger.info(
+                "The model cache also holds %d older copy/copies of %s (%.0f MB in total): "
+                "%s. Nothing is deleted automatically; remove them to reclaim the space.",
+                len(others),
+                GEMMA_REPOSITORY,
+                sum(others.values()) / 1e6,
+                ", ".join(str(path) for path in others),
+            )
 
 
 class _OrtSession(Protocol):
@@ -324,6 +765,12 @@ def _inference_threads() -> int:
     Deriving it from the machine was tried and rejected: on a 16-core VM the topology
     says 16, which measured worse than the default, while every count from 4 to 12 sat
     inside the run-to-run noise. A wrong number is slower than no number.
+
+    That comparison was wall time only, which is the smaller half of the story. Once
+    spinning is off (``_SPIN_CONFIG``), the count barely moves wall time but does move
+    CPU: indexing the same passages took ~52 s of CPU at onnxruntime's count and ~37 s
+    capped at 4. The default stays onnxruntime's, because the right cap depends on what
+    else the machine is doing; this is the knob for saying so.
     """
     override = os.environ.get(_THREADS_ENV, "").strip()
     return int(override) if override.isdigit() and int(override) > 0 else 0
@@ -676,7 +1123,7 @@ class Indexer:
                 seen.add(file_path)
                 try:
                     counts = self._index_file(path, known_hashes.get(file_path), about_to_write)
-                except ModelLoadError:
+                except (ModelLoadError, ForeignWeightsError):
                     raise  # not this file's fault: every other file would fail identically
                 except (MarkdownMemoryError, OSError) as exc:
                     logger.warning("Failed to index %s: %s", _printable(file_path), exc)
@@ -726,6 +1173,77 @@ class Indexer:
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
         return report
+
+    def _refuse_foreign_weights(self) -> None:
+        """Stop before embedding if the model is not the one whose vectors are stored.
+
+        Called at the point of use - the line before a vector is produced - because that
+        is the only place a lazily-loaded embedder can be asked what it is without making
+        a run that needs no model load one. Nothing is discarded; a rebuild costs a
+        quarter of an hour and is the user's to ask for. But nothing new is written
+        either, and every `index_status` says why until it is resolved.
+        """
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if self._db.count_rows("units_vec") == 0:
+            # No vector here for any of this to be about. Documents are the wrong
+            # question: a file of nothing but headings is stored and embeds nothing, so an
+            # index can hold documents and no vectors at all. Whatever this run is about
+            # to write is therefore the whole of it, and it may say so - before the write
+            # rather than after, so that another process reading these vectors a moment
+            # from now finds them labelled. A run that dies in between leaves a revision
+            # over no vectors, which the next one clears exactly here.
+            self._claim_empty_index()
+            return
+        if recorded is None:
+            return  # no provenance to contradict
+        # The load this run is about to do anyway. A model that will not load raises here
+        # exactly as it would one line later, and a run with nothing to embed never
+        # arrives.
+        self._embedder.warm_up()
+        weights = self._embedder.weights_revision
+        if weights == recorded:
+            self._db.record_weights_mismatch(None)
+            return
+        if weights is None:
+            # The model loaded, so something answered - it just cannot say which weights
+            # it is. That is not "nothing to compare": the vectors written now would be
+            # unlabelled and indistinguishable from the ones already stored, which is the
+            # state this guard exists to prevent.
+            message = (
+                f"Which weights {self._embedder.model_name} is running could not be read, so "
+                "there is no way to tell whether they are the ones that built this index "
+                f"({recorded[:12]}). Nothing has been discarded and nothing new is being "
+                "indexed; repair the model cache and run index_directory again."
+            )
+        else:
+            message = (
+                f"The weights behind {self._embedder.model_name} changed since this index was "
+                f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
+                "query would produce now come from different models. Nothing has been "
+                "discarded and nothing new is being indexed; re-index this documentation "
+                f"root from scratch (delete {self._db.path} and run index_directory) to make "
+                "them comparable again."
+            )
+        self._db.record_weights_mismatch(message)
+        self._db.revoke_coverage()
+        raise ForeignWeightsError(message)
+
+    def _claim_empty_index(self) -> None:
+        """Take ownership of an index that holds no vectors, and drop what described none.
+
+        A model *name* is not enough for bge-small: fastembed pins no revision, so a
+        re-download can bring different weights under the same name and nothing in the
+        index would notice. This is the one moment a revision can honestly be written -
+        the vectors that follow are all there will be, and there are none yet to
+        contradict. A model that cannot say which weights it is records nothing, and the
+        index carries no provenance rather than a provenance that might be wrong.
+        """
+        self._db.forget_weights_revision()
+        self._db.record_weights_mismatch(None)
+        self._embedder.warm_up()
+        weights = self._embedder.weights_revision
+        if weights is not None:
+            self._db.set_meta(WEIGHTS_META_KEY, weights)
 
     def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
         """The subset of ``paths`` a walk of ``root`` would have visited.
@@ -831,6 +1349,12 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
+        if texts:
+            # Only when a vector is really about to exist. A document of headings alone
+            # embeds nothing, and `embed_documents` returns without loading the model for
+            # it - asking first would make a file that needs no model fail when none can
+            # be loaded.
+            self._refuse_foreign_weights()
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")

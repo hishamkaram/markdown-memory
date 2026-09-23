@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
-from markdown_memory.db import Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.indexer import Embedder
 from markdown_memory.models import SearchResult
@@ -373,11 +373,66 @@ class HybridSearcher:
         return [hit for hit in hits if hit in exact or coverage(hit) >= KEYWORD_GATE]
 
     def _vector_ranking(self, query: str, limit: int) -> tuple[list[int], dict[int, str]]:
-        """Sections by their closest vector, plus each section's best-matching passage."""
+        """Sections by their closest vector, plus each section's best-matching passage.
+
+        Empty when the stored vectors came from other weights than the ones answering
+        now: the distance between two models' vectors measures nothing, and returning it
+        as a semantic result is worse than returning no semantic result at all. Keyword
+        ranking reads no vector and is unaffected, so the search still answers - with the
+        half of it that is still true, and `index_status` carries the reason.
+        """
         embedding = self._embedder.embed_query(query)
+        # After the embedding, never before: the embedder loads lazily and cannot say
+        # which weights it is until it has loaded, so asking first would suppress
+        # ranking on every first query of a process.
+        recorded = self._refuse_foreign_vectors()
         best, passages = self._nearest(embedding, limit)
+        # Again, against what was read rather than what was checked: a model *name* change
+        # in another process discards every vector and rebuilds it, and a check that
+        # happened before those rows were read cannot speak for them.
+        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:
+            raise SearchError(
+                "The index was rebuilt by another model while this search was ranking; "
+                "only keyword ranking is used"
+            )
         ranking = sorted(best, key=lambda section_id: (best[section_id], section_id))[:limit]
         return ranking, {sid: passages[sid] for sid in ranking if sid in passages}
+
+    def _refuse_foreign_vectors(self) -> str | None:
+        """Fail this ranking if the loaded model is not the one that built the vectors.
+
+        Search asks for itself rather than trusting a flag an indexing run would have had
+        to write: a cache whose weights changed while no document did leaves indexing a
+        clean no-op, and nothing would ever have set that flag. Failing rather than
+        returning nothing puts it on the path that already exists for one index being
+        unusable - the other index answers alone, and only losing both is an error.
+
+        Returns what was recorded, so the caller can tell whether it still is.
+        """
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        if recorded is None:
+            return None  # no provenance to contradict
+        weights = self._embedder.weights_revision
+        if weights == recorded:
+            # Whoever recorded a mismatch - a search of this index, or an indexing run -
+            # cannot come back to withdraw it: weights that change back change no
+            # document, so no run follows. The query that finds them agreeing is the one
+            # in a position to say so.
+            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
+                self._db.record_weights_mismatch(None)
+            return recorded
+        message = (
+            f"This index was built by weights {recorded[:12]} and the model answering now "
+            f"reports {weights[:12] if weights else 'no readable revision'}: the distance "
+            "between two models' vectors measures nothing, so only keyword ranking is used "
+            "until this documentation root is re-indexed from scratch."
+        )
+        # Persisted, because the answer this query is about to give is half of one, and
+        # the agent reading it is told the index is healthy by an `index_status` that no
+        # indexing run will correct - weights can change while no document does.
+        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:
+            self._db.record_weights_mismatch(message)
+        raise SearchError(message)
 
     def _nearest(
         self, embedding: list[float], limit: int

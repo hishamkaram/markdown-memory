@@ -227,6 +227,10 @@ class IndexStatus:
 
     verified: bool
     failures: tuple[FileFailure, ...] = ()
+    #: Set when the weights behind the model name changed under an existing index: the
+    #: stored vectors and the vectors a query would produce now come from different
+    #: models. Nothing is discarded, and nothing new is written, until it is resolved.
+    weights_mismatch: str | None = None
     #: Documents under this scope whose vectors were built by an older pooling scheme.
     #: They still answer, less well, and only a run over the directory holding them
     #: rebuilds - a parent run prunes `.venv`, `node_modules` and the like, so one indexed
@@ -245,6 +249,10 @@ class IndexStatus:
         """One sentence, or nothing at all when there is nothing to act on."""
         if self.verified:
             return None
+        # First, because it is the only one that says the answers themselves may be
+        # wrong rather than incomplete.
+        if self.weights_mismatch:
+            return self.weights_mismatch
         if not self.failures:
             if self.stale_vectors:
                 return (

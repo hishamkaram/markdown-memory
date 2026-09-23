@@ -318,14 +318,14 @@ class TestEvalIndexCache:
         corpus = tmp_path / "corpus"
         corpus.mkdir()
         (corpus / "a.md").write_text("# A\n\nbody\n", encoding="utf-8")
-        models = tmp_path / "models" / "snapshots" / eval_cache.GEMMA_REVISION
+        cache_dir = tmp_path / "models"
+        models = eval_cache.gemma_model_dir(cache_dir) / "onnx"
         models.mkdir(parents=True)
         weights = models / "model_quantized.onnx"
         weights.write_bytes(b"first")
-        cache = tmp_path / "models"
-        before = eval_cache.build_key(corpus, "embeddinggemma", model_cache_dir=cache).digest
+        before = eval_cache.build_key(corpus, "embeddinggemma", model_cache_dir=cache_dir).digest
         weights.write_bytes(b"a different download entirely")
-        after = eval_cache.build_key(corpus, "embeddinggemma", model_cache_dir=cache).digest
+        after = eval_cache.build_key(corpus, "embeddinggemma", model_cache_dir=cache_dir).digest
         assert before != after
 
     def test_discard_removes_the_write_ahead_log_too(self, tmp_path: Path) -> None:

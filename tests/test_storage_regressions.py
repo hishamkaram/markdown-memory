@@ -873,6 +873,34 @@ class TestExcludedPaths:
         assert "fixtures/sample.md" in self.indexed(db, fake_embedder, tmp_path, "FIXTURES")
 
 
+class TestAnIndexAnsweringFromAnotherModelsVectors:
+    """A walk that read every file still cannot vouch for vectors another model built."""
+
+    def test_a_recorded_mismatch_is_enough_to_withdraw_the_certificate(
+        self, db: Database, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Tested on its own, without revoking coverage, because the two protect
+
+        different things: coverage says the walk was whole, this says the vectors are
+        the ones a query would be comparable with. A future caller that records the
+        mismatch without revoking must not be able to report `verified` either.
+        """
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "README.md").write_text("# Readme\n\nhello\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        assert db.index_status(str(root)).verified
+
+        db.record_weights_mismatch("another model's vectors are in here")
+        status = db.index_status(str(root))
+        assert not status.verified
+        assert status.weights_mismatch == "another model's vectors are in here"
+        assert status.message() == "another model's vectors are in here"
+
+        db.record_weights_mismatch(None)
+        assert db.index_status(str(root)).verified
+
+
 class StopsAfterOneFile:
     """Embeds the first file, then behaves like a Ctrl-C partway through the second."""
 
@@ -887,6 +915,13 @@ class StopsAfterOneFile:
     @property
     def dimension(self) -> int:
         return self._inner.dimension
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._inner.weights_revision
+
+    def warm_up(self) -> None:
+        self._inner.warm_up()
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         self._files += 1
@@ -911,6 +946,13 @@ class RefusesToLoad:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def weights_revision(self) -> str | None:
+        return None
+
+    def warm_up(self) -> None:
+        raise ModelLoadError("the model is not on disk and there is no network")
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         raise ModelLoadError("Cannot load the embedding model")

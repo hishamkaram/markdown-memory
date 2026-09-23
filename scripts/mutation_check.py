@@ -159,6 +159,391 @@ MUTATIONS = (
         tests="TestSectionIdsOnAnUpgradedDatabase or TestMigratingARealOldDatabase",
     ),
     Mutation(
+        name="cache: trust size, mtime and inode, and drop ctime from the stamp",
+        module="indexer.py",
+        old='        "ctime_ns": info.st_ctime_ns,\n',
+        new="",
+        tests="test_a_file_rewritten_with_its_old_mtime_restored_is_still_caught",
+    ),
+    Mutation(
+        name="cache: trust a model file that is a symlink out of the cache",
+        module="indexer.py",
+        old="""    if not stat.S_ISREG(info.st_mode):
+        return None  # a symlink into a blob store is not a file this cache vouches for
+""",
+        new="",
+        tests="test_a_model_file_replaced_by_a_symlink_is_not_trusted",
+    ),
+    Mutation(
+        name="cache: adopt the unversioned folder without checking its bytes",
+        module="indexer.py",
+        old="        if not legacy.is_dir() or _unverified(legacy):\n",
+        new="        if not legacy.is_dir():\n",
+        tests="test_an_unversioned_folder_that_does_not_match_is_left_where_it_is",
+    ),
+    Mutation(
+        name="cache: take what was downloaded on trust",
+        module="indexer.py",
+        old="            still_wrong = _unverified(self._model_dir)\n",
+        new="            still_wrong: list[str] = []\n",
+        tests="test_a_download_that_does_not_match_the_manifest_fails_without_downloading_again",
+    ),
+    Mutation(
+        name="cache: treat any load failure as corruption and re-download",
+        module="indexer.py",
+        old="                        self._session, self._tokenizer = self._open()\n",
+        new="""                        try:
+                            self._session, self._tokenizer = self._open()
+                        except ModelLoadError:
+                            self._fetch()
+                            raise
+""",
+        tests="test_a_load_failure_on_verified_files_is_not_treated_as_corruption",
+    ),
+    Mutation(
+        name="cache: repair under the shared lock, beside whoever is reading",
+        module="indexer.py",
+        old="                    with _model_cache_lock(self._cache_dir, exclusive=True):\n",
+        new="                    with _model_cache_lock(self._cache_dir, exclusive=False):\n",
+        tests="test_two_processes_starting_at_once_download_once_between_them",
+    ),
+    Mutation(
+        name="graph: run the published graph and dequantize the whole vocabulary",
+        module="indexer.py",
+        old="            graph = derived if derived and _file_identity(derived) else None\n",
+        new="            graph = None\n",
+        tests="test_the_embedder_runs_the_derived_graph",
+    ),
+    Mutation(
+        name="graph: keep a derived graph that does not match its pin",
+        module="indexer.py",
+        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
+        "DERIVED_GRAPH_SHA256:\n",
+        new="        if _file_identity(derived) is not None:\n",
+        tests="test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded",
+    ),
+    Mutation(
+        name="graph: swap the nodes even when the scale is per axis",
+        module="graph_patch.py",
+        old="        if parameter is None or _elements(parameter[1]) != 1:\n",
+        new="        if parameter is None:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: swap the nodes with something else still reading the whole table",
+        module="graph_patch.py",
+        old="    if consumers.get(produced) != 1:\n",
+        new="    if consumers.get(produced) is None:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: copy a wire type the rewrite does not model",
+        module="graph_patch.py",
+        old='            raise _RefusedError(f"wire type {wire} is not modelled")\n',
+        new="            value_start, position = position, position\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="cache: keep the stamp valid when the derived graph's pin moves",
+        module="indexer.py",
+        old='    if stamp.get("derived") != DERIVED_GRAPH_SHA256:\n        return False\n',
+        new="",
+        tests="test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files",
+    ),
+    Mutation(
+        name="cache: keep a derived graph that is a symlink out of the cache",
+        module="indexer.py",
+        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
+        "DERIVED_GRAPH_SHA256:\n",
+        new="        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:\n",
+        tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
+    ),
+    Mutation(
+        name="cache: leave a directory sitting where the stamp goes",
+        module="indexer.py",
+        old="    if stamped.is_dir() and not stamped.is_symlink():\n",
+        new="    if False:  # a directory there is somebody else's problem\n",
+        tests="test_a_directory_where_the_stamp_belongs_is_repaired",
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
+        name="cache: try to unlink a directory where a model file belongs",
+        module="indexer.py",
+        old="            _remove(path)  # only what is proven wrong\n",
+        new="            path.unlink(missing_ok=True)\n",
+        tests="test_a_directory_where_a_model_file_belongs_is_repaired",
+        # The honest outcome of the bug is the exception the guard exists to prevent,
+        # which the repair wrapper now reports as the domain error carrying its text.
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
+        name="cache: record the weights over an index this run did not build",
+        module="indexer.py",
+        old=(
+            "        self._db.forget_weights_revision()\n"
+            "        self._db.record_weights_mismatch(None)\n"
+        ),
+        new="        self._db.record_weights_mismatch(None)\n",
+        tests="test_the_weights_are_recorded_only_for_an_index_this_run_built_whole",
+    ),
+    Mutation(
+        name="storage: keep the weights revision after discarding every document",
+        module="db.py",
+        old='    if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None:\n',
+        new="    if True:  # the revision outlives the vectors it described\n",
+        tests="test_discarding_every_document_discards_the_revision_that_described_them",
+    ),
+    Mutation(
+        name="graph: swap two nodes that are the wrong way round",
+        module="graph_patch.py",
+        old="        and node.field.start > dequantize.field.start\n",
+        new="        and node.field.start != dequantize.field.start\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: rewrite a node carrying a domain or a doc string",
+        module="graph_patch.py",
+        old="    if dequantize.extras:\n",
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: remove the producer of a value the graph exports",
+        module="graph_patch.py",
+        old="    if produced in outputs:\n",
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: introduce a name another node already writes",
+        module="graph_patch.py",
+        old='    if f"{produced}_rows" in taken:\n',
+        new="    if False:\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: accept field number zero as a field",
+        module="graph_patch.py",
+        old='            raise _RefusedError("field number 0 does not exist")\n',
+        new="            pass\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="cache: follow a symlinked directory out of the model cache",
+        module="indexer.py",
+        old="    current = model_dir\n",
+        new="    return model_dir / name\n    current = model_dir\n",
+        tests="test_a_symlinked_directory_on_the_way_is_never_written_through",
+    ),
+    Mutation(
+        name="cache: assume a removal that did nothing worked",
+        module="indexer.py",
+        old="    if path.exists() or path.is_symlink():\n",
+        new="    if False:\n",
+        tests="test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known",
+    ),
+    Mutation(
+        name="graph: refuse a Gather that spells out the axis it already has",
+        module="graph_patch.py",
+        old="                        _NODE_ATTRIBUTE,\n",
+        new="",
+        tests="test_a_gather_that_spells_out_axis_zero_is_still_rewritten",
+    ),
+    Mutation(
+        name="graph: index the outputs of a node that has none",
+        module="graph_patch.py",
+        old="    if len(dequantize.outputs) != 1:\n        return []\n    produced = "
+        "dequantize.outputs[0]\n",
+        new="    produced = dequantize.outputs[0]\n    if len(dequantize.outputs) != 1:\n"
+        "        return []\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+        # The bug is the IndexError escaping the refusal contract, which is the point.
+        fails_with="IndexError",
+    ),
+    Mutation(
+        name="graph: move indices above the node that produces them",
+        module="graph_patch.py",
+        old="        and written_by.get(node.inputs[1], -1) < dequantize.field.start\n",
+        new="",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="weights: call an index verified while another model's vectors answer it",
+        module="indexer.py",
+        old="        self._db.record_weights_mismatch(message)\n",
+        new="",
+        tests="test_an_index_answering_from_another_models_vectors_says_so_in_its_status",
+    ),
+    Mutation(
+        name="weights: treat a model that cannot say which weights it is as the right one",
+        module="indexer.py",
+        old="        if weights == recorded:\n",
+        new="        if weights is None or weights == recorded:\n",
+        tests="test_weights_that_cannot_be_identified_are_not_assumed_to_be_the_right_ones",
+    ),
+    Mutation(
+        name="graph: let the rewrite shadow a name only the graph's inputs declare",
+        module="graph_patch.py",
+        old="        if field.number in (_GRAPH_INPUT, _GRAPH_VALUE_INFO)\n",
+        new="        if False\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="graph: read an axis that is taken from somewhere else as a plain zero",
+        module="graph_patch.py",
+        old="        if any(field.number not in _AXIS_FIELDS for field in inner):\n",
+        new="        if False:  # the attribute is read as though it said what it appears to\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="cache: let a repair failure escape as whatever the Hub raised",
+        module="indexer.py",
+        old="                        except Exception as exc:\n",
+        new="                        except MarkdownMemoryError as exc:\n",
+        tests="test_a_cache_that_cannot_be_repaired_fails_as_a_domain_error",
+        fails_with="OSError",
+    ),
+    Mutation(
+        name="cache: follow a symlink planted at a temporary path",
+        module="indexer.py",
+        old=(
+            "    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT "
+            "| os.O_EXCL | os.O_NOFOLLOW, 0o600)\n"
+        ),
+        new="    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n",
+        tests="test_the_helper_that_writes_those_files_refuses_a_symlink_outright",
+    ),
+    Mutation(
+        name="graph: rewrite a graph whose sparse initializers name tensors unseen",
+        module="graph_patch.py",
+        old="    if any(entry.number == _GRAPH_SPARSE_INITIALIZER for entry in graph):\n",
+        new="    if False:  # sparse initializers are assumed to name nothing\n",
+        tests="test_anything_but_the_expected_pattern_is_refused",
+    ),
+    Mutation(
+        name="weights: embed with whatever model happens to be loaded",
+        module="indexer.py",
+        old="            self._refuse_foreign_weights()\n",
+        new="            pass  # whichever model is loaded writes its vectors\n",
+        tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
+    ),
+    Mutation(
+        name="weights: refuse a database whose recorded revision describes nothing",
+        module="indexer.py",
+        old='        if self._db.count_rows("units_vec") == 0:\n',
+        new="        if False:  # a revision outliving its vectors still speaks for them\n",
+        tests="test_a_revision_left_over_a_vectorless_index_does_not_refuse_the_next_model",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
+    ),
+    Mutation(
+        name="weights: ask an unloaded model which weights it is",
+        module="indexer.py",
+        old=(
+            "        self._embedder.warm_up()\n"
+            "        weights = self._embedder.weights_revision\n"
+            "        if weights == recorded:\n"
+        ),
+        new=(
+            "        weights = self._embedder.weights_revision\n        if weights == recorded:\n"
+        ),
+        tests="test_the_model_is_loaded_before_it_is_asked_which_weights_it_is",
+    ),
+    Mutation(
+        name="search: rank this model's query against another model's vectors",
+        module="search.py",
+        old="        recorded = self._refuse_foreign_vectors()\n",
+        new="        recorded = self._db.get_meta(WEIGHTS_META_KEY)\n",
+        tests="test_a_cache_that_changes_while_no_document_does_still_stops_semantic_ranking",
+    ),
+    Mutation(
+        name="search: read the weights before the query has loaded the model",
+        module="search.py",
+        old="        embedding = self._embedder.embed_query(query)\n",
+        new=(
+            "        self._refuse_foreign_vectors()  # before the model has loaded\n"
+            "        embedding = self._embedder.embed_query(query)\n"
+        ),
+        tests="test_the_weights_are_read_after_the_query_is_embedded_not_before",
+    ),
+    Mutation(
+        name="weights: put a revision on an index that holds no vector",
+        module="db.py",
+        old="            _forget_weights_without_vectors(conn)\n        return Document(\n",
+        new="        return Document(\n",
+        tests="test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind",
+    ),
+    Mutation(
+        name="storage: keep a revision after purging the last document that had one",
+        module="db.py",
+        old="            _forget_weights_without_vectors(conn)\n        return deleted\n",
+        new="        return deleted\n",
+        tests="test_purging_the_last_document_forgets_what_its_vectors_came_from",
+    ),
+    Mutation(
+        name="search: trust a revision checked before the rows were read",
+        module="search.py",
+        old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:\n",
+        new="        if False:  # the check speaks for rows read after it\n",
+        tests="test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on",
+    ),
+    Mutation(
+        name="weights: report one model's revision for another model's weights",
+        module="indexer.py",
+        old="        if self._model_name != BGE_SMALL_MODEL_NAME:\n",
+        new="        if False:  # every model is assumed to live in that one folder\n",
+        tests="test_only_the_model_whose_cache_it_can_find_reports_a_revision",
+    ),
+    Mutation(
+        name="weights: claim the index only once its vectors are already written",
+        module="indexer.py",
+        old="            self._claim_empty_index()\n",
+        new="            return\n",
+        tests="test_the_revision_is_written_before_the_vectors_it_describes",
+    ),
+    Mutation(
+        name="search: keep the mismatch to itself while the status says all is well",
+        module="search.py",
+        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:\n",
+        new="        if False:  # the status goes on calling the index healthy\n",
+        tests="test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status",
+    ),
+    Mutation(
+        name="weights: demand a working model for a file that embeds nothing",
+        module="indexer.py",
+        old="        if texts:\n",
+        new="        if True:\n",
+        tests="test_a_file_that_embeds_nothing_does_not_need_a_model_that_loads",
+        fails_with="markdown_memory.exceptions.ModelLoadError",
+    ),
+    Mutation(
+        name="search: leave a mismatch standing after the weights come back",
+        module="search.py",
+        old="            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:\n",
+        new="            if False:  # nobody withdraws it, so it stands for good\n",
+        tests="test_weights_that_come_back_clear_the_mismatch_the_search_recorded",
+    ),
+    Mutation(
+        name="status: report a mismatched index as verified anyway",
+        module="db.py",
+        old="            verified=verified and weights_mismatch is None,\n",
+        new="            verified=verified,\n",
+        tests="TestAnIndexAnsweringFromAnotherModelsVectors",
+    ),
+    Mutation(
+        name="indexer: let onnxruntime's intra-op pool spin-wait again",
+        module="indexer.py",
+        old="            options.add_session_config_entry(*_SPIN_CONFIG)\n",
+        new="",
+        tests="test_gemma_session_disables_intra_op_spinning",
+    ),
+    Mutation(
+        name="indexer: document MARKDOWN_MEMORY_THREADS for bge-small but drop it again",
+        module="indexer.py",
+        old="                        threads=_inference_threads() or None,\n",
+        new="",
+        tests="test_fastembed_passes_the_thread_override",
+    ),
+    Mutation(
         name="indexer: consume the index-discarded notice before the report carries it",
         module="indexer.py",
         old="            self._db.dismiss_notices(notices)\n",
@@ -205,7 +590,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 5424),',
+        old='    ("README.md", 6611),',
         new='    ("README.md", 5062),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

@@ -12,27 +12,27 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 11,100
+       alt="One question asked of four documentation files. Reading them whole costs 12,430
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 1,676 tokens - the
-            one that answers is 181.">
+            vectors, fuses the two, and returns five sections totalling 2,455 tokens - the
+            one that answers is 401.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 11,100 tokens in all:
+`docs/evaluation-protocol.md`, 12,430 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
-  128 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  181 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  590 tok  README.md  markdown-memory
+  401 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+  566 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  597 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
-  283 tok  README.md  markdown-memory > The embedding model > When it goes wrong
+  397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**1,676 tokens instead of 11,100**, and the section that actually answers is 181 - a
-sixtieth of what reading the files costs. Every hit carries its full text, so a good
+**2,455 tokens instead of 12,430**, and the section that actually answers is 401 - a
+thirtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
@@ -133,13 +133,53 @@ at a pinned revision: the quantized ONNX graph, its external weights, and the to
 About **330 MB**, once per machine, into:
 
 ```
-$XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx/     # ~/.cache/... by default
+$XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx-5090578d9565/   # ~/.cache/... by default
 ```
+
+The revision is part of the folder name, so moving the pin fetches the new weights instead
+of serving the old ones under a name that claims to be the new ones. A folder from an older
+version of this package (without the suffix) is *moved* into place on the first start, not
+downloaded again.
 
 The cache is shared by every project on purpose - the weights are identical and read-only,
 so copying them per project would be pure waste. Point `MARKDOWN_MEMORY_MODEL_CACHE`
-somewhere else to move it. The download is skipped entirely when all three files are already
-there.
+somewhere else to move it.
+
+Beside the three downloaded files, the server writes
+`onnx/model_quantized.gather_first.onnx`: the same graph with the vocabulary table gathered
+*before* it is dequantized, which is worth about 1 GB of memory per query. It is derived
+from the verified download on your machine, never fetched, and regenerated whenever it is
+missing. Vectors are bit-identical to the published graph's, so an existing index stays
+valid. It is a modification of Gemma and is covered by the
+[Gemma Terms of Use](https://ai.google.dev/gemma/terms): this repository distributes nothing
+modified, but those terms apply to anyone who shares or hosts that derived file.
+
+### What is checked before the model is loaded
+
+Every file's size and sha256 is pinned at the pinned revision. After a full check, a
+`.verified` stamp records each file's size, mtime, ctime, inode and device, so an ordinary
+start is a handful of `stat` calls rather than most of a second of hashing. Anything that
+differs sends the files back to be hashed against the pins, and a file that does not match
+is re-fetched - just that file.
+
+**Guaranteed:** any change to a model file's contents or metadata since it was verified is
+caught. `cp -p`, `tar x` and `rsync --inplace` can overwrite a file and restore its mtime,
+which is why ctime is in the stamp - nothing in user space can set that back. **Not
+guaranteed:** silent disk bit-rot, with no write at all.
+
+A failure to *load* verified files is not treated as damage: it means onnxruntime,
+permissions or memory, so the error is raised as it stands and nothing is downloaded.
+
+Verification and loading hold a shared `flock`; downloading, repairing and migrating hold it
+exclusively, so several servers starting at once download once between them. A model cache
+on **NFS or SMB shared between machines is not supported** - `flock` can be local-only
+there. Nor is running an old and a new version of this package side by side during the
+one-time folder migration: an older checkout that starts at that exact instant fails once,
+then re-downloads.
+
+Old revisions are never deleted. After a successful start, one log line on stderr names any
+other `embeddinggemma-300m-onnx*` folders and what they cost, and removing them is yours to
+do.
 
 ### Pre-download it, or install offline
 
@@ -153,8 +193,33 @@ create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_
 "
 ```
 
-For a machine with no network, copy that cache directory from one that has it. The three
-files are all that is needed, and their presence is the whole check.
+For a machine with no network, copy the three files into
+`$XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx-5090578d9565/`, keeping
+`onnx/model_quantized.onnx`, `onnx/model_quantized.onnx_data` and `tokenizer.json` where
+they are. The first start hashes them once, writes the `.verified` stamp, derives the
+gather-first graph, and never touches the network.
+
+`bge-small` is downloaded by `fastembed`, which pins no revision: if that cache is deleted,
+it can come back with different weights under the same model name. The snapshot the index
+was built from is recorded, and both halves of the server check it where they would
+otherwise act on it:
+
+- **Indexing** compares the moment before it embeds - the moment the model has had to load,
+  and one a run with nothing to embed never reaches. On a difference it **stops before
+  writing anything**, because carrying on would leave two models' vectors in one index.
+  Nothing is discarded - re-indexing from scratch is yours to decide - and until you do,
+  `index_status.coverage` reads `"unknown"` with a message saying why, so an agent is never
+  told the index is healthy while it is not.
+- **Searching** compares for itself, after embedding the query, and falls back to keyword
+  ranking alone when the answer differs. It does not wait to be told: weights can change
+  while no Markdown file does, and then there is no indexing run to notice. Ranking a
+  query's vector against vectors another model wrote measures nothing, so that half is
+  switched off until the index is rebuilt.
+
+A model that loads but cannot say which weights it is counts as a difference, for the same
+reason: unlabelled vectors beside labelled ones are exactly what this prevents. An index
+with **no recorded provenance** - one built before this existed - is left alone rather than
+refused: unknown is not the same as wrong, and a rebuild is a poor answer to a suspicion.
 
 ### Presets
 
@@ -162,7 +227,7 @@ Two presets, chosen with `MARKDOWN_MEMORY_EMBEDDER`:
 
 | Preset | Dimensions | Download | Peak RAM | Indexing | Held-out Top-1 / Top-3 / Top-5 |
 | --- | --- | --- | --- | --- | --- |
-| `embeddinggemma` (default) | 768 | ~330 MB | ~1.6 GB | 2.4-3.8 vectors/s | 85% / 97% / 97% |
+| `embeddinggemma` (default) | 768 | ~330 MB | ~0.7 GB | ~7 vectors/s | 85% / 97% / 97% |
 | `bge-small` | 384 | ~65 MB | ~1.1 GB | ~12 vectors/s | 68% / 82% / 88% |
 
 Accuracy is the frozen baseline in `scripts/eval_data/baseline.json`, recorded by
@@ -239,6 +304,13 @@ or just the title); an ambiguous request lists the exact candidates.
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 | `MARKDOWN_MEMORY_THREADS` | - | unset: onnxruntime picks. A positive integer caps the threads one embedding pass may use |
+
+The default preset does not spin-wait between operators, which is what makes a query cost ~0.6 s of
+CPU instead of ~5.5 s and leaves the process idle at 0 while nothing is being asked of it; the
+thread *count* is left to onnxruntime, and `MARKDOWN_MEMORY_THREADS` is there for a machine that
+disagrees with its choice. `bge-small` runs through `fastembed`, which exposes no such switch, so
+for that preset the count is the only lever: `MARKDOWN_MEMORY_THREADS=4` took one query from 718 ms
+of CPU to 95 ms.
 
 `MARKDOWN_MEMORY_EXCLUDE` takes glob patterns separated by commas (only commas - a colon
 would split a pattern that contains one). A pattern with no `/` matches that name at any

@@ -23,6 +23,16 @@ class IndexingError(MarkdownMemoryError):
     """The indexing pipeline failed (bad directory, unreadable file, ...)."""
 
 
+class ForeignWeightsError(IndexingError):
+    """The model about to embed is not the one whose vectors the index already holds.
+
+    Raised from the one place that can tell - just before a vector is produced, where a
+    lazily-loaded embedder has had to load and can finally say what it is. It aborts the
+    whole run rather than failing one file, because every other file would fail the same
+    way and for the same reason.
+    """
+
+
 class IndexBusyError(IndexingError):
     """Another indexing run holds the lock on this database.
 

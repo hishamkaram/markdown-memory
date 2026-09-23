@@ -7,7 +7,10 @@ heading-delimited sections, and stored in a single SQLite file with three indexe
 embedder truncates at 512 tokens), and `sqlite-vec` passage vectors (one per
 paragraph, list item, table row, code block). Embeddings are local ONNX on CPU:
 EmbeddingGemma-300m by default (768 dims), `bge-small-en-v1.5` via fastembed as the light
-preset (384 dims). Search fuses keyword and vector rankings with Reciprocal Rank Fusion.
+preset (384 dims). Gemma's graph is rewritten on each machine so the int8 vocabulary table
+is gathered *before* it is dequantized - bit-identical vectors, and ~0.7 GB resident rather
+than ~1.6 GB, because the published order materialises all 262144x768 rows in float32 on
+every run. Search fuses keyword and vector rankings with Reciprocal Rank Fusion.
 Built on the MCP Python SDK **2.x**, where `FastMCP` is named `MCPServer`.
 
 ## Commands
@@ -45,10 +48,11 @@ The first run downloads the embedding model (~330 MB) into
 | Path | Responsibility |
 | --- | --- |
 | `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
-| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
+| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v4), repository methods, `integrity_problems()` |
-| `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, incremental `Indexer` |
+| `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, the versioned/verified model cache (`gemma_model_dir`, `GEMMA_MANIFEST`, `.verified` stamp, `flock`), incremental `Indexer` |
+| `src/markdown_memory/graph_patch.py` | `gather_before_dequantize`: rewrites two nodes of the pinned ONNX graph on the protobuf wire format, or refuses (`None`) and leaves it alone |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/server.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |

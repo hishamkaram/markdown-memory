@@ -31,6 +31,10 @@ from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.indexer import DEFAULT_EMBEDDER, GEMMA_DIMENSION
 from markdown_memory.server import ServerConfig
 
+# How long [9] leaves the server idle before measuring what that idleness costs and what
+# the query after it costs. Long enough that any onnxruntime spin window has closed.
+_IDLE_SECONDS = 2.0
+
 CONFIGURATION_MD = """\
 ---
 title: Helios Configuration Reference
@@ -273,6 +277,29 @@ def server_memory_mb() -> tuple[float, float] | None:
                 int(fields["VmHWM"].split()[0]) / 1024,
             )
         except (OSError, KeyError, IndexError, ValueError):
+            continue
+    return None
+
+
+def server_cpu_seconds() -> float | None:
+    """CPU the spawned server has used, in seconds (Linux only).
+
+    Fields 14 and 15 of /proc/<pid>/stat are the process's user and system ticks, summed
+    over every thread it owns - which is the point, because the cost being measured is
+    onnxruntime's thread pool, not the thread that happens to answer the request.
+    """
+    me = str(os.getpid())
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            after_name = entry.joinpath("stat").read_text().rsplit(")", 1)[1].split()
+            if after_name[1] != me:
+                continue
+            if b"markdown_memory.server" not in entry.joinpath("cmdline").read_bytes():
+                continue
+            # after_name[0] is field 3, so fields 14 and 15 are at offsets 11 and 12.
+            ticks = int(after_name[11]) + int(after_name[12])
+            return ticks / os.sysconf("SC_CLK_TCK")
+        except (OSError, IndexError, ValueError):
             continue
     return None
 
@@ -699,9 +726,16 @@ class LiveTest:
 
     async def latency(self) -> None:
         print("\n[9] warm query latency (median of 7, end-to-end over stdio JSON-RPC)")
+        # Sampled around this one series and nothing else, so the number divides by a
+        # known count of queries. Reported, never asserted: a CPU threshold on a shared
+        # runner measures the runner.
+        before_cpu = server_cpu_seconds()
         self.metrics["search_keyword_ms"] = await self.median_latency(
             "search_docs", query="HELIOS_INGEST_BATCH_SIZE"
         )
+        after_cpu = server_cpu_seconds()
+        if before_cpu is not None and after_cpu is not None:
+            self.metrics["search_cpu_ms"] = (after_cpu - before_cpu) * 1000 / 7
         self.metrics["search_semantic_ms"] = await self.median_latency(
             "search_docs", query="how do I stop the process from running out of memory"
         )
@@ -713,6 +747,25 @@ class LiveTest:
             file_path="architecture/ingest-pipeline.md",
             heading_path="Ingest Pipeline Architecture > Backpressure",
         )
+
+        # What an idle server costs. onnxruntime's threads spin-wait between operators by
+        # default, which kept burning ~0.5 core-seconds per second after a query returned;
+        # with spinning off this reads as ~0. Measured with the connection open and no
+        # request in flight, which is what a server beside an editor does almost always.
+        idle_start = server_cpu_seconds()
+        if idle_start is not None:
+            await asyncio.sleep(_IDLE_SECONDS)
+            idle_end = server_cpu_seconds()
+            if idle_end is not None:
+                self.metrics["idle_cpu_ms"] = (idle_end - idle_start) * 1000
+        # And what the first query after that idle costs. Named for what it is: after two
+        # seconds any spin window has long closed, so this is not the wake-up trade-off,
+        # it is the latency a client actually sees, since queries arrive in gaps.
+        payload, _, after_idle_ms = await self.call("search_docs", query="ENOSPC")
+        # `call` returns None for a tool error, and a latency recorded for a query that
+        # failed is a number describing nothing.
+        self.check(payload is not None, "the query after a long idle still answers")
+        self.metrics["query_after_idle_ms"] = after_idle_ms
 
     def files_text(self, relative: str) -> str:
         return (self.docs / relative).read_text(encoding="utf-8")
@@ -790,7 +843,12 @@ async def main() -> int:
             print("        skipped: /proc is not available on this platform")
         else:
             print(f"        RSS now {memory[0]:.0f} MB, peak {memory[1]:.0f} MB")
-            test.check(memory[1] < 3072, "peak resident memory under 3 GB")
+            # A loose sentinel, not the memory gate: the real one is the VmHWM-delta
+            # test in tests/test_graph_patch.py, which measures one run in its own
+            # process. This is about twice the peak a whole indexing run takes with the
+            # vocabulary gathered before it is dequantized, and well under the ~1.6 GB it
+            # took before, so a silent return to the published graph fails here too.
+            test.check(memory[1] < 1200, "peak resident memory under 1.2 GB")
         print("        --- last server stderr lines ---")
         for line in log_text.strip().splitlines()[-4:]:
             print(f"        {line[:150]}")
@@ -805,9 +863,17 @@ async def main() -> int:
             ("search_docs semantic  (warm median)", "search_semantic_ms"),
             ("get_document_outline  (warm median)", "outline_warm_ms"),
             ("read_section          (warm median)", "read_section_warm_ms"),
+            (f"search_docs after {_IDLE_SECONDS:.0f}s idle", "query_after_idle_ms"),
         )
         for label, key in rows:
             print(f"  {label:<46} {metrics[key]:>10.1f} ms")
+        # Reported, not asserted: both depend on how many cores the runner gave us.
+        for label, key in (
+            ("server CPU per warm search_docs", "search_cpu_ms"),
+            (f"server CPU while idle for {_IDLE_SECONDS:.0f}s", "idle_cpu_ms"),
+        ):
+            if key in metrics:
+                print(f"  {label:<46} {metrics[key]:>10.1f} ms CPU")
         print(f"  {'sections indexed':<46} {int(metrics['sections']):>10}")
         print(
             f"  {'outline vs document tokens':<46} "
