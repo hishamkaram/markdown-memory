@@ -385,12 +385,20 @@ class HybridSearcher:
         # After the embedding, never before: the embedder loads lazily and cannot say
         # which weights it is until it has loaded, so asking first would suppress
         # ranking on every first query of a process.
-        self._refuse_foreign_vectors()
+        recorded = self._refuse_foreign_vectors()
         best, passages = self._nearest(embedding, limit)
+        # Again, against what was read rather than what was checked: a model *name* change
+        # in another process discards every vector and rebuilds it, and a check that
+        # happened before those rows were read cannot speak for them.
+        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:
+            raise SearchError(
+                "The index was rebuilt by another model while this search was ranking; "
+                "only keyword ranking is used"
+            )
         ranking = sorted(best, key=lambda section_id: (best[section_id], section_id))[:limit]
         return ranking, {sid: passages[sid] for sid in ranking if sid in passages}
 
-    def _refuse_foreign_vectors(self) -> None:
+    def _refuse_foreign_vectors(self) -> str | None:
         """Fail this ranking if the loaded model is not the one that built the vectors.
 
         Search asks for itself rather than trusting a flag an indexing run would have had
@@ -398,13 +406,15 @@ class HybridSearcher:
         clean no-op, and nothing would ever have set that flag. Failing rather than
         returning nothing puts it on the path that already exists for one index being
         unusable - the other index answers alone, and only losing both is an error.
+
+        Returns what was recorded, so the caller can tell whether it still is.
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if recorded is None:
-            return  # no provenance to contradict
+            return None  # no provenance to contradict
         weights = self._embedder.weights_revision
         if weights == recorded:
-            return
+            return recorded
         raise SearchError(
             f"This index was built by weights {recorded[:12]} and the model answering now "
             f"reports {weights[:12] if weights else 'no readable revision'}: the distance "

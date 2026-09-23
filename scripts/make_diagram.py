@@ -68,7 +68,7 @@ W, H = 1120, 430
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
     ("README.md", 6611),
-    ("CLAUDE.md", 3171),
+    ("CLAUDE.md", 3177),
     ("evaluation-protocol.md", 1661),
     ("AGENTS.md", 981),
 ]

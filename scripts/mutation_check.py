@@ -271,17 +271,15 @@ MUTATIONS = (
     Mutation(
         name="cache: record the weights over an index this run did not build",
         module="indexer.py",
-        old="        if started_empty and embedded and self._db.get_meta(WEIGHTS_META_KEY) "
-        "is None:\n",
-        new="        if embedded:\n",
+        old='        if not (started_empty and embedded and self._db.count_rows("units_vec")):\n',
+        new="        if not embedded:\n",
         tests="test_the_weights_are_recorded_only_for_an_index_this_run_built_whole",
     ),
     Mutation(
         name="storage: keep the weights revision after discarding every document",
         module="db.py",
-        old="            # revision of a model whose output is already gone.\n"
-        '            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))\n',
-        new="            # revision of a model whose output is already gone.\n",
+        old='    if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None:\n',
+        new="    if True:  # the revision outlives the vectors it described\n",
         tests="test_discarding_every_document_discards_the_revision_that_described_them",
     ),
     Mutation(
@@ -421,9 +419,9 @@ MUTATIONS = (
     Mutation(
         name="weights: refuse a database whose recorded revision describes nothing",
         module="indexer.py",
-        old='        if self._db.count_rows("documents") == 0:\n',
+        old='        if self._db.count_rows("units_vec") == 0:\n',
         new="        if False:  # a revision outliving its vectors still speaks for them\n",
-        tests="test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it",
+        tests="test_a_revision_left_over_a_vectorless_index_does_not_refuse_the_next_model",
         fails_with="markdown_memory.exceptions.ForeignWeightsError",
     ),
     Mutation(
@@ -436,8 +434,8 @@ MUTATIONS = (
     Mutation(
         name="search: rank this model's query against another model's vectors",
         module="search.py",
-        old="        self._refuse_foreign_vectors()\n",
-        new="",
+        old="        recorded = self._refuse_foreign_vectors()\n",
+        new="        recorded = self._db.get_meta(WEIGHTS_META_KEY)\n",
         tests="test_a_cache_that_changes_while_no_document_does_still_stops_semantic_ranking",
     ),
     Mutation(
@@ -449,6 +447,34 @@ MUTATIONS = (
             "        embedding = self._embedder.embed_query(query)\n"
         ),
         tests="test_the_weights_are_read_after_the_query_is_embedded_not_before",
+    ),
+    Mutation(
+        name="weights: put a revision on an index that holds no vector",
+        module="indexer.py",
+        old='        if not (started_empty and embedded and self._db.count_rows("units_vec")):\n',
+        new="        if not (started_empty and embedded):\n",
+        tests="test_a_document_that_embeds_nothing_records_no_provenance",
+    ),
+    Mutation(
+        name="storage: keep a revision after purging the last document that had one",
+        module="db.py",
+        old="            _forget_weights_without_vectors(conn)\n        return deleted\n",
+        new="        return deleted\n",
+        tests="test_purging_the_last_document_forgets_what_its_vectors_came_from",
+    ),
+    Mutation(
+        name="search: trust a revision checked before the rows were read",
+        module="search.py",
+        old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:\n",
+        new="        if False:  # the check speaks for rows read after it\n",
+        tests="test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on",
+    ),
+    Mutation(
+        name="weights: report one model's revision for another model's weights",
+        module="indexer.py",
+        old="        if self._model_name != BGE_SMALL_MODEL_NAME:\n",
+        new="        if False:  # every model is assumed to live in that one folder\n",
+        tests="test_only_the_model_whose_cache_it_can_find_reports_a_revision",
     ),
     Mutation(
         name="status: report a mismatched index as verified anyway",

@@ -163,6 +163,32 @@ class TestSearchRobustness:
         finally:
             searcher.close()
 
+    def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checking the revision does not freeze it. A model *name* change in another
+
+        process discards every vector and rebuilds it, and rows read after the check are
+        not the rows it vouched for - the query was embedded by one model and the vectors
+        it is measured against were written by another.
+        """
+        embedder = _RevisedEmbedder("a" * 40)
+        store(db, embedder, "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        original = db.vec_search
+
+        def rebuild_then_search(*arguments: object) -> list[tuple[int, float]]:
+            db.set_meta(WEIGHTS_META_KEY, "b" * 40)  # another process got there first
+            return original(*arguments)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(db, "vec_search", rebuild_then_search)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+        finally:
+            searcher.close()
+
     def test_search_after_close_is_a_domain_error(
         self, db: Database, fake_embedder: FakeEmbedder
     ) -> None:

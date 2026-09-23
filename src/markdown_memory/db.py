@@ -233,6 +233,24 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     )
 
 
+def _forget_weights_without_vectors(conn: sqlite3.Connection) -> None:
+    """Drop the weights metadata once the vectors it describes are gone.
+
+    Which weights produced the vectors is a fact about the vectors, so it belongs to the
+    same transaction that removes them - a purge of the last document, a rebuild for a new
+    vector size, a discard for a changed model. Kept behind, it would have the next run
+    compare a new model against the revision of a model whose output no longer exists, and
+    have search rank on keywords alone over an index with nothing wrong with it.
+
+    Heading-only documents hold no vectors, so the test is the vectors themselves rather
+    than the document rows above them.
+    """
+    if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None:
+        return
+    conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
+    conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
+
+
 def _directory_prefix(directory: str) -> str:
     return directory if directory.endswith(os.sep) else directory + os.sep
 
@@ -494,6 +512,7 @@ class Database:
         )
         with self.transaction() as tx:
             dropped = tx.execute("DELETE FROM documents").rowcount
+            _forget_weights_without_vectors(tx)
             # Every root's documents are gone, including roots this process never looked
             # at; a certificate that survived would vouch for an empty tree.
             self.revoke_coverage(tx)
@@ -932,6 +951,7 @@ class Database:
                 deleted += conn.execute(
                     "DELETE FROM documents WHERE file_path = ?", (path,)
                 ).rowcount
+            _forget_weights_without_vectors(conn)
         return deleted
 
     def clear(self, notice: Callable[[int], str] | None = None) -> int:
@@ -942,11 +962,7 @@ class Database:
         """
         with self.transaction() as conn:
             discarded = conn.execute("DELETE FROM documents").rowcount
-            # Which weights produced the vectors is a fact about the vectors. With none
-            # left, keeping it would make the next run compare a new model against the
-            # revision of a model whose output is already gone.
-            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
-            conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
+            _forget_weights_without_vectors(conn)
             self.revoke_coverage(conn)
             if discarded and notice is not None:
                 _add_notice(conn, notice(discarded))

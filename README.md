@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 12,424
+       alt="One question asked of four documentation files. Reading them whole costs 12,430
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,455 tokens - the
             one that answers is 401.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 12,424 tokens in all:
+`docs/evaluation-protocol.md`, 12,430 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,455 tokens instead of 12,424**, and the section that actually answers is 401 - a
+**2,455 tokens instead of 12,430**, and the section that actually answers is 401 - a
 thirtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 

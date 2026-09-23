@@ -197,6 +197,11 @@ class FastEmbedEmbedder:
         return self._weights_revision
 
     def _read_weights_revision(self) -> str | None:
+        if self._model_name != BGE_SMALL_MODEL_NAME:
+            # `fastembed_model_dir` resolves one model's folder. Reading it for a
+            # different model would report a revision belonging to weights that are not
+            # the ones answering - worse than reporting none, which is merely unknown.
+            return None
         directory = fastembed_model_dir(self._cache_dir)
         if directory is None:
             return None
@@ -1181,12 +1186,12 @@ class Indexer:
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if recorded is None:
             return  # no provenance to contradict
-        if self._db.count_rows("documents") == 0:
-            # The revision describes vectors that are gone: `delete_documents` and the
-            # rebuild for a new vector size empty the index without touching the meta
-            # keys. Left standing, it would refuse every future run over a database with
-            # nothing in it to protect - and keep a mismatch flag that suppresses ranking
-            # on whatever is built next.
+        if self._db.count_rows("units_vec") == 0:
+            # There is no vector here for this to be about. Documents are the wrong
+            # question: a file of nothing but headings is stored and embeds nothing, so an
+            # index can hold documents and no vectors at all. Left standing, the revision
+            # would refuse every future run over a database with nothing to protect, and
+            # keep a mismatch flag that suppresses ranking on whatever is built next.
             self._db.forget_weights_revision()
             self._db.record_weights_mismatch(None)
             return
@@ -1241,7 +1246,11 @@ class Indexer:
         weights = self._embedder.weights_revision
         if weights is None:
             return  # nothing worth recording
-        if started_empty and embedded and self._db.get_meta(WEIGHTS_META_KEY) is None:
+        # `embedded` counts files, and a file of headings alone embeds nothing: only
+        # vectors on disk make a revision true of anything.
+        if not (started_empty and embedded and self._db.count_rows("units_vec")):
+            return
+        if self._db.get_meta(WEIGHTS_META_KEY) is None:
             self._db.set_meta(WEIGHTS_META_KEY, weights)
 
     def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:

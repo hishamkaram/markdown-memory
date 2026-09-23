@@ -605,6 +605,27 @@ class _RevisionAfterLoading(FakeEmbedder):
         self._loaded = True
 
 
+def test_only_the_model_whose_cache_it_can_find_reports_a_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fastembed_model_dir` resolves one model's folder. Reading it for a different
+
+    model would report a revision belonging to weights that are not the ones answering,
+    which is worse than reporting none: none is merely unknown.
+    """
+    from markdown_memory import indexer as module
+    from markdown_memory.indexer import BGE_SMALL_MODEL_NAME, FastEmbedEmbedder
+
+    snapshot = tmp_path / "models--qdrant--bge-small-en-v1.5-onnx-q"
+    (snapshot / "refs").mkdir(parents=True)
+    (snapshot / "refs" / "main").write_text("5239827812345678\n")
+    monkeypatch.setattr(module, "fastembed_model_dir", lambda _cache_dir: snapshot)
+
+    assert FastEmbedEmbedder(BGE_SMALL_MODEL_NAME)._read_weights_revision() == "5239827812345678"
+    other = FastEmbedEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+    assert other._read_weights_revision() is None
+
+
 def test_the_model_is_loaded_before_it_is_asked_which_weights_it_is(
     db: Database, one_document: Path
 ) -> None:
@@ -621,6 +642,65 @@ def test_the_model_is_loaded_before_it_is_asked_which_weights_it_is(
 
     with pytest.raises(IndexingError, match="changed since this index was built"):
         Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
+
+
+def test_a_document_that_embeds_nothing_records_no_provenance(db: Database, tmp_path: Path) -> None:
+    """A file of nothing but headings is stored and produces no vector at all. Counting
+
+    files rather than vectors put a revision on an index that holds none, and the next
+    model was then refused over vectors that do not exist.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n\n### Three\n")
+
+    report = Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    assert report.files_indexed == 1
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
+    # And so the next model is not turned away from an index with nothing to protect.
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(root)
+
+
+def test_a_revision_left_over_a_vectorless_index_does_not_refuse_the_next_model(
+    db: Database, tmp_path: Path
+) -> None:
+    """Documents without vectors - a file of nothing but headings - and a revision that
+
+    outlived whatever it described, from an older version or an interrupted rebuild.
+    There is nothing here for the guard to protect, and refusing would lock the database
+    against every model for good.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.set_meta("embedding_weights_revision", "a" * 40)  # as an older version would leave it
+    assert db.count_rows("documents") == 1 and db.count_rows("units_vec") == 0
+
+    (root / "GUIDE.md").write_text("# Guide\n\nreal prose that embeds\n")
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(root)
+
+    assert db.count_rows("units_vec") > 0
+    assert db.get_meta("embedding_weights_revision") is None  # this run did not build it all
+
+
+def test_purging_the_last_document_forgets_what_its_vectors_came_from(
+    db: Database, one_document: Path
+) -> None:
+    """`delete_documents` and the rebuild for a new vector size empty the index without
+
+    going through `clear()`. The revision they left behind described vectors that were
+    gone, and search - which asks the database, not an indexing run - then ranked on
+    keywords alone over an index with nothing wrong with it.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+    db.delete_documents([str(one_document / "README.md")])
+
+    assert db.get_meta("embedding_weights_revision") is None
 
 
 def test_a_cache_that_changes_while_no_document_does_still_stops_semantic_ranking(
