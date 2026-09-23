@@ -67,17 +67,17 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 5424),
-    ("CLAUDE.md", 3034),
+    ("README.md", 6320),
+    ("CLAUDE.md", 3171),
     ("evaluation-protocol.md", 1661),
     ("AGENTS.md", 981),
 ]
 RIGHT_HITS = [
-    (128, "Pre-download it, or install offline", False),
-    (181, "What downloads, when, and where", True),
-    (590, "markdown-memory  (preamble)", False),
+    (401, "What downloads, when, and where", True),
+    (275, "Pre-download it, or install offline", False),
+    (597, "markdown-memory  (preamble)", False),
     (494, "Commands  (CLAUDE.md)", False),
-    (283, "When it goes wrong", False),
+    (397, "What is checked before loading", False),
 ]
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # Every figure the drawing prints is derived from the two lists above - the totals, the
