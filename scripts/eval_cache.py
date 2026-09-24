@@ -74,6 +74,7 @@ INDEX_SOURCES = (
     "embedders.py",
     "model_cache.py",
     "discovery.py",
+    "config.py",
     "db.py",
     "models.py",
 )

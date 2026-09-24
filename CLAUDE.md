@@ -57,7 +57,10 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/indexer.py` | Incremental `Indexer`: the scan, SHA-256 change detection, the bounded window (workers embed, the driver writes), section/passage vectors |
 | `src/markdown_memory/graph_patch.py` | `gather_before_dequantize`: rewrites two nodes of the pinned ONNX graph on the protobuf wire format, or refuses (`None`) and leaves it alone |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
-| `src/markdown_memory/server.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
+| `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
+| `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
+| `src/markdown_memory/headings.py` | Breadcrumb resolution (`Root > Child`), section selection, the outline tree |
+| `src/markdown_memory/server.py` | `MarkdownMemoryService`, MCP tool wiring, `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
 | `scripts/eval_data/` | Frozen eval corpus, labelled queries, `baseline.json` |
 
@@ -90,8 +93,17 @@ the scan bookkeeping in `db.py`.
 - **Errors the agent should see** must be a `MarkdownMemoryError`: tool handlers convert
   those to the SDK's `ToolError`. The SDK hides every other exception behind a generic
   "Error executing tool".
-- **Ruff**: line length 100, rules `E,F,I,N,UP,B,A,C4,SIM,TID`. Match the surrounding
-  comment density; comments explain why, not what.
+- **Ruff**: line length 100, rules `E,F,I,N,UP,B,A,C4,SIM,TID,ARG,ERA,RUF100` (`ARG` is
+  ignored under `tests/`, where a fake takes the arguments of what it stands in for).
+  Match the surrounding comment density; comments explain why, not what.
+- **The shape of the package is a test, not a description.**
+  `tests/test_architecture.py` fails when a module goes over its budget of logical lines,
+  when a heavy dependency is imported outside the module that owns it, when the layout
+  table above does not name a module, when a top-level symbol is dead, or when a star
+  import hides what is used. Growing a module means raising its budget in a diff, on
+  purpose. Dead-symbol detection resolves scope through `symtable`, so it cannot see a
+  name reached only dynamically (`getattr`); `ALLOWED_UNREFERENCED` records any such
+  claim, and is empty.
 - **Every bug fix gets a regression test** that fails when the fix is reverted. Prove
   it: `scripts/mutation_check.py` deletes each guarded behaviour in a throwaway copy of
   the package and fails if the suite stays green. Add an entry when a fix protects

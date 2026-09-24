@@ -12,7 +12,6 @@ import contextlib
 import fcntl
 import hashlib
 import json
-import logging
 import os
 import shutil
 import stat
@@ -20,9 +19,6 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from markdown_memory.exceptions import ModelLoadError
-
-logger = logging.getLogger(__name__)
-
 
 BGE_SMALL_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 GEMMA_REPOSITORY = "onnx-community/embeddinggemma-300m-ONNX"

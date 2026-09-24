@@ -135,7 +135,7 @@ def wanted(source: Source, relative: str) -> bool:
 
 def fetch(source: Source) -> bytes:
     """The upstream tarball, read once and extracted twice: documentation and licences."""
-    with urllib.request.urlopen(archive_url(source), timeout=180) as response:  # noqa: S310
+    with urllib.request.urlopen(archive_url(source), timeout=180) as response:
         payload: bytes = response.read()
     return payload
 

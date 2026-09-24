@@ -17,7 +17,10 @@ from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
+import markdown_memory.config as config_module
+import markdown_memory.freshness as freshness_module
 import markdown_memory.server as server_module
+from markdown_memory.config import ServerConfig
 from markdown_memory.exceptions import (
     ConfigurationError,
     DatabaseError,
@@ -29,7 +32,7 @@ from markdown_memory.models import (
     OutlineNode,
 )
 from markdown_memory.search import HybridSearcher
-from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
+from markdown_memory.server import MarkdownMemoryService, create_server
 
 ARROWS = """# API
 
@@ -311,18 +314,18 @@ class TestProjectScopedConfiguration:
     @pytest.fixture(autouse=True)
     def clean_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for variable in (
-            server_module.ENV_DB_PATH,
-            server_module.ENV_DOCS_DIR,
-            server_module.ENV_MODEL_CACHE,
-            server_module.ENV_EXCLUDE,
-            server_module.ENV_PROJECT_DIR,
+            config_module.ENV_DB_PATH,
+            config_module.ENV_DOCS_DIR,
+            config_module.ENV_MODEL_CACHE,
+            config_module.ENV_EXCLUDE,
+            config_module.ENV_PROJECT_DIR,
         ):
             monkeypatch.delenv(variable, raising=False)
 
     def test_the_docs_root_defaults_to_the_project_claude_code_reports(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
+        monkeypatch.setenv(config_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
         monkeypatch.chdir(tmp_path)
         assert ServerConfig.from_env().docs_dir == tmp_path / "project"
 
@@ -335,8 +338,8 @@ class TestProjectScopedConfiguration:
         project.mkdir()
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
-        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(project))
-        monkeypatch.setenv(server_module.ENV_DB_PATH, ".markdown-memory/index.db")
+        monkeypatch.setenv(config_module.ENV_PROJECT_DIR, str(project))
+        monkeypatch.setenv(config_module.ENV_DB_PATH, ".markdown-memory/index.db")
         monkeypatch.chdir(elsewhere)
         assert ServerConfig.from_env().db_path == project / ".markdown-memory/index.db"
 
@@ -344,15 +347,15 @@ class TestProjectScopedConfiguration:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv(server_module.ENV_DOCS_DIR, "docs")
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, "docs")
         config = ServerConfig.from_env()
         assert config.docs_dir == tmp_path / "docs"
 
     def test_an_absolute_path_is_left_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(server_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
-        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(tmp_path / "absolute"))
+        monkeypatch.setenv(config_module.ENV_PROJECT_DIR, str(tmp_path / "project"))
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(tmp_path / "absolute"))
         assert ServerConfig.from_env().docs_dir == tmp_path / "absolute"
 
     @pytest.mark.parametrize(
@@ -366,10 +369,10 @@ class TestProjectScopedConfiguration:
         Treating that as a directory name indexes nothing and reports success, which is
         indistinguishable from a project with no documentation.
         """
-        monkeypatch.setenv(server_module.ENV_DOCS_DIR, value)
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, value)
         with pytest.raises(ConfigurationError) as raised:
             ServerConfig.from_env()
-        assert server_module.ENV_DOCS_DIR in str(raised.value)
+        assert config_module.ENV_DOCS_DIR in str(raised.value)
         assert "relative to the project root" in str(raised.value)
 
     def test_a_directory_really_named_like_a_variable_is_allowed(
@@ -378,7 +381,7 @@ class TestProjectScopedConfiguration:
         """The rejection is for text nobody expanded, not for an unusual name."""
         odd = tmp_path / "${version}"
         odd.mkdir()
-        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(odd))
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(odd))
         assert ServerConfig.from_env().docs_dir == odd
 
     def test_the_committed_config_points_at_the_project_it_ships_with(self) -> None:
@@ -391,7 +394,7 @@ class TestProjectScopedConfiguration:
         # The database is keyed on the docs root now, so the shipped config sets no path at
         # all. Any path it does set must stay relative: the server resolves one against the
         # project root, and an absolute path in a committed config belongs to one machine.
-        for name in (server_module.ENV_DB_PATH, server_module.ENV_DOCS_DIR):
+        for name in (config_module.ENV_DB_PATH, config_module.ENV_DOCS_DIR):
             if name in environment:
                 assert not Path(environment[name]).is_absolute()
 
@@ -862,14 +865,14 @@ class TestEachProjectKeepsItsOwnIndex:
         launcher = tmp_path / "runner"
         launcher.mkdir()
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
-        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        monkeypatch.delenv(config_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(config_module.ENV_PROJECT_DIR, raising=False)
         # Neither server is started from its own project: the cwd is the launcher's.
         monkeypatch.chdir(launcher)
 
         databases = []
         for root in (alpha, beta):
-            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(root))
             config = ServerConfig.from_env()
             databases.append(config.db_path)
             service = MarkdownMemoryService(config, fake_embedder)
@@ -885,7 +888,7 @@ class TestEachProjectKeepsItsOwnIndex:
                 "an index was written into the project"
             )
 
-        monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(beta))
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(beta))
         service = MarkdownMemoryService(ServerConfig.from_env(), fake_embedder)
         try:
             assert [Path(d.file_path).name for d in service.list_documents()] == ["beta.md"]
@@ -901,14 +904,14 @@ class TestEachProjectKeepsItsOwnIndex:
     ) -> None:
         """The label is only for humans; the digest is what keeps them apart."""
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
-        monkeypatch.delenv(server_module.ENV_PROJECT_DIR, raising=False)
+        monkeypatch.delenv(config_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(config_module.ENV_PROJECT_DIR, raising=False)
         first = tmp_path / "one" / "docs"
         second = tmp_path / "two" / "docs"
         paths = []
         for root in (first, second):
             root.mkdir(parents=True)
-            monkeypatch.setenv(server_module.ENV_DOCS_DIR, str(root))
+            monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(root))
             paths.append(ServerConfig.from_env().db_path)
         assert paths[0] != paths[1], "two roots named 'docs' shared one index"
         assert all(p.parent.name.startswith("docs-") for p in paths)
@@ -927,15 +930,15 @@ class TestTheCommandLineRekeysTheDatabase:
     @staticmethod
     def config(docs: Path | None, db: Path | None = None) -> ServerConfig:
         arguments = argparse.Namespace(docs_dir=docs, db=db, embedder=None, exclude=[])
-        return server_module._config_from_cli(arguments)
+        return config_module._config_from_cli(arguments)
 
     @pytest.fixture(autouse=True)
     def _launcher(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
         for name in (
-            server_module.ENV_DB_PATH,
-            server_module.ENV_DOCS_DIR,
-            server_module.ENV_PROJECT_DIR,
+            config_module.ENV_DB_PATH,
+            config_module.ENV_DOCS_DIR,
+            config_module.ENV_PROJECT_DIR,
         ):
             monkeypatch.delenv(name, raising=False)
         launcher = tmp_path / "launcher"
@@ -959,7 +962,7 @@ class TestTheCommandLineRekeysTheDatabase:
         alpha.mkdir()
         flag = tmp_path / "flag.db"
         assert self.config(alpha, flag).db_path == flag, "--db stopped winning"
-        monkeypatch.setenv(server_module.ENV_DB_PATH, str(tmp_path / "from_env.db"))
+        monkeypatch.setenv(config_module.ENV_DB_PATH, str(tmp_path / "from_env.db"))
         assert self.config(alpha).db_path == tmp_path / "from_env.db", (
             "MARKDOWN_MEMORY_DB stopped winning"
         )
@@ -981,7 +984,7 @@ class TestARetargetedDocsSymlinkStrandsNothing:
         self, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-        monkeypatch.delenv(server_module.ENV_DB_PATH, raising=False)
+        monkeypatch.delenv(config_module.ENV_DB_PATH, raising=False)
         first = tmp_path / "real-a"
         first.mkdir()
         (first / "alpha.md").write_text("# Alpha\n\n## Retry policy\n\nalpha body\n")
@@ -1036,7 +1039,7 @@ class TestSayingWhenTheDocumentsMovedOn:
 
     @staticmethod
     def status(service: MarkdownMemoryService) -> object:
-        service._freshness = None  # the sweep's cache; freshness itself is what is tested
+        service._freshness.invalidate()
         return service.index_status()
 
     def docs(self, service: MarkdownMemoryService) -> Path:
@@ -1093,17 +1096,28 @@ class TestSayingWhenTheDocumentsMovedOn:
         )
 
         reads: list[str] = []
-        opener = server_module.read_regular_file
+        opener = freshness_module.read_regular_file
 
         def watch(target: Path) -> bytes | None:
             reads.append(str(target))
             return opener(target)
 
-        service._freshness = None
+        service._freshness.invalidate()
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(server_module, "read_regular_file", watch)
+            patch.setattr(freshness_module, "read_regular_file", watch)
             assert service.index_status().changed_files == 0
         assert reads == [], "an unchanged file was read again after its time was recorded"
+
+        # The positive control: `reads == []` would pass just as well if the patch above
+        # reached nothing, which is exactly what happens when the sweep moves to another
+        # module and the monkeypatch is left pointing at the old one. Move the time
+        # without the bytes and the same watcher must see the file.
+        os.utime(path, (3, 3))
+        service._freshness.invalidate()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(freshness_module, "read_regular_file", watch)
+            assert service.index_status().changed_files == 0
+        assert reads == [str(path)], "the watcher never fired, so the check above proved nothing"
 
     def test_the_write_back_refuses_to_stamp_a_time_onto_somebody_else_s_content(
         self, service: MarkdownMemoryService
@@ -1211,7 +1225,7 @@ class TestSayingWhenTheDocumentsMovedOn:
         service.index_status()  # primes the cache
         (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
         assert service.index_status().changed_files == 0
-        service._freshness = None
+        service._freshness.invalidate()
         assert service.index_status().changed_files == 1
 
     def test_indexing_forgets_what_the_last_sweep_found(
@@ -1263,13 +1277,13 @@ class TestSayingWhenTheDocumentsMovedOn:
             measured.append(service.index_status().changed_files)
             done.set()
 
-        with service._freshness_lock:
+        with service._freshness._lock:
             # Deterministic, and the part a mutation cannot schedule its way past: whatever
             # guards the sweep has to be mutual exclusion, not a semaphore that lets eight
             # through. The waits below say the sweep really does queue behind it.
-            taken = service._freshness_lock.acquire(blocking=False)
+            taken = service._freshness._lock.acquire(blocking=False)
             if taken:  # pragma: no cover - only a broken lock gets here
-                service._freshness_lock.release()
+                service._freshness._lock.release()
             assert not taken, "the freshness lock does not exclude anybody"
 
             worker = threading.Thread(target=sweep)
@@ -1278,7 +1292,7 @@ class TestSayingWhenTheDocumentsMovedOn:
 
             invalidated = threading.Event()
             invalidator = threading.Thread(
-                target=lambda: (service._invalidate_freshness(), invalidated.set())
+                target=lambda: (service._freshness.invalidate(), invalidated.set())
             )
             invalidator.start()
             assert not invalidated.wait(timeout=1.0), "an invalidation ran during a sweep"
