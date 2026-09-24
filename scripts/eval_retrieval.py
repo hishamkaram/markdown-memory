@@ -32,7 +32,7 @@ from pathlib import Path
 
 import eval_cache
 
-from markdown_memory.indexer import DEFAULT_EMBEDDER, Embedder, create_embedder
+from markdown_memory.embedders import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.models import SearchResult
 from markdown_memory.server import MarkdownMemoryService, ServerConfig
 

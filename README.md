@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 13,300
+       alt="One question asked of four documentation files. Reading them whole costs 13,453
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,526 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,527 tokens - the
             one that answers is 401.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 13,300 tokens in all:
+`docs/evaluation-protocol.md`, 13,453 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   401 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  637 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  638 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
   397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,526 tokens instead of 13,300**, and the section that actually answers is 401 - a
+**2,527 tokens instead of 13,453**, and the section that actually answers is 401 - a
 thirtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -204,7 +204,7 @@ To fetch the model deliberately rather than on the first query:
 
 ```bash
 uv run python -c "
-from markdown_memory.indexer import DEFAULT_EMBEDDER, create_embedder
+from markdown_memory.embedders import DEFAULT_EMBEDDER, create_embedder
 from markdown_memory.server import ServerConfig
 create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
 "

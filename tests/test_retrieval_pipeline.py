@@ -10,16 +10,16 @@ from fakes import FakeEmbedder, vectors_for
 
 import markdown_memory.indexer as indexer_module
 from markdown_memory.db import SCHEMA_VERSION, Database
-from markdown_memory.exceptions import DatabaseError, IndexingError
-from markdown_memory.indexer import (
+from markdown_memory.embedders import (
     GEMMA_DOCUMENT_PROMPT,
     GEMMA_QUERY_PROMPT,
     Embedder,
     EmbeddingGemmaEmbedder,
     FastEmbedEmbedder,
-    Indexer,
     create_embedder,
 )
+from markdown_memory.exceptions import DatabaseError, IndexingError
+from markdown_memory.indexer import Indexer
 from markdown_memory.models import SectionDraft, SectionVectors
 from markdown_memory.parser import MAX_UNIT_CHARS, MAX_UNITS_PER_SECTION, MarkdownParser
 from markdown_memory.search import KEYWORD_GATE, HybridSearcher, _is_identifier, fts_terms

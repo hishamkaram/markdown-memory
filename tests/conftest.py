@@ -9,8 +9,8 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
+from markdown_memory.embedders import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.exceptions import EmbeddingError
-from markdown_memory.indexer import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.server import ServerConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"

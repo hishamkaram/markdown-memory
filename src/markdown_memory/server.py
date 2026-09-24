@@ -28,6 +28,18 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from markdown_memory.db import Database
+from markdown_memory.discovery import (
+    MAX_FILE_BYTES,
+    hash_bytes,
+    read_regular_file,
+)
+from markdown_memory.embedders import (
+    DEFAULT_EMBEDDER,
+    Embedder,
+    EmbeddingGemmaEmbedder,
+    FastEmbedEmbedder,
+    create_embedder,
+)
 from markdown_memory.exceptions import (
     ConfigurationError,
     DocumentNotFoundError,
@@ -37,17 +49,9 @@ from markdown_memory.exceptions import (
     SectionNotFoundError,
 )
 from markdown_memory.indexer import (
-    DEFAULT_EMBEDDER,
     DEFAULT_INDEX_WORKERS,
-    MAX_FILE_BYTES,
-    Embedder,
-    EmbeddingGemmaEmbedder,
-    FastEmbedEmbedder,
     Indexer,
-    create_embedder,
-    hash_bytes,
     parse_exclusions,
-    read_regular_file,
 )
 from markdown_memory.models import (
     PATH_SEPARATOR,
@@ -238,10 +242,6 @@ class _Verdict(Enum):
     CHANGED = auto()
     #: Same bytes, a time that has moved: nothing to report, but worth writing down.
     SAME_BYTES_NEW_TIME = auto()
-
-
-def _has_changed(path: Path, content_hash: str, mtime_ns: int | None) -> bool:
-    return _compare(path, content_hash, mtime_ns)[0] is _Verdict.CHANGED
 
 
 def _compare(path: Path, content_hash: str, mtime_ns: int | None) -> tuple[_Verdict, int]:

@@ -160,14 +160,14 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: trust size, mtime and inode, and drop ctime from the stamp",
-        module="indexer.py",
+        module="model_cache.py",
         old='        "ctime_ns": info.st_ctime_ns,\n',
         new="",
         tests="test_a_file_rewritten_with_its_old_mtime_restored_is_still_caught",
     ),
     Mutation(
         name="cache: trust a model file that is a symlink out of the cache",
-        module="indexer.py",
+        module="model_cache.py",
         old="""    if not stat.S_ISREG(info.st_mode):
         return None  # a symlink into a blob store is not a file this cache vouches for
 """,
@@ -176,21 +176,21 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: adopt the unversioned folder without checking its bytes",
-        module="indexer.py",
-        old="        if not legacy.is_dir() or _unverified(legacy):\n",
+        module="embedders.py",
+        old="        if not legacy.is_dir() or model_cache._unverified(legacy):\n",
         new="        if not legacy.is_dir():\n",
         tests="test_an_unversioned_folder_that_does_not_match_is_left_where_it_is",
     ),
     Mutation(
         name="cache: take what was downloaded on trust",
-        module="indexer.py",
-        old="            still_wrong = _unverified(self._model_dir)\n",
+        module="embedders.py",
+        old="            still_wrong = model_cache._unverified(self._model_dir)\n",
         new="            still_wrong: list[str] = []\n",
         tests="test_a_download_that_does_not_match_the_manifest_fails_without_downloading_again",
     ),
     Mutation(
         name="cache: treat any load failure as corruption and re-download",
-        module="indexer.py",
+        module="embedders.py",
         old="                        self._session, self._tokenizer = self._open()\n",
         new="""                        try:
                             self._session, self._tokenizer = self._open()
@@ -202,24 +202,26 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: repair under the shared lock, beside whoever is reading",
-        module="indexer.py",
-        old="                    with _model_cache_lock(self._cache_dir, exclusive=True):\n",
-        new="                    with _model_cache_lock(self._cache_dir, exclusive=False):\n",
+        module="embedders.py",
+        old="                    with model_cache._model_cache_lock("
+        "self._cache_dir, exclusive=True):\n",
+        new="                    with model_cache._model_cache_lock("
+        "self._cache_dir, exclusive=False):\n",
         tests="test_two_processes_starting_at_once_download_once_between_them",
     ),
     Mutation(
         name="graph: run the published graph and dequantize the whole vocabulary",
-        module="indexer.py",
-        old="            graph = derived if derived and _file_identity(derived) else None\n",
+        module="embedders.py",
+        old="            graph = derived if derived and "
+        "model_cache._file_identity(derived) else None\n",
         new="            graph = None\n",
         tests="test_the_embedder_runs_the_derived_graph",
     ),
     Mutation(
         name="graph: keep a derived graph that does not match its pin",
-        module="indexer.py",
-        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
-        "DERIVED_GRAPH_SHA256:\n",
-        new="        if _file_identity(derived) is not None:\n",
+        module="embedders.py",
+        old="            and model_cache._hash_file(derived) == model_cache.DERIVED_GRAPH_SHA256\n",
+        new="            and True  # whatever it hashes to\n",
         tests="test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded",
     ),
     Mutation(
@@ -245,22 +247,21 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: keep the stamp valid when the derived graph's pin moves",
-        module="indexer.py",
+        module="model_cache.py",
         old='    if stamp.get("derived") != DERIVED_GRAPH_SHA256:\n        return False\n',
         new="",
         tests="test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files",
     ),
     Mutation(
         name="cache: keep a derived graph that is a symlink out of the cache",
-        module="indexer.py",
-        old="        if _file_identity(derived) is not None and _hash_file(derived) == "
-        "DERIVED_GRAPH_SHA256:\n",
-        new="        if derived.is_file() and _hash_file(derived) == DERIVED_GRAPH_SHA256:\n",
+        module="embedders.py",
+        old="            model_cache._file_identity(derived) is not None\n",
+        new="            derived.is_file()\n",
         tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
     ),
     Mutation(
         name="cache: leave a directory sitting where the stamp goes",
-        module="indexer.py",
+        module="model_cache.py",
         old="    if stamped.is_dir() and not stamped.is_symlink():\n",
         new="    if False:  # a directory there is somebody else's problem\n",
         tests="test_a_directory_where_the_stamp_belongs_is_repaired",
@@ -268,8 +269,8 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: try to unlink a directory where a model file belongs",
-        module="indexer.py",
-        old="            _remove(path)  # only what is proven wrong\n",
+        module="embedders.py",
+        old="            model_cache._remove(path)  # only what is proven wrong\n",
         new="            path.unlink(missing_ok=True)\n",
         tests="test_a_directory_where_a_model_file_belongs_is_repaired",
         # The honest outcome of the bug is the exception the guard exists to prevent,
@@ -330,14 +331,14 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: follow a symlinked directory out of the model cache",
-        module="indexer.py",
+        module="model_cache.py",
         old="    current = model_dir\n",
         new="    return model_dir / name\n    current = model_dir\n",
         tests="test_a_symlinked_directory_on_the_way_is_never_written_through",
     ),
     Mutation(
         name="cache: assume a removal that did nothing worked",
-        module="indexer.py",
+        module="model_cache.py",
         old="    if path.exists() or path.is_symlink():\n",
         new="    if False:\n",
         tests="test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known",
@@ -397,7 +398,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: let a repair failure escape as whatever the Hub raised",
-        module="indexer.py",
+        module="embedders.py",
         old="                        except Exception as exc:\n",
         new="                        except MarkdownMemoryError as exc:\n",
         tests="test_a_cache_that_cannot_be_repaired_fails_as_a_domain_error",
@@ -405,7 +406,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="cache: follow a symlink planted at a temporary path",
-        module="indexer.py",
+        module="model_cache.py",
         old=(
             "    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT "
             "| os.O_EXCL | os.O_NOFOLLOW, 0o600)\n"
@@ -488,8 +489,8 @@ MUTATIONS = (
     ),
     Mutation(
         name="weights: report one model's revision for another model's weights",
-        module="indexer.py",
-        old="        if self._model_name != BGE_SMALL_MODEL_NAME:\n",
+        module="embedders.py",
+        old="        if self._model_name != model_cache.BGE_SMALL_MODEL_NAME:\n",
         new="        if False:  # every model is assumed to live in that one folder\n",
         tests="test_only_the_model_whose_cache_it_can_find_reports_a_revision",
     ),
@@ -531,14 +532,14 @@ MUTATIONS = (
     ),
     Mutation(
         name="indexer: let onnxruntime's intra-op pool spin-wait again",
-        module="indexer.py",
+        module="embedders.py",
         old="            options.add_session_config_entry(*_SPIN_CONFIG)\n",
         new="",
         tests="test_gemma_session_disables_intra_op_spinning",
     ),
     Mutation(
         name="indexer: document MARKDOWN_MEMORY_THREADS for bge-small but drop it again",
-        module="indexer.py",
+        module="embedders.py",
         old="                        threads=_inference_threads() or None,\n",
         new="",
         tests="test_fastembed_passes_the_thread_override",
@@ -590,7 +591,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7239),',
+        old='    ("README.md", 7240),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -654,7 +655,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="exclusions: anchor every pattern at the docs root",
-        module="indexer.py",
+        module="discovery.py",
         old=(
             "        elif any(fnmatchcase(part, pattern) for part in parts):\n"
             "            return True"
@@ -745,7 +746,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="exclusions: fold case when matching a pattern",
-        module="indexer.py",
+        module="discovery.py",
         old="        elif any(fnmatchcase(part, pattern) for part in parts):",
         new="        elif any(fnmatchcase(part.lower(), pattern.lower()) for part in parts):",
         tests="test_matching_does_not_depend_on_the_platform_case_rules",
@@ -1028,10 +1029,14 @@ MUTATIONS = (
     Mutation(
         name="coverage: retract before knowing whether anything will be written",
         module="indexer.py",
-        old="            files = iter_markdown_files(root, record_unreadable, self._exclude)",
+        old=(
+            "            files = discovery.iter_markdown_files("
+            "root, record_unreadable, self._exclude)"
+        ),
         new=(
             "            about_to_write()\n"
-            "            files = iter_markdown_files(root, record_unreadable, self._exclude)"
+            "            files = discovery.iter_markdown_files("
+            "root, record_unreadable, self._exclude)"
         ),
         tests="test_a_run_that_committed_nothing_leaves_the_certificate_alone",
     ),
@@ -1118,14 +1123,19 @@ MUTATIONS = (
     Mutation(
         name="index: ask whether a pruned directory's parent was walkable",
         module="indexer.py",
-        old="        if not _is_walkable(os.path.relpath(path, root).split(os.sep)):",
-        new="        if not _is_walkable(os.path.relpath(path, root).split(os.sep)[:-1]):",
+        old="        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):",
+        new=(
+            "        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)[:-1]):"
+        ),
         tests="test_a_pruned_directory_that_could_not_be_listed_keeps_its_own_failure",
     ),
     Mutation(
         name="index: speak for an excluded tree this walk never entered",
         module="indexer.py",
-        old="        return not (self._exclude and _is_excluded(Path(path), root, self._exclude))",
+        old=(
+            "        return not (self._exclude and "
+            "discovery._is_excluded(Path(path), root, self._exclude))"
+        ),
         new="        return True",
         tests="test_a_failure_inside_an_excluded_directory_outlives_a_parent_scan",
     ),
@@ -1154,15 +1164,18 @@ MUTATIONS = (
     Mutation(
         name="index: purge what a walk could not see behind a symlink",
         module="indexer.py",
-        old="            if _behind_symlink(root, file_path):\n                continue",
+        old="            if discovery._behind_symlink(root, file_path):\n                continue",
         new="            if False:\n                continue",
         tests="test_a_directory_that_became_a_symlink_costs_nothing",
     ),
     Mutation(
         name="index: clear failures behind a symlink this walk never followed",
         module="indexer.py",
-        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
-        new="        if _is_shadowing_symlink(path):",
+        old=(
+            "        if discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path):"
+        ),
+        new="        if discovery._is_shadowing_symlink(path):",
         tests="test_a_failure_behind_a_symlinked_directory_outlives_a_parent_scan",
     ),
     Mutation(
@@ -1186,7 +1199,7 @@ MUTATIONS = (
         module="indexer.py",
         old=(
             "            if self._walk_would_visit(root, path, blocked) "
-            "or _certainly_gone(root, path):"
+            "or discovery._certainly_gone(root, path):"
         ),
         new="            if self._walk_would_visit(root, path, blocked):",
         tests="test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does",
@@ -1194,13 +1207,13 @@ MUTATIONS = (
     Mutation(
         name="index: keep answering from a deleted file the walk could not see",
         module="indexer.py",
-        old="            if _certainly_gone(root, file_path):",
+        old="            if discovery._certainly_gone(root, file_path):",
         new="            if False:",
         tests="test_a_deleted_document_inside_a_pruned_tree_stops_answering",
     ),
     Mutation(
         name="index: read a directory it may not list as an empty one",
-        module="indexer.py",
+        module="discovery.py",
         old=(
             "    except OSError:  # no permission, symlink loop, "
             "unreachable mount: no evidence either way\n        return False"
@@ -1213,7 +1226,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="index: read a broken symlink's target as a deletion",
-        module="indexer.py",
+        module="discovery.py",
         old="    if _behind_symlink(root, path) or os.path.islink(path):\n        return False",
         new="    if False:\n        return False",
         tests="test_a_directory_replaced_by_a_broken_symlink_keeps_its_documents",
@@ -1221,13 +1234,16 @@ MUTATIONS = (
     Mutation(
         name="index: clear a failure on a directory the walk only saw the name of",
         module="indexer.py",
-        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
-        new="        if _behind_symlink(root, path):",
+        old=(
+            "        if discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path):"
+        ),
+        new="        if discovery._behind_symlink(root, path):",
         tests="test_a_failure_on_a_directory_that_became_a_symlink_outlives_the_swap",
     ),
     Mutation(
         name="index: take a name it could not decode for a file that is gone",
-        module="indexer.py",
+        module="discovery.py",
         old="    if _UNDECODABLE in path:\n        return False",
         new="    if False:\n        return False",
         tests="test_a_failure_whose_name_could_not_be_decoded_is_not_taken_for_deleted",

@@ -51,7 +51,10 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v5), repository methods, `integrity_problems()` |
-| `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, the versioned/verified model cache (`gemma_model_dir`, `GEMMA_MANIFEST`, `.verified` stamp, `flock`), incremental `Indexer` (workers embed, the driver writes) |
+| `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, exclusions, symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
+| `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the `.verified` stamp, `flock`, atomic writes |
+| `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds |
+| `src/markdown_memory/indexer.py` | Incremental `Indexer`: the scan, SHA-256 change detection, the bounded window (workers embed, the driver writes), section/passage vectors |
 | `src/markdown_memory/graph_patch.py` | `gather_before_dequantize`: rewrites two nodes of the pinned ONNX graph on the protobuf wire format, or refuses (`None`) and leaves it alone |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/server.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
@@ -71,7 +74,7 @@ the scan bookkeeping in `db.py`.
 
 - **Python 3.11+, fully typed.** `mypy --strict` must pass with zero errors and zero
   untyped defs. No unconstrained `Any`: use `JsonValue`, Protocols or TypeAliases. `numpy`
-  and `onnxruntime` stay inside `indexer.py`; vectors cross module boundaries as
+  and `onnxruntime` stay inside `embedders.py`; vectors cross module boundaries as
   `list[float]`.
 - **Immutable models.** Every domain entity is `@dataclass(slots=True, frozen=True)`. To
   change one, build a new one (`dataclasses.replace`).
@@ -118,7 +121,9 @@ Changing the embedding model or its dimension invalidates every stored vector: t
 is discarded and rebuilt (`IndexReport.notes` says so).
 
 The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
-content, the chunking constants, the source of `parser.py`/`indexer.py`/`db.py`/`models.py`,
+content, the chunking constants, the source of the modules that decide what is indexed
+(`parser.py`, `indexer.py`, `embedders.py`, `model_cache.py`, `discovery.py`, `db.py`,
+`models.py`),
 the embedder's revision, prompts and dimension, the size and mtime of the model files
 actually on disk, and `MARKDOWN_MEMORY_THREADS` (`scripts/eval_cache.py`). A cached index
 is never trusted on its key alone: before it is scored, its parse fingerprint - every

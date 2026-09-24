@@ -297,7 +297,7 @@ print(int(peak.split()[1]) // 1024)
 
 @pytest.fixture
 def model_dir() -> Path:
-    from markdown_memory.indexer import GEMMA_MODEL_FILE, gemma_model_dir
+    from markdown_memory.model_cache import GEMMA_MODEL_FILE, gemma_model_dir
     from markdown_memory.server import ServerConfig
 
     cache_dir = ServerConfig.from_env().model_cache_dir
@@ -310,7 +310,7 @@ def model_dir() -> Path:
 @pytest.mark.embedding
 def test_the_rewrite_of_the_real_graph_matches_its_pinned_checksum(model_dir: Path) -> None:
     """The pin is the rewrite's version: change the rewriter and this is what says so."""
-    from markdown_memory.indexer import DERIVED_GRAPH_SHA256, GEMMA_MODEL_FILE
+    from markdown_memory.model_cache import DERIVED_GRAPH_SHA256, GEMMA_MODEL_FILE
 
     rewritten = gather_before_dequantize((model_dir / GEMMA_MODEL_FILE).read_bytes())
     assert rewritten is not None
@@ -327,7 +327,8 @@ def test_the_real_model_embeds_identically_through_both_graphs(model_dir: Path) 
     import onnxruntime
     from tokenizers import Tokenizer
 
-    from markdown_memory.indexer import DERIVED_GRAPH_FILE, GEMMA_MAX_TOKENS, GEMMA_MODEL_FILE
+    from markdown_memory.embedders import GEMMA_MAX_TOKENS
+    from markdown_memory.model_cache import DERIVED_GRAPH_FILE, GEMMA_MODEL_FILE
 
     tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     tokenizer.enable_truncation(max_length=GEMMA_MAX_TOKENS)
@@ -367,7 +368,7 @@ def test_one_run_of_the_real_model_no_longer_peaks_over_a_gigabyte(model_dir: Pa
     carries every other test's allocations. As published, one 512-token run peaks at
     ~1.45 GB: the whole 262144x768 vocabulary table in float32, to keep 512 rows.
     """
-    from markdown_memory.indexer import DERIVED_GRAPH_FILE
+    from markdown_memory.model_cache import DERIVED_GRAPH_FILE
 
     graph = model_dir / DERIVED_GRAPH_FILE
     if not graph.is_file():

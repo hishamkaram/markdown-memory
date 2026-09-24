@@ -15,7 +15,8 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 
 from markdown_memory.db import Database
-from markdown_memory.indexer import GEMMA_REVISION, Embedder
+from markdown_memory.embedders import Embedder
+from markdown_memory.model_cache import GEMMA_REVISION
 from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
 

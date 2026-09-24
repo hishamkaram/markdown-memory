@@ -23,8 +23,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.embedders import Embedder
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
-from markdown_memory.indexer import Embedder
 from markdown_memory.models import SearchResult
 
 logger = logging.getLogger(__name__)

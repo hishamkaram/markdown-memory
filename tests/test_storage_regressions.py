@@ -23,14 +23,16 @@ from helpers import draft, store
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.indexer as indexer_module
+from markdown_memory import discovery
 from markdown_memory.db import SCHEMA_VERSION, Database
+from markdown_memory.discovery import iter_markdown_files
 from markdown_memory.exceptions import (
     DatabaseError,
     IndexBusyError,
     IndexingError,
     ModelLoadError,
 )
-from markdown_memory.indexer import Indexer, iter_markdown_files
+from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
     SectionVectors,
 )
@@ -189,7 +191,7 @@ class TestIndexerSafety:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(indexer_module, "MAX_FILE_BYTES", 32)
+        monkeypatch.setattr(discovery, "MAX_FILE_BYTES", 32)
         root = tmp_path / "docs"
         root.mkdir()
         (root / "big.md").write_text("# Big\n\n" + "x" * 100)

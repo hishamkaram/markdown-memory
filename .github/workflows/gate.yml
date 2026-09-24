@@ -76,7 +76,7 @@ jobs:
       - name: Load the embedding model before anything can skip over it
         run: |
           uv run python -c "
-          from markdown_memory.indexer import DEFAULT_EMBEDDER, create_embedder
+          from markdown_memory.embedders import DEFAULT_EMBEDDER, create_embedder
           from markdown_memory.server import ServerConfig
           create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
           print('embedding model loaded')
