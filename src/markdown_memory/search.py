@@ -23,7 +23,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
-from markdown_memory.embedders import Embedder
+from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.models import SearchResult
 
@@ -422,8 +422,8 @@ class HybridSearcher:
                 self._db.record_weights_mismatch(None)
             return recorded
         message = (
-            f"This index was built by weights {recorded[:12]} and the model answering now "
-            f"reports {weights[:12] if weights else 'no readable revision'}: the distance "
+            f"This index was built by weights {short_weights(recorded)} and the model "
+            f"answering now reports {short_weights(weights)}: the distance "
             "between two models' vectors measures nothing, so only keyword ranking is used "
             "until this documentation root is re-indexed from scratch."
         )

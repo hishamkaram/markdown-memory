@@ -2,8 +2,7 @@
 
 The embedder that uses this is in ``embedders.py``; the cache is its own module because
 the pin, the manifest and the verification stamp are consulted from outside it too -
-``scripts/eval_cache.py`` keys the retrieval gate on them, and the graph-patch tests read
-the directory directly.
+``scripts/eval_cache.py`` keys the retrieval gate on them.
 """
 
 from __future__ import annotations
@@ -28,7 +27,13 @@ GEMMA_REPOSITORY = "onnx-community/embeddinggemma-300m-ONNX"
 GEMMA_REVISION = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
 
 
-GEMMA_MODEL_FILE = "onnx/model_quantized.onnx"
+# The 4-bit graph, which quantizes the vocabulary table with `GatherBlockQuantized` and the
+# projections with `MatMulNBits`. Earlier versions ran `onnx/model_quantized.onnx` (int8)
+# and rewrote it on each machine to gather the vocabulary before dequantizing it; this
+# graph does that natively, in half the download and half the CPU per query. The file name
+# is part of the embedder's `model_name`, so changing it discards every stored vector -
+# which is correct, because the two graphs' vectors are not comparable.
+GEMMA_MODEL_FILE = "onnx/model_q4.onnx"
 
 
 # Size and sha256 of every file at GEMMA_REVISION, from the Hub's paths-info API. This is
@@ -37,12 +42,12 @@ GEMMA_MODEL_FILE = "onnx/model_quantized.onnx"
 # it at all.
 GEMMA_MANIFEST: Mapping[str, tuple[int, str]] = {
     GEMMA_MODEL_FILE: (
-        567_874,
-        "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8",
+        519_322,
+        "ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043",
     ),
     GEMMA_MODEL_FILE + "_data": (
-        308_890_624,
-        "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0",
+        196_725_760,
+        "599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02",
     ),
     "tokenizer.json": (
         20_323_312,
@@ -54,21 +59,10 @@ GEMMA_MANIFEST: Mapping[str, tuple[int, str]] = {
 GEMMA_FILES: tuple[str, ...] = tuple(GEMMA_MANIFEST)
 
 
-# The graph the embedder actually runs is derived from the downloaded one on this machine:
-# the same weights, with the vocabulary gathered before it is dequantized, which is worth
-# about 1 GB per query (see graph_patch). It is never fetched, and it is regenerated - not
-# re-downloaded - whenever it is missing or does not match. Its sha256 is also the
-# rewrite's version: changing the rewriter changes this, and the tests say so.
-DERIVED_GRAPH_FILE = "onnx/model_quantized.gather_first.onnx"
-
-
-DERIVED_GRAPH_SHA256 = "ce47d05e0aa9abd97a474a7a951c2814060ddc2f9822dbb0ad30a407aa6e95ea"
-
-
-# Versions before this one kept the files in `_GEMMA_DIR_PREFIX` itself, with no revision
-# anywhere in the path: moving GEMMA_REVISION would have kept serving the old weights
-# under a model name that claims to be the new ones. That folder is migrated, not
-# re-downloaded, the first time this runs.
+# The directory carries the revision, so moving the pin fetches the new weights instead of
+# serving the old ones under a name that claims to be the new ones. The graph file is not
+# in the path: a stamp recording one graph's files cannot match another's manifest, so a
+# folder holding the wrong graph is rejected and refetched rather than trusted.
 _GEMMA_DIR_PREFIX = "embeddinggemma-300m-onnx"
 
 
@@ -85,12 +79,7 @@ def model_cache_root(cache_dir: Path | None = None) -> Path:
 
 
 def gemma_model_dir(cache_dir: Path | None = None) -> Path:
-    """The folder holding the pinned EmbeddingGemma revision.
-
-    A *sibling* of the unversioned folder older versions used, never a child, so the
-    migration can be one rename inside one directory - which no reader can catch
-    half-done.
-    """
+    """The folder holding the pinned EmbeddingGemma revision."""
     return model_cache_root(cache_dir) / f"{_GEMMA_DIR_PREFIX}-{GEMMA_REVISION[:12]}"
 
 
@@ -152,14 +141,6 @@ def _file_identity(path: Path) -> dict[str, int] | None:
     }
 
 
-def _stamped_files(model_dir: Path) -> list[str]:
-    """Everything a stamp vouches for: the downloaded files, and the derived graph."""
-    names = list(GEMMA_MANIFEST)
-    if _identity_in(model_dir, DERIVED_GRAPH_FILE) is not None:
-        names.append(DERIVED_GRAPH_FILE)
-    return names
-
-
 def _identity_in(model_dir: Path, name: str) -> dict[str, int] | None:
     """The identity of one cached file, refusing a path that leaves the cache."""
     path = _cache_path(model_dir, name)
@@ -169,7 +150,7 @@ def _identity_in(model_dir: Path, name: str) -> dict[str, int] | None:
 def _stamp_is_current(model_dir: Path) -> bool:
     """Whether every file still looks exactly as it did when it was last verified.
 
-    Hashing 330 MB costs most of a second of one core, which is too much for every
+    Hashing 218 MB costs most of a second of one core, which is too much for every
     server start when an editor starts one per session. This is a handful of `stat`
     calls; anything that disagrees sends the files back to be hashed.
     """
@@ -179,19 +160,18 @@ def _stamp_is_current(model_dir: Path) -> bool:
         return False
     if not isinstance(stamp, dict) or stamp.get("revision") != GEMMA_REVISION:
         return False
-    if stamp.get("derived") != DERIVED_GRAPH_SHA256:
-        return False
     recorded = stamp.get("files")
-    if not isinstance(recorded, dict) or set(recorded) != set(_stamped_files(model_dir)):
-        return False  # a derived graph that has gone missing is regenerated, not ignored
+    if not isinstance(recorded, dict) or set(recorded) != set(GEMMA_FILES):
+        # Also how a folder left behind by a different graph is rejected: its stamp names
+        # files this manifest does not, so it is refetched rather than half-trusted.
+        return False
     if model_dir.is_symlink():
         return False
     for name in recorded:
         identity = _identity_in(model_dir, name)
         # `None` means the path is not a regular file - a symlink, most likely. Nothing
-        # should be able to stamp one (`_stamped_files` leaves it out, `_unverified`
-        # calls it wrong and `_derive_graph` replaces it), and this is the line that
-        # makes a stamp that somehow recorded `None` stop matching `None` for ever.
+        # should be able to stamp one (`_unverified` calls it wrong), and this is the
+        # line that makes a stamp that somehow recorded `None` stop matching `None`.
         if identity is None or recorded[name] != identity:
             return False
     return True
@@ -201,11 +181,7 @@ def _write_stamp(model_dir: Path) -> None:
     """Record what was just verified. Atomically: a half-written stamp is a false claim."""
     stamp = {
         "revision": GEMMA_REVISION,
-        # The rewrite's version. Without it, a package update that moves the pin - or
-        # fixes the rewriter - leaves the old derived graph in place, because the file
-        # itself has not changed and every identity still matches.
-        "derived": DERIVED_GRAPH_SHA256,
-        "files": {name: _file_identity(model_dir / name) for name in _stamped_files(model_dir)},
+        "files": {name: _file_identity(model_dir / name) for name in GEMMA_FILES},
     }
     temporary = model_dir / f"{_VERIFIED_STAMP}.{os.getpid()}"
     _remove(temporary)  # a stamp left behind by a crash under this same pid

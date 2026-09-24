@@ -27,7 +27,7 @@ from markdown_memory.db import (
     WEIGHTS_META_KEY,
     Database,
 )
-from markdown_memory.embedders import Embedder
+from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import (
     EmbeddingError,
     ForeignWeightsError,
@@ -484,7 +484,7 @@ class Indexer:
             message = (
                 f"Which weights {self._embedder.model_name} is running could not be read, so "
                 "there is no way to tell whether they are the ones that built this index "
-                f"({recorded[:12]}). Nothing has been discarded and no vector has been "
+                f"({short_weights(recorded)}). Nothing has been discarded and no vector has been "
                 "stored - a document of headings alone, which embeds nothing, may have "
                 "been updated before this was reached; repair the model cache and run "
                 "index_directory again."
@@ -492,7 +492,8 @@ class Indexer:
         else:
             message = (
                 f"The weights behind {self._embedder.model_name} changed since this index was "
-                f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
+                f"built ({short_weights(recorded)} -> {short_weights(weights)}), so its vectors "
+                "and the ones a "
                 "query would produce now come from different models. Nothing has been "
                 "discarded and no vector from the new model has been stored - a document "
                 "of headings alone, which embeds nothing, may have been updated before "

@@ -21,7 +21,7 @@ from markdown_memory.db import Database
 from markdown_memory.embedders import EmbeddingGemmaEmbedder, FastEmbedEmbedder
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
 from markdown_memory.indexer import Indexer
-from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME, GEMMA_FILES
+from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
 
 _SPIN_KEY = "session.intra_op.allow_spinning"
 
@@ -49,22 +49,20 @@ def _config_entry(options: Any, key: str) -> str | None:
     return str(value)
 
 
-def _session_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, derived: bool = True
-) -> tuple[str, Any]:
+def _session_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Any]:
     """Load a Gemma embedder against stub files; return what it asked onnxruntime for.
 
     The stubs are written where the code now looks - the revision-keyed folder - and the
     manifest is stubbed to match them, so verification passes offline. `snapshot_download`
     is replaced by a failure: a test about session options has no business fetching
-    330 MB, and before this was pinned these tests only passed on a machine whose
+    218 MB, and before this was pinned these tests only passed on a machine whose
     Hugging Face cache happened to be warm.
     """
     import huggingface_hub
     import onnxruntime
     import tokenizers
 
-    from markdown_memory import embedders, model_cache
+    from markdown_memory import model_cache
 
     manifest = {
         name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in _FILES.items()
@@ -72,11 +70,6 @@ def _session_call(
     monkeypatch.setattr(model_cache, "GEMMA_MANIFEST", manifest)
     monkeypatch.setattr(model_cache, "GEMMA_FILES", tuple(manifest))
     monkeypatch.setattr(model_cache, "GEMMA_MODEL_FILE", "model.onnx")
-    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_FILE", "derived.onnx")
-    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
-    monkeypatch.setattr(
-        embedders, "gather_before_dequantize", lambda graph: _DERIVED if derived else None
-    )
     monkeypatch.setattr(
         huggingface_hub,
         "snapshot_download",
@@ -161,8 +154,6 @@ def test_fastembed_leaves_the_count_to_fastembed_when_the_override_is_unset(
 # --- The model cache: keyed by revision, verified before it is loaded -------------------
 
 _FILES = {"model.onnx": b"graph bytes", "nested/weights.bin": b"weights" * 100}
-#: What the stubbed rewrite produces from _FILES["model.onnx"].
-_DERIVED = b"the same graph, gathering first"
 
 
 @pytest.fixture
@@ -170,7 +161,7 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Cache:
     """A Gemma embedder whose manifest is two tiny files and whose download is a stub."""
     import huggingface_hub
 
-    from markdown_memory import embedders, model_cache
+    from markdown_memory import model_cache
 
     manifest = {
         name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in _FILES.items()
@@ -178,10 +169,7 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Cache:
     monkeypatch.setattr(model_cache, "GEMMA_MANIFEST", manifest)
     monkeypatch.setattr(model_cache, "GEMMA_FILES", tuple(manifest))
     monkeypatch.setattr(model_cache, "GEMMA_MODEL_FILE", "model.onnx")
-    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_FILE", "derived.onnx")
-    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
     harness = _Cache(tmp_path)
-    monkeypatch.setattr(embedders, "gather_before_dequantize", harness.rewrite)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", harness.download)
     monkeypatch.setattr(EmbeddingGemmaEmbedder, "_open", lambda self: harness.open())
     return harness
@@ -195,13 +183,10 @@ class _Cache:
 
         self.root = root
         self.model_dir = gemma_model_dir(root)
-        self.legacy = root / "embeddinggemma-300m-onnx"
         self.downloads: list[Path] = []
         self.opens = 0
         self.corrupt = False
         self.download_seconds = 0.0
-        self.rewrites = 0
-        self.refuse_rewrite = False
 
     def embedder(self) -> EmbeddingGemmaEmbedder:
         return EmbeddingGemmaEmbedder(cache_dir=self.root)
@@ -216,10 +201,6 @@ class _Cache:
         time.sleep(self.download_seconds)
         self.write(target, corrupt=self.corrupt)
         return str(target)
-
-    def rewrite(self, graph: bytes) -> bytes | None:
-        self.rewrites += 1
-        return None if self.refuse_rewrite else _DERIVED
 
     def download_count(self) -> int:
         return len(list((self.root / "downloads").glob("*")))
@@ -238,7 +219,7 @@ class _Cache:
 def test_a_verified_cache_is_neither_hashed_nor_re_fetched_on_every_start(
     cache: _Cache, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hashing 330 MB costs most of a second of a core, and an editor starts a server
+    """Hashing 218 MB costs most of a second of a core, and an editor starts a server
 
     per session. The stamp turns the steady state into a handful of stat calls.
     """
@@ -329,30 +310,6 @@ def test_another_revisions_files_do_not_stand_in_for_this_ones(cache: _Cache) ->
     assert cache.downloads == [cache.model_dir]
 
 
-def test_the_unversioned_folder_is_moved_rather_than_downloaded_again(cache: _Cache) -> None:
-    cache.write(cache.legacy)
-    inode = (cache.legacy / "model.onnx").lstat().st_ino
-    with (cache.legacy / "model.onnx").open("rb") as still_open:
-        cache.embedder().warm_up()
-        # A descriptor opened before the rename keeps reading the same inode.
-        assert still_open.read() == _FILES["model.onnx"]
-
-    assert cache.downloads == []
-    assert not cache.legacy.exists()
-    assert (cache.model_dir / "model.onnx").lstat().st_ino == inode
-
-
-def test_an_unversioned_folder_that_does_not_match_is_left_where_it_is(cache: _Cache) -> None:
-    """Its bytes have to be fetched anyway, and they may be another checkout's."""
-    cache.write(cache.legacy)
-    (cache.legacy / "model.onnx").write_bytes(b"not the same")
-
-    cache.embedder().warm_up()
-    assert cache.legacy.is_dir()
-    assert cache.downloads == [cache.model_dir]
-    assert (cache.legacy / "model.onnx").read_bytes() == b"not the same"
-
-
 def test_a_download_that_does_not_match_the_manifest_fails_without_downloading_again(
     cache: _Cache,
 ) -> None:
@@ -367,7 +324,7 @@ def test_a_load_failure_on_verified_files_is_not_treated_as_corruption(
 ) -> None:
     """Verified bytes plus a failing load means onnxruntime, permissions or memory - none
 
-    of which 330 MB of fresh download would fix.
+    of which 218 MB of fresh download would fix.
     """
     cache.write(cache.model_dir)
     boom = RuntimeError("onnxruntime ABI mismatch")
@@ -888,97 +845,79 @@ def test_the_bge_small_folder_is_the_one_fastembed_really_creates() -> None:
     assert revision is not None and len(revision) == 40
 
 
-# --- The derived graph: generated here, never downloaded --------------------------------
+# --- The published graph: what is fetched, and what is run ------------------------------
 
 
-def test_the_derived_graph_is_written_once_and_then_left_alone(cache: _Cache) -> None:
-    derived = cache.model_dir / "derived.onnx"
+def test_only_the_files_in_the_manifest_are_asked_of_the_hub(
+    cache: _Cache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What is fetched is exactly what the stamp then vouches for, and nothing beside it.
+
+    Observed at the Hub call rather than compared between two constants: an earlier
+    version derived a fourth file on this machine that had to be kept out of the request,
+    and a test that only reads the manifest would not notice the request drifting from it.
+    """
+    import huggingface_hub
+
+    from markdown_memory import model_cache
+
+    asked: list[list[str]] = []
+
+    def record(repository: str, **kwargs: Any) -> str:
+        asked.append(list(kwargs["allow_patterns"]))
+        return cache.download(repository, **kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", record)
     cache.embedder().warm_up()
-    assert derived.read_bytes() == _DERIVED
-    assert cache.rewrites == 1
 
-    cache.embedder().warm_up()
-    assert cache.rewrites == 1  # the stamp covers it, so nothing is hashed or rebuilt
+    assert asked == [list(model_cache.GEMMA_FILES)]
+    assert set(asked[0]) == set(model_cache.GEMMA_MANIFEST)
 
 
-def test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded(
+def test_a_cache_holding_another_graph_is_refetched_rather_than_trusted(
     cache: _Cache,
 ) -> None:
-    """It never came off the Hub, so re-fetching 330 MB would not produce it."""
-    derived = cache.model_dir / "derived.onnx"
-    cache.embedder().warm_up()
+    """Two graphs share one revision, so they share one cache directory.
 
-    derived.unlink()
-    cache.embedder().warm_up()
-    assert derived.read_bytes() == _DERIVED
+    Upgrading from one to the other finds a directory whose every file is a perfectly good
+    regular file and whose stamp is honestly signed - for the *other* graph. Only the
+    recorded file set says so. Were that check to go, the stamp would be believed, this
+    graph would never be fetched, and the embedder would open whatever is there.
+    """
+    import json
 
-    derived.write_bytes(b"something else entirely")
+    from markdown_memory import model_cache
+
     cache.embedder().warm_up()
-    assert derived.read_bytes() == _DERIVED
     assert len(cache.downloads) == 1
 
+    # What the previous graph left behind: its file, and a stamp that is *honest* about
+    # it - right revision, right identity, every recorded file present and unmodified.
+    # Only the set of names it records is wrong, so only that check can reject it.
+    graph = cache.model_dir / "model.onnx"
+    graph.unlink()
+    other = cache.model_dir / "other_graph.onnx"
+    other.write_bytes(b"the graph that was here before")
+    stamp = cache.model_dir / model_cache._VERIFIED_STAMP
+    previous = json.loads(stamp.read_text())
+    previous["files"] = {"other_graph.onnx": model_cache._file_identity(other)}
+    stamp.write_text(json.dumps(previous))
 
-def test_only_the_three_published_files_are_ever_asked_of_the_hub(cache: _Cache) -> None:
-    """The derived graph is made here, so it may never appear in what the Hub is asked for."""
-    assert "derived.onnx" not in GEMMA_FILES
+    cache.embedder().warm_up()
+
+    assert len(cache.downloads) == 2, "the other graph's stamp was trusted"
+    assert graph.read_bytes() == _FILES["model.onnx"]
+    assert json.loads(stamp.read_text())["files"].keys() == set(model_cache.GEMMA_FILES)
 
 
-def test_the_embedder_runs_the_derived_graph(
+def test_the_embedder_runs_the_graph_the_manifest_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole point of deriving it: ~1 GB per query lives in this one path."""
+    """No derived file, no fallback: the graph that was verified is the graph that runs."""
     from markdown_memory.model_cache import gemma_model_dir
 
     path, _ = _session_call(tmp_path, monkeypatch)
-    assert path == str(gemma_model_dir(tmp_path) / "derived.onnx")
-
-
-def test_a_refused_rewrite_falls_back_to_the_published_graph(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A refusal costs the memory saving; it must not cost a server that starts."""
-    from markdown_memory.model_cache import gemma_model_dir
-
-    path, _ = _session_call(tmp_path, monkeypatch, derived=False)
     assert path == str(gemma_model_dir(tmp_path) / "model.onnx")
-
-
-def test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files(
-    cache: _Cache, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An upgrade that changes the rewrite must take effect on an existing cache.
-
-    Every file identity still matches after the package changes, so without the pin in
-    the stamp the old derived graph would keep being loaded for ever.
-    """
-    from markdown_memory import embedders, model_cache
-
-    cache.embedder().warm_up()
-    assert cache.rewrites == 1
-
-    newer = b"a differently rewritten graph"
-    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(newer).hexdigest())
-    monkeypatch.setattr(embedders, "gather_before_dequantize", lambda graph: newer)
-    cache.embedder().warm_up()
-    assert (cache.model_dir / "derived.onnx").read_bytes() == newer
-    assert cache.downloads == [cache.model_dir]  # regenerated, never re-fetched
-
-
-def test_a_derived_graph_that_is_a_symlink_is_never_trusted(cache: _Cache) -> None:
-    """lstat records no identity for a symlink, and `None == None` would match for ever,
-
-    leaving a target that is swapped afterwards trusted without ever being verified.
-    """
-    cache.embedder().warm_up()
-    derived = cache.model_dir / "derived.onnx"
-    elsewhere = cache.root / "elsewhere.onnx"
-    elsewhere.write_bytes(_DERIVED)
-    derived.unlink()
-    derived.symlink_to(elsewhere)
-
-    cache.embedder().warm_up()
-    assert not derived.is_symlink()
-    assert derived.read_bytes() == _DERIVED
 
 
 def test_a_directory_where_the_stamp_belongs_is_repaired(cache: _Cache) -> None:

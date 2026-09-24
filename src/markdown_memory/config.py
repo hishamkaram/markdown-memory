@@ -106,7 +106,7 @@ class ServerConfig:
         return cls(
             # One index per documentation root, rather than one for the whole machine.
             # Isolation should not depend on the user having set an environment variable.
-            # The model cache below stays shared on purpose: 330 MB of read-only weights,
+            # The model cache below stays shared on purpose: 218 MB of read-only weights,
             # identical everywhere, and copying it per project would be pure waste.
             db_path=(db_path if db_path else _project_database(docs_dir if docs_dir else root)),
             docs_dir=docs_dir if docs_dir else root,

@@ -40,37 +40,37 @@
   "embeddinggemma": {
     "dev/identifier": {
       "any_valid_top1": 1.0,
-      "median_ms": 758.9403,
+      "median_ms": 100.8963,
       "ndcg5": 1.0,
-      "p95_ms": 996.6003,
+      "p95_ms": 132.5065,
       "top1": 1.0,
       "top3": 1.0,
       "top5": 1.0
     },
     "dev/paraphrase": {
       "any_valid_top1": 0.8235,
-      "median_ms": 570.1536,
-      "ndcg5": 0.8439,
-      "p95_ms": 948.9584,
+      "median_ms": 119.8179,
+      "ndcg5": 0.8513,
+      "p95_ms": 252.035,
       "top1": 0.7059,
-      "top3": 0.8824,
-      "top5": 0.9118
+      "top3": 0.8529,
+      "top5": 0.9412
     },
     "held_out/identifier": {
       "any_valid_top1": 1.0,
-      "median_ms": 678.0266,
+      "median_ms": 91.2537,
       "ndcg5": 1.0,
-      "p95_ms": 997.7282,
+      "p95_ms": 119.82,
       "top1": 1.0,
       "top3": 1.0,
       "top5": 1.0
     },
     "held_out/paraphrase": {
       "any_valid_top1": 0.8824,
-      "median_ms": 754.5136,
-      "ndcg5": 0.924,
-      "p95_ms": 1905.5487,
-      "top1": 0.8529,
+      "median_ms": 94.7355,
+      "ndcg5": 0.931,
+      "p95_ms": 125.4448,
+      "top1": 0.8824,
       "top3": 0.9706,
       "top5": 0.9706
     }
