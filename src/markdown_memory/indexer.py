@@ -1009,16 +1009,6 @@ def parse_exclusions(value: str) -> tuple[str, ...]:
     return tuple(patterns)
 
 
-def _key(root: Path) -> str:
-    """One spelling per documentation root.
-
-    `index_directory` resolves its argument before anything else, and that resolved root
-    is the only one this key is ever built from. Normalising a second time here would
-    only hide it if that ever stopped being true.
-    """
-    return str(root)
-
-
 def _printable(path: str) -> str:
     """``path`` safe to log and to send as JSON (undecodable bytes become U+FFFD)."""
     return os.fsencode(path).decode("utf-8", errors="replace")

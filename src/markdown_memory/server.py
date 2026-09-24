@@ -240,10 +240,6 @@ class _Verdict(Enum):
     SAME_BYTES_NEW_TIME = auto()
 
 
-def _has_changed(path: Path, content_hash: str, mtime_ns: int | None) -> bool:
-    return _compare(path, content_hash, mtime_ns)[0] is _Verdict.CHANGED
-
-
 def _compare(path: Path, content_hash: str, mtime_ns: int | None) -> tuple[_Verdict, int]:
     """Whether the file behind an indexed document differs from what was indexed.
 
