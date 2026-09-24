@@ -423,8 +423,8 @@ MUTATIONS = (
     Mutation(
         name="weights: embed with whatever model happens to be loaded",
         module="indexer.py",
-        old="            self._refuse_foreign_weights()\n",
-        new="            pass  # whichever model is loaded writes its vectors\n",
+        old="                    self._settle_weights()\n",
+        new="                    pass  # whichever model is loaded writes its vectors\n",
         tests="test_a_model_whose_weights_changed_may_not_write_into_the_index",
     ),
     Mutation(
@@ -510,8 +510,8 @@ MUTATIONS = (
     Mutation(
         name="weights: demand a working model for a file that embeds nothing",
         module="indexer.py",
-        old="        if texts:\n",
-        new="        if True:\n",
+        old="                if prepared.has_vectors and not weights_settled:\n",
+        new="                if not weights_settled:\n",
         tests="test_a_file_that_embeds_nothing_does_not_need_a_model_that_loads",
         fails_with="markdown_memory.exceptions.ModelLoadError",
     ),
@@ -590,8 +590,8 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 6611),',
-        new='    ("README.md", 5062),',
+        old='    ("README.md", 7239),',
+        new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
     ),
@@ -1021,15 +1021,18 @@ MUTATIONS = (
     Mutation(
         name="coverage: let a run rewrite the tree without retracting anything",
         module="indexer.py",
-        old="        about_to_write()\n        self._db.replace_document(",
-        new="        self._db.replace_document(",
+        old="                about_to_write()\n",
+        new="                pass  # rewrite the tree without saying the tree changed\n",
         tests="test_a_run_that_dies_partway_leaves_the_tree_unvouched_for",
     ),
     Mutation(
         name="coverage: retract before knowing whether anything will be written",
         module="indexer.py",
-        old="        parsed = self._parser.parse(",
-        new="        about_to_write()\n        parsed = self._parser.parse(",
+        old="            files = iter_markdown_files(root, record_unreadable, self._exclude)",
+        new=(
+            "            about_to_write()\n"
+            "            files = iter_markdown_files(root, record_unreadable, self._exclude)"
+        ),
         tests="test_a_run_that_committed_nothing_leaves_the_certificate_alone",
     ),
     Mutation(
@@ -1070,7 +1073,7 @@ MUTATIONS = (
     Mutation(
         name="vectors: keep the old truncated section vectors across the format change",
         module="indexer.py",
-        old="        if known is not None and known == (content_hash, VECTOR_FORMAT):",
+        old="        if known is not None and known[:2] == (content_hash, VECTOR_FORMAT):",
         new="        if known is not None and known[0] == content_hash:",
         tests="test_a_v2_database_keeps_everything_and_rebuilds_its_vectors_in_place",
     ),
@@ -1139,10 +1142,12 @@ MUTATIONS = (
     Mutation(
         name="scope: resolve the docs root again on every question",
         module="server.py",
-        old="            return self._db.index_status(self._root)",
+        old=(
+            "            return self._with_freshness(self._db.index_status(self._root), self._root)"
+        ),
         new=(
-            "            return self._db.index_status("
-            "str(_absolute(self._config.docs_dir, SearchError)))"
+            "            return self._with_freshness(self._db.index_status("
+            "str(_absolute(self._config.docs_dir, SearchError))), self._root)"
         ),
         tests="test_status_and_search_always_describe_the_same_tree",
     ),
@@ -1170,7 +1175,9 @@ MUTATIONS = (
     Mutation(
         name="answers: never mention that the index is missing files",
         module="server.py",
-        old="            return self._db.index_status(self._root)",
+        old=(
+            "            return self._with_freshness(self._db.index_status(self._root), self._root)"
+        ),
         new="            return IndexStatus(verified=True)",
         tests="test_a_search_says_the_index_is_missing_files",
     ),
@@ -1256,6 +1263,147 @@ MUTATIONS = (
         new="        exclude=tuple(exclude),",
         tests="test_exclusions_are_inherited_rather_than_dropped "
         "or test_the_script_resolves_its_configuration_the_same_way",
+    ),
+    Mutation(
+        name="parallel: write files in whatever order the workers finish",
+        module="indexer.py",
+        old="                        file_path, future = pending.popleft()",
+        new="                        file_path, future = pending.pop()",
+        tests="test_several_workers_build_exactly_the_index_one_worker_builds",
+    ),
+    Mutation(
+        name="parallel: read the whole tree ahead of the writes",
+        module="indexer.py",
+        old="            window = max(2 * self._workers, 2)",
+        new="            window = 1_000_000",
+        tests="test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree",
+    ),
+    Mutation(
+        name="weights: settle the provenance again for every file",
+        module="indexer.py",
+        old="                    weights_settled = True",
+        new="                    pass  # ask again, once per file, while the run is writing",
+        tests="test_the_weights_of_a_run_are_settled_once_however_many_workers_embed",
+    ),
+    Mutation(
+        name="freshness: never look at the disk",
+        module="server.py",
+        old="        return dataclasses.replace(status, changed_files=self._changed_files(scope))",
+        new="        return status",
+        tests="test_an_edited_document_is_reported_without_unverifying_the_walk",
+    ),
+    Mutation(
+        name="freshness: call a file changed because its timestamp moved",
+        module="server.py",
+        old="    return _Verdict.SAME_BYTES_NEW_TIME, info.st_mtime_ns",
+        new="    return _Verdict.CHANGED, info.st_mtime_ns  # a touch is a change",
+        tests="test_a_touch_that_changes_no_byte_is_not_a_change",
+    ),
+    Mutation(
+        name="freshness: read a missing modification time as the epoch",
+        module="server.py",
+        old="    if mtime_ns is not None and info.st_mtime_ns == mtime_ns:",
+        new="    if info.st_mtime_ns == (mtime_ns or 0):  # nothing recorded is the epoch",
+        tests="test_a_row_from_before_nanoseconds_were_recorded_is_answered_by_its_bytes",
+    ),
+    Mutation(
+        name="freshness: sweep the filesystem on every single query",
+        module="server.py",
+        old="                cached is not None",
+        new="                False  # measure it again, several times per conversational turn",
+        tests="test_the_sweep_speaks_for_a_few_seconds_rather_than_per_query",
+    ),
+    Mutation(
+        name="freshness: store no modification time to compare against",
+        module="indexer.py",
+        old="                    mtime_ns=prepared.mtime_ns,",
+        new="                    mtime_ns=0,",
+        tests="test_indexing_records_the_modification_time_it_read",
+    ),
+    Mutation(
+        name="freshness: keep quiet about documents that moved on",
+        module="models.py",
+        old="            if self.changed_files:",
+        new="            if False:  # a verified walk has nothing left to say",
+        tests="test_an_edited_document_is_reported_without_unverifying_the_walk",
+    ),
+    Mutation(
+        name="freshness: leave the count out of the envelope",
+        module="models.py",
+        old='            "changed_files": self.changed_files,',
+        new="",
+        tests="test_a_clean_index_of_an_untouched_tree_stays_quiet",
+        fails_with="KeyError",
+    ),
+    Mutation(
+        name="parallel: run the workers one at a time",
+        module="indexer.py",
+        old="                max_workers=self._workers,",
+        new="                max_workers=1,",
+        tests="test_the_workers_really_do_embed_at_the_same_time",
+        fails_with="threading.BrokenBarrierError",
+    ),
+    Mutation(
+        name="freshness: keep reporting what the last sweep found after a re-index",
+        module="server.py",
+        old="            self._invalidate_freshness()",
+        new="            pass  # the sweep still speaks for the tree it measured",
+        tests="test_indexing_forgets_what_the_last_sweep_found",
+    ),
+    Mutation(
+        name="freshness: answer one scope's question with another scope's sweep",
+        module="server.py",
+        old="                and cached[0] == scope",
+        new="                and True  # whatever it swept, it answers for",
+        tests="test_a_narrowed_status_sweeps_the_directory_it_was_asked_about",
+    ),
+    Mutation(
+        name="parallel: let one rejected document end the whole run",
+        module="indexer.py",
+        old="                                store(prepared)",
+        new="                                pass  # the run dies with the document",
+        tests="test_a_document_the_storage_layer_rejects_fails_alone",
+    ),
+    Mutation(
+        name="freshness: publish a sweep of a tree that changed under it",
+        module="server.py",
+        old="        self._freshness_lock = threading.Lock()",
+        new="        self._freshness_lock = threading.Semaphore(8)  # not mutual exclusion",
+        tests="test_a_sweep_and_an_invalidation_cannot_overlap",
+    ),
+    Mutation(
+        name="freshness: leave a skipped file with the timestamp it was stored with",
+        module="indexer.py",
+        old="            if known[2] == info.st_mtime_ns:",
+        new="            if True:  # the time it was stored with is time enough",
+        tests="test_a_file_whose_bytes_did_not_change_still_has_its_timestamp_brought_up_to_date",
+    ),
+    Mutation(
+        name="freshness: hash a touched file again on every sweep",
+        module="server.py",
+        old=(
+            "                    self._db.record_modification_time("
+            "file_path, content_hash, mtime_ns, seen_ns)"
+        ),
+        new="                    pass  # hash it again next window, and the one after",
+        tests="test_a_touch_is_hashed_once_and_then_written_down",
+    ),
+    Mutation(
+        name="freshness: stamp a verified time onto whatever the row holds now",
+        module="db.py",
+        old='                "WHERE file_path = ? AND content_hash = ? AND mtime_ns IS ?",',
+        new='                "WHERE file_path = ? AND ? IS NOT NULL AND ? IS NOT NULL",',
+        tests="test_the_write_back_refuses_to_stamp_a_time_onto_somebody_else_s_content",
+    ),
+    Mutation(
+        name="migration: invent a modification time for rows that never had one",
+        module="db.py",
+        old='                    tx.execute("ALTER TABLE documents ADD COLUMN mtime_ns INTEGER")',
+        new=(
+            '                    tx.execute("ALTER TABLE documents ADD COLUMN '
+            'mtime_ns INTEGER NOT NULL DEFAULT 0")'
+        ),
+        tests="test_a_v4_database_keeps_its_documents_and_learns_to_time_them",
     ),
 )
 

@@ -35,6 +35,7 @@ def store(
         title="Doc",
         content_hash="hash-" + file_path,
         last_modified=1_700_000_000,
+        mtime_ns=1_700_000_000,
         sections=sections,
         vectors=vectors_for(embedder, sections),
     )
@@ -130,6 +131,7 @@ class TestSchema:
             "content_hash",
             "last_modified",
             "vector_format",
+            "mtime_ns",
         ]
         assert sections == [
             "id", "doc_id", "heading_title", "heading_level", "heading_path",
@@ -266,7 +268,7 @@ class TestRepository:
         bad_vectors = vectors_for(fake_embedder, SECTIONS[:1])
         with pytest.raises(DatabaseError, match="vector sets"):
             db.replace_document(
-                file_path="/docs/a.md", title="T", content_hash="new", last_modified=1,
+                file_path="/docs/a.md", title="T", content_hash="new", last_modified=1, mtime_ns=1,
                 sections=SECTIONS, vectors=bad_vectors,
             )  # fmt: skip
 
@@ -288,7 +290,7 @@ class TestRepository:
     ) -> None:
         with pytest.raises(DatabaseError, match="dimensions"):
             db.replace_document(
-                file_path="/docs/a.md", title="T", content_hash="h", last_modified=1,
+                file_path="/docs/a.md", title="T", content_hash="h", last_modified=1, mtime_ns=1,
                 sections=SECTIONS[:1],
                 vectors=[SectionVectors(section=[0.1, 0.2], units=([0.1, 0.2],))],
             )  # fmt: skip

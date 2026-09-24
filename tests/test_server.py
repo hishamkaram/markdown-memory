@@ -342,7 +342,12 @@ async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[No
     answer = await call(server, "search_docs", query="ORBIT_UPSTREAM_TIMEOUT_MS", limit=3)
     assert set(answer) == {"results", "index_status"}
     # A clean index says so quietly: a caveat on every answer is a caveat nobody reads.
-    assert answer["index_status"] == {"coverage": "verified", "failures": [], "message": None}
+    assert answer["index_status"] == {
+        "coverage": "verified",
+        "failures": [],
+        "changed_files": 0,
+        "message": None,
+    }
     results = answer["results"]
     assert 1 <= len(results) <= 3
     top = results[0]

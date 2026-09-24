@@ -284,7 +284,7 @@ class TestIdentifierGateBypassNeedsRarity:
     def fill(db: Database, embedder: FakeEmbedder, sections: Sequence[tuple[str, str]]) -> None:
         drafts = [draft(title, f"## {title}\n\n{body}") for title, body in sections]
         db.replace_document(
-            file_path="/d/proxy.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/proxy.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=drafts, vectors=vectors_for(embedder, drafts),
         )  # fmt: skip
 
@@ -328,7 +328,7 @@ class TestSearchDuringReindex:
         colours = [draft("Colours", "## Colours\n\nthe deadline banner is red")]
         for file_path, sections in (("/d/retries.md", retries), ("/d/colours.md", colours)):
             db.replace_document(
-                file_path=file_path, title="Doc", content_hash="h", last_modified=1,
+                file_path=file_path, title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
                 sections=sections, vectors=vectors_for(embedder, sections),
             )  # fmt: skip
         return retries
@@ -345,6 +345,7 @@ class TestSearchDuringReindex:
                 reindexed.append(True)
                 db.replace_document(
                     file_path="/d/retries.md", title="Doc", content_hash="h2", last_modified=2,
+                    mtime_ns=2,
                     sections=retries, vectors=vectors_for(fake_embedder, retries),
                 )  # fmt: skip
             return fetch(ids)
@@ -369,6 +370,7 @@ class TestSearchDuringReindex:
         def fetch_after_reindex(ids: Sequence[int]) -> dict[int, tuple[Section, Document]]:
             db.replace_document(  # the re-index never stops: every fetch comes too late
                 file_path="/d/retries.md", title="Doc", content_hash="h", last_modified=1,
+                mtime_ns=1,
                 sections=retries, vectors=vectors_for(fake_embedder, retries),
             )  # fmt: skip
             return fetch(ids)
@@ -400,7 +402,7 @@ class TestRankingIsActuallyTested:
         noise = [draft(f"N{n}", f"## N{n}\n\nbilling invoice note {n}") for n in range(25)]
         sections = [target, decoy, *noise]
         db.replace_document(
-            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         searcher = HybridSearcher(db, fake_embedder)
@@ -431,7 +433,7 @@ class TestRankingIsActuallyTested:
             draft("Compaction", "## Compaction\n\ncompaction compaction compaction"),
         ]
         db.replace_document(
-            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         ids = {
@@ -457,7 +459,7 @@ class TestRankingIsActuallyTested:
             draft("Vacuuming", f"## Vacuuming\n\n{padding} filler word 60"),
         ]
         db.replace_document(
-            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         first = db.fts_search('"vacuuming"', 10)[0]

@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 12,430
+       alt="One question asked of four documentation files. Reading them whole costs 13,300
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,455 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,526 tokens - the
             one that answers is 401.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 12,430 tokens in all:
+`docs/evaluation-protocol.md`, 13,300 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   401 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  566 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  637 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
   397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,455 tokens instead of 12,430**, and the section that actually answers is 401 - a
+**2,526 tokens instead of 13,300**, and the section that actually answers is 401 - a
 thirtieth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -123,6 +123,23 @@ The first call downloads the embedding model and then indexes, so it is the slow
 it costs milliseconds when nothing changed. If `coverage` reads `"unknown"`, something was
 missed and `index_status.message` says what to run.
 
+`index_status` also carries `changed_files`: indexed documents a cheap probe could not
+confirm are still what was indexed - their bytes differ, or they are gone, unreadable, or no
+longer a regular file. It is best-effort in both directions. Unreadability is noticed only
+where a moved timestamp made it read the file at all: a file whose permissions changed and
+whose time did not is answered from the time, and it is the next `index_directory` that
+records the failure and takes `coverage` to `"unknown"`. A path that cannot even be
+`stat`-ed - its parent directory lost its permissions, say - has no timestamp to compare
+and is counted straight away. It counts only rows the index
+holds, so a file nobody has indexed yet is not among them: finding those means walking the
+tree, which is the expensive half of indexing and not something a search should pay for.
+And it reads bytes only where the modification time moved, so an edit that restores a file's
+own timestamp is missed - indexing is not fooled by that, since it hashes every file it
+walks; what is missed is only the hint that running it is worth it. A zero means nothing was
+detected, not that every file was re-hashed. `coverage` stays `"verified"` while the count is
+non-zero: the walk really did finish and really did read every file it found. What moved on
+is the tree, and the message says so.
+
 ## The embedding model
 
 ### What downloads, when, and where
@@ -204,9 +221,13 @@ it can come back with different weights under the same model name. The snapshot 
 was built from is recorded, and both halves of the server check it where they would
 otherwise act on it:
 
-- **Indexing** compares the moment before it embeds - the moment the model has had to load,
-  and one a run with nothing to embed never reaches. On a difference it **stops before
-  writing anything**, because carrying on would leave two models' vectors in one index.
+- **Indexing** compares at the first document it is about to store that really has vectors
+  - the moment the model has had to load, and one a run with nothing to embed never
+  reaches. On a difference it **stops before storing a single vector**, because carrying
+  on would leave two models' vectors in one index. A document that embeds nothing - all
+  headings, no passages - may already have been written when the refusal lands: it is
+  checked at the first document that really has vectors, which is the first moment the
+  model has had to load.
   Nothing is discarded - re-indexing from scratch is yours to decide - and until you do,
   `index_status.coverage` reads `"unknown"` with a message saying why, so an agent is never
   told the index is healthy while it is not.
@@ -304,6 +325,7 @@ or just the title); an ambiguous request lists the exact candidates.
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 | `MARKDOWN_MEMORY_THREADS` | - | unset: onnxruntime picks. A positive integer caps the threads one embedding pass may use |
+| `MARKDOWN_MEMORY_INDEX_WORKERS` | - | `2` - files read, parsed and embedded at the same time while indexing |
 
 The default preset does not spin-wait between operators, which is what makes a query cost ~0.6 s of
 CPU instead of ~5.5 s and leaves the process idle at 0 while nothing is being asked of it; the
@@ -311,6 +333,15 @@ thread *count* is left to onnxruntime, and `MARKDOWN_MEMORY_THREADS` is there fo
 disagrees with its choice. `bge-small` runs through `fastembed`, which exposes no such switch, so
 for that preset the count is the only lever: `MARKDOWN_MEMORY_THREADS=4` took one query from 718 ms
 of CPU to 95 ms.
+
+Indexing embeds several files at once and writes them from one thread, in the order the
+tree was walked. One ONNX session is shared, and its weights are mapped once however many
+threads run against it, so each extra worker costs about the 150 MB of one forward pass.
+Measured over 24 files of the eval corpus (879 passages): 196.3 s with one worker, 145.9 s
+with two (1.35x) and 96.3 s with four (2.04x) - less than the embedding speed-up alone,
+because parsing and the writes stay serial and a long file holds the head of the queue.
+Two is the default because its peak measures around 0.8 GB (757-814 MB across runs),
+well inside what a tool running beside an editor should take; raise `MARKDOWN_MEMORY_INDEX_WORKERS` on a machine with cores to spare.
 
 `MARKDOWN_MEMORY_EXCLUDE` takes glob patterns separated by commas (only commas - a colon
 would split a pattern that contains one). A pattern with no `/` matches that name at any

@@ -602,7 +602,7 @@ class TestLongBlocksKeepTheirTail:
         parsed = MarkdownParser().parse(self.section(), fallback_title="Doc")
         sections = list(parsed.sections)
         db.replace_document(
-            file_path="/d/commands.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/commands.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         embedded = [text for batch in fake_embedder.document_calls for text in batch]

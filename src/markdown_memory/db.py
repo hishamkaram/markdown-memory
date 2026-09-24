@@ -47,7 +47,7 @@ from markdown_memory.models import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_DIM = 384
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: How a section's vector is built. 1 embedded the whole section text, truncated at the
 #: model's token limit; 2 is the mean of the section's passage vectors. Stored per document
@@ -471,6 +471,18 @@ class Database:
                     tx.execute("DROP TABLE IF EXISTS index_problems")
                     tx.execute("DELETE FROM meta WHERE key LIKE 'incomplete:%'")
                     applied.append(4)
+                if current < 5:
+                    # Rows written before v5 recorded whole seconds, which cannot see an
+                    # edit made in the same second as the scan that indexed it. They get
+                    # NULL, which means "no modification time was recorded" - not a
+                    # timestamp of any kind, so no real one can collide with it, the epoch
+                    # included. The freshness check reads their bytes instead of trusting a
+                    # time, which is the slow answer but never the wrong one, and the next
+                    # index_directory writes a real value and the file stops paying it.
+                    # Nothing is discarded for this: the vectors are still good, and a
+                    # rebuild would cost half an hour of embedding to learn nothing.
+                    tx.execute("ALTER TABLE documents ADD COLUMN mtime_ns INTEGER")
+                    applied.append(5)
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
@@ -787,24 +799,76 @@ class Database:
             ).fetchall()
         return [_document_from_row(row) for row in rows]
 
-    def document_hashes(self, directory: str) -> dict[str, tuple[str, int]]:
-        """Map ``file_path -> (content_hash, vector_format)`` under ``directory``.
+    def document_fingerprints(self, directory: str) -> dict[str, tuple[str, int | None]]:
+        """Map ``file_path -> (content_hash, mtime_ns)`` under ``directory``.
 
-        The format travels with the hash because both answer the same question - may this
-        file be skipped? - and a file whose vectors predate the current pooling must be
-        rebuilt however unchanged its bytes are.
+        What a caller needs to ask the filesystem whether the index is still current:
+        the cheap question first (has the modification time moved?) and the expensive
+        one - re-hashing the bytes - only for the files where it has.
         """
         prefix = _directory_prefix(directory)
         with self._reading() as conn:
             rows = conn.execute(
-                "SELECT file_path, content_hash, vector_format FROM documents "
+                "SELECT file_path, content_hash, mtime_ns FROM documents "
                 "WHERE substr(file_path, 1, length(?)) = ?",
                 (prefix, prefix),
             ).fetchall()
         return {
-            str(path): (str(content_hash), int(vector_format))
-            for path, content_hash, vector_format in rows
+            str(path): (str(content_hash), None if mtime_ns is None else int(mtime_ns))
+            for path, content_hash, mtime_ns in rows
         }
+
+    def document_hashes(self, directory: str) -> dict[str, tuple[str, int, int | None]]:
+        """Map ``file_path -> (content_hash, vector_format, mtime_ns)`` under ``directory``.
+
+        The format travels with the hash because both answer the same question - may this
+        file be skipped? - and a file whose vectors predate the current pooling must be
+        rebuilt however unchanged its bytes are. The recorded modification time travels
+        with them because a file that may be skipped still has to have that time brought
+        up to date, or the freshness check reads the bytes of an unchanged file for ever.
+        """
+        prefix = _directory_prefix(directory)
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT file_path, content_hash, vector_format, mtime_ns FROM documents "
+                "WHERE substr(file_path, 1, length(?)) = ?",
+                (prefix, prefix),
+            ).fetchall()
+        return {
+            str(path): (
+                str(content_hash),
+                int(vector_format),
+                None if mtime_ns is None else int(mtime_ns),
+            )
+            for path, content_hash, vector_format, mtime_ns in rows
+        }
+
+    def record_modification_time(
+        self, file_path: str, content_hash: str, previous_ns: int | None, mtime_ns: int
+    ) -> None:
+        """Note when an unchanged file was last written, without touching its content.
+
+        A file whose bytes are what was indexed is skipped, and used to keep whatever time
+        it was stored with - a `touch`, a checkout, or a row migrated from a schema that
+        had no nanoseconds at all. Every freshness sweep then found a time that did not
+        match and hashed the file again, forever, to conclude what the hash it already
+        held could have said. One narrow UPDATE ends that: no sections, no vectors, no
+        reindex.
+
+        A compare-and-swap on both the hash and the time the caller started from. Whoever
+        checked those bytes did so outside this transaction: an indexing run may have
+        replaced the document in between - writing a time against somebody else's content
+        is how a stale row comes to look current - or may have recorded a *newer* time for
+        the same content, which this must not roll back, or the file it just verified gets
+        hashed all over again. `IS` rather than `=` so a row that had no time recorded at
+        all is matched rather than skipped.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE documents SET last_modified = ?, mtime_ns = ? "
+                "WHERE file_path = ? AND content_hash = ? AND mtime_ns IS ?",
+                (mtime_ns // 1_000_000_000, mtime_ns, file_path, content_hash, previous_ns),
+            )
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         """All documents (optionally restricted to ``directory``) with section counts."""
@@ -837,6 +901,7 @@ class Database:
         title: str,
         content_hash: str,
         last_modified: int,
+        mtime_ns: int,
         sections: Sequence[SectionDraft],
         vectors: Sequence[SectionVectors],
     ) -> Document:
@@ -870,9 +935,9 @@ class Database:
             if row is None:
                 cursor = conn.execute(
                     "INSERT INTO documents"
-                    "(file_path, title, content_hash, last_modified, vector_format) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (file_path, title, content_hash, last_modified, VECTOR_FORMAT),
+                    "(file_path, title, content_hash, last_modified, mtime_ns, vector_format) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (file_path, title, content_hash, last_modified, mtime_ns, VECTOR_FORMAT),
                 )
                 if cursor.lastrowid is None:  # pragma: no cover - sqlite always sets it
                     raise DatabaseError("INSERT INTO documents returned no rowid")
@@ -881,8 +946,8 @@ class Database:
                 doc_id = int(row[0])
                 conn.execute(
                     "UPDATE documents SET title = ?, content_hash = ?, last_modified = ?, "
-                    "vector_format = ? WHERE id = ?",
-                    (title, content_hash, last_modified, VECTOR_FORMAT, doc_id),
+                    "mtime_ns = ?, vector_format = ? WHERE id = ?",
+                    (title, content_hash, last_modified, mtime_ns, VECTOR_FORMAT, doc_id),
                 )
                 conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
             for section, vector in zip(sections, vectors, strict=True):
