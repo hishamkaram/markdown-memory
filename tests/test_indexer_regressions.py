@@ -1256,11 +1256,11 @@ def test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree(
     serial per worker either way, so counting embeddings would score an unbounded
     submission green.
     """
-    from markdown_memory import indexer as indexer_module
+    from markdown_memory import discovery
 
     root = _corpus(tmp_path / "docs", 12)
     walked = 0
-    walk = indexer_module.iter_markdown_files
+    walk = discovery.iter_markdown_files
 
     def counting(*args: Any, **kwargs: Any) -> Any:
         nonlocal walked
@@ -1268,7 +1268,7 @@ def test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree(
             walked += 1
             yield path
 
-    monkeypatch.setattr(indexer_module, "iter_markdown_files", counting)
+    monkeypatch.setattr(discovery, "iter_markdown_files", counting)
 
     read_ahead = 0
     original = db.replace_document

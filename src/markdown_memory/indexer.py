@@ -21,22 +21,11 @@ from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from markdown_memory import discovery
 from markdown_memory.db import (
     VECTOR_FORMAT,
     WEIGHTS_META_KEY,
     Database,
-)
-from markdown_memory.discovery import (
-    MAX_FILE_BYTES,
-    _behind_symlink,
-    _certainly_gone,
-    _is_excluded,
-    _is_shadowing_symlink,
-    _is_walkable,
-    _printable,
-    hash_bytes,
-    iter_markdown_files,
-    read_regular_file,
 )
 from markdown_memory.embedders import Embedder
 from markdown_memory.exceptions import (
@@ -257,7 +246,8 @@ class Indexer:
             str(root).encode("utf-8")
         except UnicodeEncodeError:
             raise IndexingError(
-                f"Directory name is not valid UTF-8 and cannot be indexed: {_printable(str(root))}"
+                "Directory name is not valid UTF-8 and cannot be indexed: "
+                f"{discovery._printable(str(root))}"
             ) from None
 
         with self._scan_lock():
@@ -312,7 +302,7 @@ class Indexer:
                 unreadable.append(location)
                 failures.append(
                     FileFailure(
-                        file_path=_printable(location),
+                        file_path=discovery._printable(location),
                         message=f"Cannot list directory: {error.strerror or error}",
                     )
                 )
@@ -365,7 +355,7 @@ class Indexer:
             # handed out in some completion order would quietly reorder equal hits, and
             # no later sort can give them back. The window bounds what is held in memory:
             # a prepared file carries every vector of every passage it has.
-            files = iter_markdown_files(root, record_unreadable, self._exclude)
+            files = discovery.iter_markdown_files(root, record_unreadable, self._exclude)
             window = max(2 * self._workers, 2)
             pending: deque[tuple[str, Future[_Prepared | None]]] = deque()
             with ThreadPoolExecutor(
@@ -405,9 +395,13 @@ class Indexer:
                         except (ModelLoadError, ForeignWeightsError):
                             raise  # not this file's fault: every other file fails the same
                         except (MarkdownMemoryError, OSError) as exc:
-                            logger.warning("Failed to index %s: %s", _printable(file_path), exc)
+                            logger.warning(
+                                "Failed to index %s: %s", discovery._printable(file_path), exc
+                            )
                             failures.append(
-                                FileFailure(file_path=_printable(file_path), message=str(exc))
+                                FileFailure(
+                                    file_path=discovery._printable(file_path), message=str(exc)
+                                )
                             )
                             continue
                 except BaseException:
@@ -431,7 +425,9 @@ class Indexer:
             self._db.record_failures(
                 reachable,
                 {
-                    failure.file_path: f"{failure.message} (indexing {_printable(str(root))})"
+                    failure.file_path: (
+                        f"{failure.message} (indexing {discovery._printable(str(root))})"
+                    )
                     for failure in failures
                 },
             )
@@ -440,7 +436,7 @@ class Indexer:
             # anything under it is still listed there. Two facts, two places, one answer.
             self._db.mark_scan_complete(str(root), generation)
             report = IndexReport(
-                directory=_printable(str(root)),
+                directory=discovery._printable(str(root)),
                 files_scanned=len(seen),
                 files_indexed=indexed,
                 files_unchanged=unchanged,
@@ -554,13 +550,13 @@ class Indexer:
         whether `.venv` is, and then clear it.
 
         A path out of the walk's sight is still retired once it is observably gone
-        (`_certainly_gone`), or its row would outlive the file and no run could ever
+        (`discovery._certainly_gone`), or its row would outlive the file and no run could ever
         retire it.
         """
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         visitable = []
         for path in paths:
-            if self._walk_would_visit(root, path, blocked) or _certainly_gone(root, path):
+            if self._walk_would_visit(root, path, blocked) or discovery._certainly_gone(root, path):
                 visitable.append(path)
         return visitable
 
@@ -568,11 +564,11 @@ class Indexer:
         """Whether a walk of ``root`` reaches ``path``, given the directories it could not list."""
         if blocked and path.startswith(blocked):
             return False
-        if not _is_walkable(os.path.relpath(path, root).split(os.sep)):
+        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):
             return False
-        if _behind_symlink(root, path) or _is_shadowing_symlink(path):
+        if discovery._behind_symlink(root, path) or discovery._is_shadowing_symlink(path):
             return False
-        return not (self._exclude and _is_excluded(Path(path), root, self._exclude))
+        return not (self._exclude and discovery._is_excluded(Path(path), root, self._exclude))
 
     @staticmethod
     def _vanished(
@@ -588,7 +584,7 @@ class Indexer:
         not be listed, or under a pruned tree (``node_modules`` ...) that was indexed
         explicitly by pointing ``index_directory`` inside it.
 
-        Unless the file is observably gone (`_certainly_gone`). Not being visited is not
+        Unless the file is observably gone (`discovery._certainly_gone`). Not being visited is not
         evidence of deletion; `ENOENT` on that one name is exactly that evidence, and
         without it a deleted document under a pruned tree keeps answering searches with
         text that is not on disk any more, until someone re-indexes that tree by hand.
@@ -596,15 +592,15 @@ class Indexer:
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         vanished: list[str] = []
         for file_path in sorted(set(known) - seen):
-            if _certainly_gone(root, file_path):
+            if discovery._certainly_gone(root, file_path):
                 vanished.append(file_path)
                 continue
             if blocked and file_path.startswith(blocked):
                 continue
             relative = os.path.relpath(file_path, root)
-            if not _is_walkable(relative.split(os.sep)[:-1]):
+            if not discovery._is_walkable(relative.split(os.sep)[:-1]):
                 continue
-            if _behind_symlink(root, file_path):
+            if discovery._behind_symlink(root, file_path):
                 continue
             vanished.append(file_path)
         return vanished
@@ -630,12 +626,12 @@ class Indexer:
         # Checked again on the descriptor: between that stat and this open the path can be
         # replaced by a FIFO, and a blocking open would then wait for a writer that may
         # never come - with a worker of the pool in its hand.
-        data = read_regular_file(path)
+        data = discovery.read_regular_file(path)
         if data is None:
             raise IndexingError("Not a regular file; skipped")
-        if len(data) > MAX_FILE_BYTES:
-            raise IndexingError(f"File is larger than {MAX_FILE_BYTES} bytes; skipped")
-        content_hash = hash_bytes(data)
+        if len(data) > discovery.MAX_FILE_BYTES:
+            raise IndexingError(f"File is larger than {discovery.MAX_FILE_BYTES} bytes; skipped")
+        content_hash = discovery.hash_bytes(data)
         # The format counts as much as the content: a file whose bytes never changed still
         # has to be rebuilt if its vectors were pooled by an older scheme, or it would keep
         # them forever and the table would answer one query two different ways.

@@ -1029,10 +1029,14 @@ MUTATIONS = (
     Mutation(
         name="coverage: retract before knowing whether anything will be written",
         module="indexer.py",
-        old="            files = iter_markdown_files(root, record_unreadable, self._exclude)",
+        old=(
+            "            files = discovery.iter_markdown_files("
+            "root, record_unreadable, self._exclude)"
+        ),
         new=(
             "            about_to_write()\n"
-            "            files = iter_markdown_files(root, record_unreadable, self._exclude)"
+            "            files = discovery.iter_markdown_files("
+            "root, record_unreadable, self._exclude)"
         ),
         tests="test_a_run_that_committed_nothing_leaves_the_certificate_alone",
     ),
@@ -1119,14 +1123,19 @@ MUTATIONS = (
     Mutation(
         name="index: ask whether a pruned directory's parent was walkable",
         module="indexer.py",
-        old="        if not _is_walkable(os.path.relpath(path, root).split(os.sep)):",
-        new="        if not _is_walkable(os.path.relpath(path, root).split(os.sep)[:-1]):",
+        old="        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):",
+        new=(
+            "        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)[:-1]):"
+        ),
         tests="test_a_pruned_directory_that_could_not_be_listed_keeps_its_own_failure",
     ),
     Mutation(
         name="index: speak for an excluded tree this walk never entered",
         module="indexer.py",
-        old="        return not (self._exclude and _is_excluded(Path(path), root, self._exclude))",
+        old=(
+            "        return not (self._exclude and "
+            "discovery._is_excluded(Path(path), root, self._exclude))"
+        ),
         new="        return True",
         tests="test_a_failure_inside_an_excluded_directory_outlives_a_parent_scan",
     ),
@@ -1155,15 +1164,18 @@ MUTATIONS = (
     Mutation(
         name="index: purge what a walk could not see behind a symlink",
         module="indexer.py",
-        old="            if _behind_symlink(root, file_path):\n                continue",
+        old="            if discovery._behind_symlink(root, file_path):\n                continue",
         new="            if False:\n                continue",
         tests="test_a_directory_that_became_a_symlink_costs_nothing",
     ),
     Mutation(
         name="index: clear failures behind a symlink this walk never followed",
         module="indexer.py",
-        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
-        new="        if _is_shadowing_symlink(path):",
+        old=(
+            "        if discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path):"
+        ),
+        new="        if discovery._is_shadowing_symlink(path):",
         tests="test_a_failure_behind_a_symlinked_directory_outlives_a_parent_scan",
     ),
     Mutation(
@@ -1187,7 +1199,7 @@ MUTATIONS = (
         module="indexer.py",
         old=(
             "            if self._walk_would_visit(root, path, blocked) "
-            "or _certainly_gone(root, path):"
+            "or discovery._certainly_gone(root, path):"
         ),
         new="            if self._walk_would_visit(root, path, blocked):",
         tests="test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does",
@@ -1195,7 +1207,7 @@ MUTATIONS = (
     Mutation(
         name="index: keep answering from a deleted file the walk could not see",
         module="indexer.py",
-        old="            if _certainly_gone(root, file_path):",
+        old="            if discovery._certainly_gone(root, file_path):",
         new="            if False:",
         tests="test_a_deleted_document_inside_a_pruned_tree_stops_answering",
     ),
@@ -1222,8 +1234,11 @@ MUTATIONS = (
     Mutation(
         name="index: clear a failure on a directory the walk only saw the name of",
         module="indexer.py",
-        old="        if _behind_symlink(root, path) or _is_shadowing_symlink(path):",
-        new="        if _behind_symlink(root, path):",
+        old=(
+            "        if discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path):"
+        ),
+        new="        if discovery._behind_symlink(root, path):",
         tests="test_a_failure_on_a_directory_that_became_a_symlink_outlives_the_swap",
     ),
     Mutation(

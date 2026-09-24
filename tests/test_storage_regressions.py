@@ -191,7 +191,6 @@ class TestIndexerSafety:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(indexer_module, "MAX_FILE_BYTES", 32)
         monkeypatch.setattr(discovery, "MAX_FILE_BYTES", 32)
         root = tmp_path / "docs"
         root.mkdir()
