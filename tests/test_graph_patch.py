@@ -297,8 +297,8 @@ print(int(peak.split()[1]) // 1024)
 
 @pytest.fixture
 def model_dir() -> Path:
+    from markdown_memory.config import ServerConfig
     from markdown_memory.model_cache import GEMMA_MODEL_FILE, gemma_model_dir
-    from markdown_memory.server import ServerConfig
 
     cache_dir = ServerConfig.from_env().model_cache_dir
     directory = gemma_model_dir(cache_dir)

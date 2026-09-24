@@ -418,7 +418,7 @@ class TestRankingIsActuallyTested:
         # Ranked by section vector alone the decoy wins; by closest passage the target does.
         section_only = dict(
             db.vec_search(fake_embedder.embed_query("certificates expire ninety"), 20)
-        )  # noqa: E501
+        )
         assert section_only[ids["Almanac"]] < section_only[target_id]
         assert ranking[0] == target_id
         assert passages[target_id] == "certificates expire after ninety days"

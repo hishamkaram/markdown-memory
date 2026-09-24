@@ -14,17 +14,11 @@ from fakes import FakeEmbedder
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
+from markdown_memory.config import ServerConfig
 from markdown_memory.exceptions import SectionNotFoundError
+from markdown_memory.headings import build_outline, normalize_heading_path, select_sections
 from markdown_memory.models import PREAMBLE_TITLE, Section
-from markdown_memory.server import (
-    MarkdownMemoryService,
-    ServerConfig,
-    build_outline,
-    configure_logging,
-    create_server,
-    normalize_heading_path,
-    select_sections,
-)
+from markdown_memory.server import MarkdownMemoryService, configure_logging, create_server
 
 
 @pytest.fixture

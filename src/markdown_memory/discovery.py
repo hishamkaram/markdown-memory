@@ -8,15 +8,11 @@ by a symlink or blocked forever by a FIFO.
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import stat
 from collections.abc import Callable, Iterator, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
-
 
 #: What ``_printable`` leaves where it could not decode a byte of a file name.
 _UNDECODABLE = "�"

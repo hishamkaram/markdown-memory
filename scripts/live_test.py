@@ -27,9 +27,9 @@ from typing import Any
 from mcp import Client, StdioServerParameters, stdio_client
 from mcp.types import CallToolResult, TextContent
 
+from markdown_memory.config import ServerConfig
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.embedders import DEFAULT_EMBEDDER, GEMMA_DIMENSION
-from markdown_memory.server import ServerConfig
 
 # How long [9] leaves the server idle before measuring what that idleness costs and what
 # the query after it costs. Long enough that any onnxruntime spin window has closed.

@@ -24,6 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 import markdown_memory.indexer as indexer_module
 from markdown_memory import discovery
+from markdown_memory.config import ServerConfig
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.discovery import iter_markdown_files
 from markdown_memory.exceptions import (
@@ -37,7 +38,7 @@ from markdown_memory.models import (
     SectionVectors,
 )
 from markdown_memory.search import HybridSearcher
-from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
+from markdown_memory.server import MarkdownMemoryService, create_server
 
 
 class TestConnectionLifecycle:
@@ -1761,7 +1762,7 @@ class TestOnlyAWholeWalkVouchesForATree:
             try:
                 indexer.index_directory(tmp_path)
                 outcome.append(None)
-            except BaseException as error:  # noqa: BLE001 - recorded, then asserted on
+            except BaseException as error:
                 outcome.append(error)
 
         indexer._run_lock.acquire()

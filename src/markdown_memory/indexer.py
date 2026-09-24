@@ -111,22 +111,6 @@ def _mean_vector(vectors: Sequence[Sequence[float]]) -> list[float] | None:
     return [value / norm for value in totals]
 
 
-def parse_exclusions(value: str) -> tuple[str, ...]:
-    """Split a configured exclusion list on commas; blanks and stray ``./`` dropped.
-
-    Comma only: a colon separator would split a pattern that contains one, and silently
-    excluding the wrong thing is worse than not accepting the separator.
-    """
-    patterns = []
-    for part in value.split(","):
-        # One leading "./" only: `lstrip("./")` would eat the dot of `.hidden` and
-        # exclude a `hidden` directory instead of the one that was named.
-        cleaned = part.strip().removeprefix("./").rstrip("/")
-        if cleaned:
-            patterns.append(cleaned)
-    return tuple(patterns)
-
-
 @dataclasses.dataclass(slots=True, frozen=True)
 class _Prepared:
     """One file, read and embedded, waiting to be written.

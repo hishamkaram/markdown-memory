@@ -17,12 +17,8 @@ import logging
 import sys
 from pathlib import Path
 
-from markdown_memory.server import (
-    MarkdownMemoryService,
-    ServerConfig,
-    configure_logging,
-    resolve_config,
-)
+from markdown_memory.config import ServerConfig, resolve_config
+from markdown_memory.server import MarkdownMemoryService, configure_logging
 
 
 def main() -> int:

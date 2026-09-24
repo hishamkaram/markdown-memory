@@ -1,4 +1,7 @@
-"""MCP server: configuration, the application service, tool handlers and the entrypoint.
+"""MCP server: the application service, tool handlers and the entrypoint.
+
+Configuration lives in ``config.py``, the freshness sweep in ``freshness.py`` and
+heading resolution in ``headings.py``.
 
 stdout belongs to the JSON-RPC transport. Every log record goes to ``sys.stderr``;
 nothing in this package calls ``print``.
@@ -9,30 +12,29 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import functools
-import hashlib
 import logging
 import os
-import re
-import stat
 import sys
 import threading
-import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from enum import Enum, auto
 from pathlib import Path
 from typing import ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from markdown_memory.db import Database
-from markdown_memory.discovery import (
-    MAX_FILE_BYTES,
-    hash_bytes,
-    read_regular_file,
+from markdown_memory import headings
+from markdown_memory.config import (
+    ENV_DB_PATH,
+    ENV_DOCS_DIR,
+    ENV_EMBEDDER,
+    ENV_EXCLUDE,
+    ENV_LOG_LEVEL,
+    ServerConfig,
+    _config_from_cli,
 )
+from markdown_memory.db import Database
 from markdown_memory.embedders import (
     DEFAULT_EMBEDDER,
     Embedder,
@@ -41,20 +43,14 @@ from markdown_memory.embedders import (
     create_embedder,
 )
 from markdown_memory.exceptions import (
-    ConfigurationError,
     DocumentNotFoundError,
     IndexingError,
     MarkdownMemoryError,
     SearchError,
-    SectionNotFoundError,
 )
-from markdown_memory.indexer import (
-    DEFAULT_INDEX_WORKERS,
-    Indexer,
-    parse_exclusions,
-)
+from markdown_memory.freshness import FreshnessSweep
+from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
-    PATH_SEPARATOR,
     Document,
     DocumentSummary,
     IndexReport,
@@ -62,263 +58,24 @@ from markdown_memory.models import (
     JsonDict,
     OutlineNode,
     SearchResult,
-    Section,
-    estimate_tokens,
 )
 from markdown_memory.parser import join_parts
 from markdown_memory.search import HybridSearcher
 
 logger = logging.getLogger(__name__)
 
-ENV_DB_PATH = "MARKDOWN_MEMORY_DB"
-ENV_DOCS_DIR = "MARKDOWN_MEMORY_DOCS_DIR"
-ENV_MODEL_CACHE = "MARKDOWN_MEMORY_MODEL_CACHE"
-ENV_EMBEDDER = "MARKDOWN_MEMORY_EMBEDDER"
-ENV_LOG_LEVEL = "MARKDOWN_MEMORY_LOG_LEVEL"
-ENV_EXCLUDE = "MARKDOWN_MEMORY_EXCLUDE"
-ENV_INDEX_WORKERS = "MARKDOWN_MEMORY_INDEX_WORKERS"
-# Claude Code exports this to every stdio MCP server it spawns, set to the project root.
-# `.mcp.json` cannot interpolate it - measured on Claude Code 2.1.278, `${CLAUDE_PROJECT_DIR}`
-# and `${workspaceFolder}` are both reported as "Missing environment variables" and passed
-# through literally - so a project-scoped config uses relative paths and the server resolves
-# them here instead.
-ENV_PROJECT_DIR = "CLAUDE_PROJECT_DIR"
 
 _P = ParamSpec("_P")
+
+
 _R = TypeVar("_R")
 
-_PATH_SEPARATOR_PATTERN = re.compile(r"\s*>\s*")
-# How long one filesystem sweep speaks for. An agent fires several searches in a single
-# turn, and every one of them asks for the status: on a local ext4 tree 100 stats cost
-# ~0.1 ms, but across a WSL2 or network boundary they cost 100-300 ms, which would double
-# the latency of a query to re-answer a question whose answer cannot have changed much.
-# Short enough that an edit is reported by the next search but one.
-_FRESHNESS_TTL_SECONDS = 3.0
-_MAX_LISTED_PATHS = 40
 
 SERVER_INSTRUCTIONS = (
     "Markdown documentation memory. Workflow: index_directory once, then search_docs to "
     "locate relevant sections, or get_document_outline followed by read_section to fetch "
     "one heading's text. Prefer these tools over reading whole Markdown files."
 )
-
-
-def _xdg_dir(variable: str, fallback: str) -> Path:
-    configured = os.environ.get(variable, "").strip()
-    return Path(configured) if configured else Path.home() / fallback
-
-
-def _project_database(docs_dir: Path) -> Path:
-    """Where one documentation root's index lives when nothing configured it.
-
-    Keyed on the documentation root, never on the working directory. The working directory
-    belongs to whoever launched the server, so two servers started from one directory for
-    two different projects would share a database - which is the cross-project leak this
-    default exists to close, arrived at from the other side. Search is scoped to the docs
-    root, but a document stays resolvable across a whole database by path or unique suffix,
-    so sharing the file is enough to leak one project's documentation into another's answers.
-
-    Kept out of the project too. A database inside the repository is committed by accident,
-    deleted by `git clean -xdf`, rebuilt per worktree, unwritable when the checkout is
-    read-only, and - on a network share - sits where SQLite's WAL cannot take the locks it
-    needs. The name carries the root's own basename so a person can tell the indexes apart,
-    and a digest of its resolved path so two projects called `docs` cannot collide.
-    """
-    try:
-        resolved = docs_dir.expanduser().resolve()
-    except (OSError, RuntimeError):  # symlink loop, or a path the OS will not resolve
-        resolved = docs_dir.expanduser().absolute()
-    digest = hashlib.sha256(os.fsencode(str(resolved))).hexdigest()[:12]
-    label = re.sub(r"[^A-Za-z0-9_.-]", "-", resolved.name) or "root"
-    return (
-        _xdg_dir("XDG_DATA_HOME", ".local/share")
-        / "markdown-memory"
-        / "projects"
-        / f"{label}-{digest}"
-        / "index.db"
-    )
-
-
-@dataclass(slots=True, frozen=True)
-class ServerConfig:
-    """Runtime configuration, resolved from the environment (CLI flags override)."""
-
-    db_path: Path
-    docs_dir: Path
-    embedder: str = DEFAULT_EMBEDDER
-    model_cache_dir: Path | None = None
-    # Glob patterns, relative to the docs root, that indexing must not descend into: a
-    # repository's own fixtures, vendored documentation or test corpus are not its docs.
-    exclude: tuple[str, ...] = ()
-    #: Files embedded at the same time while indexing.
-    index_workers: int = DEFAULT_INDEX_WORKERS
-
-    @classmethod
-    def from_env(cls) -> ServerConfig:
-        root = _project_root()
-        db_path = _configured_path(ENV_DB_PATH, root)
-        docs_dir = _configured_path(ENV_DOCS_DIR, root)
-        model_cache = _configured_path(ENV_MODEL_CACHE, root)
-        return cls(
-            # One index per documentation root, rather than one for the whole machine.
-            # Isolation should not depend on the user having set an environment variable.
-            # The model cache below stays shared on purpose: 330 MB of read-only weights,
-            # identical everywhere, and copying it per project would be pure waste.
-            db_path=(db_path if db_path else _project_database(docs_dir if docs_dir else root)),
-            docs_dir=docs_dir if docs_dir else root,
-            embedder=os.environ.get(ENV_EMBEDDER, "").strip() or DEFAULT_EMBEDDER,
-            model_cache_dir=(
-                model_cache
-                if model_cache
-                else _xdg_dir("XDG_CACHE_HOME", ".cache") / "markdown-memory" / "models"
-            ),
-            exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
-            index_workers=_positive_int(ENV_INDEX_WORKERS, DEFAULT_INDEX_WORKERS),
-        )
-
-
-def resolve_config(
-    *,
-    db: Path | None = None,
-    docs_dir: Path | None = None,
-    embedder: str | None = None,
-    exclude: Sequence[str] = (),
-) -> ServerConfig:
-    """Environment configuration with explicit overrides laid over it.
-
-    Naming a different documentation root re-keys the database, because the default is
-    keyed on that root: taking `ServerConfig.from_env().db_path` as the fallback reads a
-    path derived from the *environment's* root, and two callers pointed at different roots
-    from one directory would land in the launcher's single database - exactly the
-    cross-project leak keying was added to close. An explicitly configured database still
-    wins, from the argument or the environment, in that order.
-
-    Every entry point that takes overrides resolves them here - the server's own flags
-    and the scripts alike - so that precedence is written once and cannot drift between
-    them. The paths that accept none (the in-process service, `eval_retrieval.py`) go
-    straight to `ServerConfig.from_env`, which is the same answer with nothing laid over
-    it.
-    """
-    base = ServerConfig.from_env()
-    root = docs_dir.expanduser() if docs_dir else base.docs_dir
-    configured_db = _configured_path(ENV_DB_PATH, _project_root())
-    return ServerConfig(
-        db_path=(
-            db.expanduser() if db else configured_db if configured_db else _project_database(root)
-        ),
-        docs_dir=root,
-        embedder=embedder or base.embedder,
-        model_cache_dir=base.model_cache_dir,
-        exclude=tuple(exclude) or base.exclude,
-        index_workers=base.index_workers,
-    )
-
-
-def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
-    """The command line laid over the environment."""
-    return resolve_config(
-        db=arguments.db,
-        docs_dir=arguments.docs_dir,
-        embedder=arguments.embedder,
-        exclude=arguments.exclude,
-    )
-
-
-def _project_root() -> Path:
-    """The directory a relative configured path is relative to.
-
-    Claude Code sets the working directory of a project-scoped server to the project root
-    as well, so the fallback agrees with the export in that case; it differs only for a
-    server started by hand from somewhere else.
-    """
-    exported = os.environ.get(ENV_PROJECT_DIR, "").strip()
-    return Path(exported).expanduser() if exported else Path.cwd()
-
-
-class _Verdict(Enum):
-    """What one file's freshness probe found."""
-
-    UNCHANGED = auto()
-    CHANGED = auto()
-    #: Same bytes, a time that has moved: nothing to report, but worth writing down.
-    SAME_BYTES_NEW_TIME = auto()
-
-
-def _compare(path: Path, content_hash: str, mtime_ns: int | None) -> tuple[_Verdict, int]:
-    """Whether the file behind an indexed document differs from what was indexed.
-
-    The modification time is the cheap question and the bytes are the expensive one, so
-    the hash is only computed where the time has moved: a `touch`, a checkout that
-    rewrites a file with its own contents, or a copy that preserves nothing but the text
-    must not be reported as a change an agent should act on. A file that has vanished, no
-    longer resolves to a regular file, or cannot be read counts as changed - not because
-    its bytes are known to differ, but because they cannot be checked at all. That applies
-    where the bytes had to be read: a file whose recorded time still matches is answered
-    from the time alone, so losing permission to read it - without touching it - is not
-    reported here. The next index run cannot read it either, and records a failure, which
-    is what takes `coverage` to `"unknown"`.
-
-    A stored `None` means no modification time was recorded - a row written before the
-    column existed - rather than a time of zero, so no real timestamp can be mistaken for
-    it, the epoch included. Those files are answered by their bytes until an index run
-    writes a time for them.
-
-    The one edit this cannot see is a file rewritten with its modification time put back
-    to what it was: no timestamp moved, so no hash is taken. Indexing itself is not fooled
-    - it hashes every file it walks - so `index_directory` still rebuilds that document;
-    what is missed is only the hint that it is worth running. Seeing it here would mean
-    hashing every indexed file on every query, or storing a second timestamp to compare
-    against, and this signal is not worth either.
-    """
-    try:
-        info = path.stat()
-    except OSError:
-        return _Verdict.CHANGED, 0
-    if not stat.S_ISREG(info.st_mode):
-        return _Verdict.CHANGED, 0
-    if mtime_ns is not None and info.st_mtime_ns == mtime_ns:
-        return _Verdict.UNCHANGED, info.st_mtime_ns
-    try:
-        data = read_regular_file(path)
-    except OSError:
-        return _Verdict.CHANGED, 0
-    if data is None or len(data) > MAX_FILE_BYTES or hash_bytes(data) != content_hash:
-        return _Verdict.CHANGED, 0
-    # The time from the stat that came *before* the read, never a fresher one: a file
-    # rewritten after these bytes were hashed must not be recorded as verified at the
-    # moment of its rewrite, or the next sweep would trust a time that belongs to content
-    # nobody checked.
-    return _Verdict.SAME_BYTES_NEW_TIME, info.st_mtime_ns
-
-
-def _positive_int(variable: str, default: int) -> int:
-    """A count read from the environment; anything that is not one keeps the default."""
-    value = os.environ.get(variable, "").strip()
-    return int(value) if value.isdigit() and int(value) > 0 else default
-
-
-def _configured_path(variable: str, root: Path) -> Path | None:
-    """One configured path, resolved against ``root`` when it is relative.
-
-    An unexpanded `${...}` is rejected rather than used as a directory name: Claude Code
-    loads a config whose variables it could not expand and passes the literal text through,
-    which would otherwise index a directory named `${workspaceFolder}` and report success
-    over zero files.
-    """
-    value = os.environ.get(variable, "").strip()
-    if not value:
-        return None
-    # A directory really named `docs/${version}` is allowed: if the literal path exists,
-    # it is a path, not a variable nobody expanded.
-    if "${" in value and not Path(value).expanduser().exists():
-        raise ConfigurationError(
-            f"{variable} is set to {value!r}, which still contains an unexpanded variable. "
-            "Claude Code expands only environment variables in .mcp.json - not "
-            "${workspaceFolder} or ${CLAUDE_PROJECT_DIR} - so write the path relative to the "
-            "project root instead (for example '.markdown-memory/index.db')."
-        )
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else (root / path)
 
 
 class MarkdownMemoryService:
@@ -338,19 +95,8 @@ class MarkdownMemoryService:
         # every one of them out and returns nothing. Resolved ONCE, and reused: resolving
         # again per call lets a retargeted symlink answer from one tree while reporting on
         # another, which is a lie told with two correct halves.
-        self._root = str(_absolute(self._config.docs_dir, SearchError))
-        #: The last sweep: which scope it measured, when, and what it found. One entry,
-        #: because the burst it exists to absorb is the same question asked several times
-        #: in a row - and a map keyed on a caller-supplied path would grow for the life of
-        #: the server, one entry per spelling anybody ever asked about.
-        self._freshness: tuple[str, float, int] | None = None
-        #: Held for the whole of a sweep, so that reading the cache, walking the
-        #: filesystem and storing the answer are one step. Without it a sweep that
-        #: indexing overtook would publish a count of a tree that no longer exists - the
-        #: one moment an agent is most likely to ask - and two sweeps racing could leave
-        #: the older one's answer behind. It also means a second caller arriving mid-sweep
-        #: waits and is served the result rather than walking the tree again.
-        self._freshness_lock = threading.Lock()
+        self._root = str(headings._absolute(self._config.docs_dir, SearchError))
+        self._freshness = FreshnessSweep(self._db)
         self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
 
     @property
@@ -376,7 +122,7 @@ class MarkdownMemoryService:
             # being reported as stale for the rest of the window, which is exactly the
             # moment an agent looks. A run that failed partway invalidates it too - some
             # of it may have been written.
-            self._invalidate_freshness()
+            self._freshness.invalidate()
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         # An empty argument means "this project", not "everything this database holds".
@@ -387,14 +133,16 @@ class MarkdownMemoryService:
 
     def get_document_outline(self, file_path: str) -> list[OutlineNode]:
         document = self._resolve_document(file_path)
-        return build_outline(self._db.get_sections(document.id))
+        return headings.build_outline(self._db.get_sections(document.id))
 
     def read_section(
         self, file_path: str, heading_path: str, *, include_subsections: bool = False
     ) -> str:
         document = self._resolve_document(file_path)
         sections = self._db.get_sections(document.id)
-        matched = select_sections(sections, heading_path, include_subsections=include_subsections)
+        matched = headings.select_sections(
+            sections, heading_path, include_subsections=include_subsections
+        )
         return join_parts(matched)
 
     def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
@@ -419,7 +167,7 @@ class MarkdownMemoryService:
         # built for, never against the configured path again, or a retargeted symlink
         # pairs this root's certificate with another tree's failures.
         scope = self._within_root(
-            _absolute(Path(self._root) / directory.strip(), SearchError), SearchError
+            headings._absolute(Path(self._root) / directory.strip(), SearchError), SearchError
         )
         return self._with_freshness(self._db.index_status(self._root, str(scope)), str(scope))
 
@@ -431,39 +179,7 @@ class MarkdownMemoryService:
         rows the index holds - a file nobody has indexed yet is found by walking the tree,
         which is the expensive half of indexing and not something a search should pay for.
         """
-        return dataclasses.replace(status, changed_files=self._changed_files(scope))
-
-    def _invalidate_freshness(self) -> None:
-        with self._freshness_lock:
-            self._freshness = None
-
-    def _changed_files(self, scope: str) -> int:
-        with self._freshness_lock:
-            cached = self._freshness
-            if (
-                cached is not None
-                and cached[0] == scope
-                and time.monotonic() - cached[1] < _FRESHNESS_TTL_SECONDS
-            ):
-                return cached[2]
-            fingerprints = self._db.document_fingerprints(scope)
-            changed = 0
-            for file_path, (content_hash, mtime_ns) in fingerprints.items():
-                verdict, seen_ns = _compare(Path(file_path), content_hash, mtime_ns)
-                if verdict is _Verdict.CHANGED:
-                    changed += 1
-                elif verdict is _Verdict.SAME_BYTES_NEW_TIME:
-                    # The hash was computed to answer this, and the answer was "unchanged".
-                    # Writing the time down means the next sweep reads it instead of the
-                    # file - otherwise one `touch` costs a full hash every window until an
-                    # index run happens to come past. A file that moved again in between
-                    # is simply hashed again next time; nothing is lost by missing it.
-                    self._db.record_modification_time(file_path, content_hash, mtime_ns, seen_ns)
-            # Stamped when the answer was produced, not when the sweep began: the walk
-            # itself takes time on a slow mount, and a window that starts before the
-            # measurement is a window the measurement was never true for.
-            self._freshness = (scope, time.monotonic(), changed)
-            return changed
+        return dataclasses.replace(status, changed_files=self._freshness.changed_files(scope))
 
     # ------------------------------------------------------------------ resolution
 
@@ -479,10 +195,10 @@ class MarkdownMemoryService:
         """
         if directory is None or not directory.strip():
             return Path(self._root)
-        path = _user_path(directory.strip(), IndexingError)
+        path = headings._user_path(directory.strip(), IndexingError)
         if not path.is_absolute():
             path = Path(self._root) / path
-        return _absolute(path, IndexingError)
+        return headings._absolute(path, IndexingError)
 
     def _within_root(self, resolved: Path, error: type[MarkdownMemoryError]) -> Path:
         """Refuse to *answer about* a directory outside the tree this server serves.
@@ -511,7 +227,7 @@ class MarkdownMemoryService:
         requested = file_path.strip()
         if not requested:
             raise DocumentNotFoundError("file_path must not be empty")
-        path = _user_path(requested, DocumentNotFoundError)
+        path = headings._user_path(requested, DocumentNotFoundError)
         candidates = [path]
         if not path.is_absolute():
             candidates = [self._config.docs_dir / path]
@@ -520,176 +236,20 @@ class MarkdownMemoryService:
             except OSError:  # the working directory was deleted under the server
                 logger.debug("Working directory is gone; not resolving %s against it", requested)
         for candidate in candidates:
-            document = self._db.get_document(str(_absolute(candidate, DocumentNotFoundError)))
+            resolved = headings._absolute(candidate, DocumentNotFoundError)
+            document = self._db.get_document(str(resolved))
             if document is not None:
                 return document
         matches = self._db.find_documents_by_suffix(requested)
         if len(matches) == 1:
             return matches[0]
         if matches:
-            listing = ", ".join(match.file_path for match in matches[:_MAX_LISTED_PATHS])
+            listing = ", ".join(match.file_path for match in matches[: headings._MAX_LISTED_PATHS])
             raise DocumentNotFoundError(f"'{requested}' is ambiguous; it matches: {listing}")
         raise DocumentNotFoundError(
             f"'{requested}' is not indexed. Run index_directory, then list_documents "
             "to see the available paths."
         )
-
-
-# ---------------------------------------------------------------------- pure helpers
-
-
-def _user_path(text: str, error: type[MarkdownMemoryError]) -> Path:
-    """``Path(text).expanduser()``; pathlib's RuntimeError/ValueError become ``error``."""
-    try:
-        text.encode("utf-8")  # a lone surrogate cannot be bound as a SQLite parameter
-        return Path(text).expanduser()
-    except (RuntimeError, ValueError) as exc:  # unknown ~user, embedded NUL, bad encoding
-        raise error(f"Invalid path {text!r}: {exc}") from exc
-
-
-def _absolute(path: Path, error: type[MarkdownMemoryError]) -> Path:
-    try:
-        resolved = path.expanduser().resolve()
-        str(resolved).encode("utf-8")
-    except (OSError, RuntimeError, ValueError) as exc:  # symlink loop, NUL, bad encoding
-        raise error(f"Invalid path {str(path)!r}: {exc}") from exc
-    return resolved
-
-
-def normalize_heading_path(heading_path: str) -> str:
-    """Canonicalise breadcrumb spacing: ``A>B`` and ``A  >  B`` both become ``A > B``."""
-    return PATH_SEPARATOR.join(
-        segment.strip() for segment in _PATH_SEPARATOR_PATTERN.split(heading_path.strip())
-    )
-
-
-def _casefolded(heading_path: str) -> str:
-    return normalize_heading_path(heading_path).casefold()
-
-
-# Progressively looser ways to compare a requested path with a stored one. The same
-# transformation is applied to BOTH sides, so a title containing '>' ("Step 1 -> Step 2",
-# "Result<T, E>") still matches itself, and an exact-case request beats a case-folded one
-# (sibling headings "Setup" and "SETUP" stay individually addressable).
-_MATCH_KEYS: tuple[Callable[[str], str], ...] = (str, normalize_heading_path, _casefolded)
-
-
-def resolve_heading_path(candidates: Sequence[str], requested: str) -> str:
-    """The one stored path that ``requested`` designates.
-
-    Whole-path matches are tried before trailing fragments (``Child > Subchild`` or the
-    bare heading title); within each, stricter comparisons come first. The first tier
-    with any match decides: one match wins, several are reported as ambiguous.
-    """
-    for as_suffix in (False, True):
-        for key in _MATCH_KEYS:
-            wanted = key(requested)
-            if as_suffix:
-                ending = PATH_SEPARATOR + wanted
-                matches = [path for path in candidates if key(path).endswith(ending)]
-            else:
-                matches = [path for path in candidates if key(path) == wanted]
-            if len(matches) == 1:
-                return matches[0]
-            if matches:
-                raise SectionNotFoundError(
-                    f"'{requested}' is ambiguous; use one of (exact spelling): "
-                    + " | ".join(matches[:_MAX_LISTED_PATHS])
-                )
-    available = " | ".join(candidates[:_MAX_LISTED_PATHS]) or "(document has no sections)"
-    raise SectionNotFoundError(f"No section '{requested}'. Available heading paths: {available}")
-
-
-def select_sections(
-    sections: Sequence[Section], heading_path: str, *, include_subsections: bool = False
-) -> list[Section]:
-    """Sections addressed by ``heading_path``, in source order.
-
-    ``heading_path`` may name a whole section (every part of it is returned) or a single
-    ``(Part n)`` of an oversized one. ``include_subsections`` adds the section's
-    descendants; it has no meaning for a single part and is ignored there.
-    """
-    requested = heading_path.strip()
-    if not requested:
-        raise SectionNotFoundError("heading_path must not be empty")
-    base_paths = list(dict.fromkeys(section.base_path for section in sections))
-    parts = {s.heading_path: s for s in sections if s.part_index > 0}
-    part_paths = [path for path in parts if path not in base_paths]
-    chosen = resolve_heading_path([*base_paths, *part_paths], requested)
-    if chosen not in base_paths:
-        return [parts[chosen]]
-
-    selected: list[Section] = []
-    level: int | None = None
-    for section in sections:
-        if section.base_path == chosen:
-            level = section.heading_level
-            selected.append(section)
-        elif level is not None:
-            # Descendants are the sections that follow until a heading at the same or a
-            # shallower level; walking the order is immune to '>' inside titles.
-            if not include_subsections or level < 1 or section.heading_level <= level:
-                break
-            selected.append(section)
-    return selected
-
-
-def build_outline(sections: Sequence[Section]) -> list[OutlineNode]:
-    """Nest a document's sections into a hierarchical table of contents."""
-
-    @dataclass(slots=True)
-    class _Pending:
-        title: str
-        level: int
-        path: str
-        start_line: int
-        end_line: int
-        tokens: int
-        parts: int
-        children: list[_Pending]
-
-    roots: list[_Pending] = []
-    stack: list[_Pending] = []
-    by_path: dict[str, _Pending] = {}
-    for section in sections:
-        existing = by_path.get(section.base_path)
-        if existing is not None:  # a further part of an oversized section
-            existing.end_line = max(existing.end_line, section.end_line)
-            existing.tokens += estimate_tokens(section.content)
-            existing.parts += 1
-            continue
-        node = _Pending(
-            title=section.heading_title,
-            level=section.heading_level,
-            path=section.base_path,
-            start_line=section.start_line,
-            end_line=section.end_line,
-            tokens=estimate_tokens(section.content),
-            parts=1,
-            children=[],
-        )
-        by_path[section.base_path] = node
-        if node.level < 1:  # the preamble is a sibling of the headings, never their parent
-            roots.append(node)
-            continue
-        while stack and stack[-1].level >= node.level:
-            stack.pop()
-        (stack[-1].children if stack else roots).append(node)
-        stack.append(node)
-
-    def freeze(node: _Pending) -> OutlineNode:
-        return OutlineNode(
-            heading_title=node.title,
-            heading_level=node.level,
-            heading_path=node.path,
-            start_line=node.start_line,
-            end_line=node.end_line,
-            token_estimate=node.tokens,
-            part_count=node.parts,
-            children=tuple(freeze(child) for child in node.children),
-        )
-
-    return [freeze(node) for node in roots]
 
 
 # ---------------------------------------------------------------------- MCP wiring

@@ -870,8 +870,8 @@ def test_the_bge_small_folder_is_the_one_fastembed_really_creates() -> None:
     re-export (`qdrant/bge-small-en-v1.5-onnx-q`), and guessing `models--BAAI--...` left
     the eval cache keyed on an empty string for that preset.
     """
+    from markdown_memory.config import ServerConfig
     from markdown_memory.model_cache import fastembed_model_dir
-    from markdown_memory.server import ServerConfig
 
     cache_dir = ServerConfig.from_env().model_cache_dir
     assert cache_dir is not None

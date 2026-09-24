@@ -70,13 +70,13 @@ MUTATIONS = (
         ),
         new=(
             "        if directory is None or not directory.strip():\n"
-            "            return _absolute(self._config.docs_dir, IndexingError)"
+            "            return headings._absolute(self._config.docs_dir, IndexingError)"
         ),
         tests="test_a_scan_after_a_retarget_stays_with_the_root_it_serves",
     ),
     Mutation(
         name="config: keep the launcher's database when another project's root is named",
-        module="server.py",
+        module="config.py",
         old=(
             "            db.expanduser() if db else configured_db "
             "if configured_db else _project_database(root)"
@@ -91,7 +91,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="config: put every project's index back in one shared database",
-        module="server.py",
+        module="config.py",
         old=(
             "            db_path=(db_path if db_path else "
             "_project_database(docs_dir if docs_dir else root)),"
@@ -665,7 +665,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="exclusions: split a configured pattern on colons as well as commas",
-        module="indexer.py",
+        module="config.py",
         old='    for part in value.split(","):',
         new='    for part in __import__("re").split(r"[,:]", value):',
         tests="test_a_pattern_containing_a_colon_is_one_pattern",
@@ -739,7 +739,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="exclusions: strip every leading dot and slash from a pattern",
-        module="indexer.py",
+        module="config.py",
         old='        cleaned = part.strip().removeprefix("./").rstrip("/")',
         new='        cleaned = part.strip().lstrip("./").rstrip("/")',
         tests="test_a_dot_prefixed_name_is_not_mistaken_for_a_relative_path",
@@ -753,7 +753,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="config: refuse a directory whose real name contains a dollar-brace",
-        module="server.py",
+        module="config.py",
         old='    if "${" in value and not Path(value).expanduser().exists():',
         new='    if "${" in value:',
         tests="test_a_directory_really_named_like_a_variable_is_allowed",
@@ -1071,7 +1071,7 @@ MUTATIONS = (
     Mutation(
         name="scope: filter search by the docs root as spelled, not as resolved",
         module="server.py",
-        old="        self._root = str(_absolute(self._config.docs_dir, SearchError))",
+        old="        self._root = str(headings._absolute(self._config.docs_dir, SearchError))",
         new="        self._root = str(self._config.docs_dir)",
         tests="test_a_symlinked_docs_root_still_answers",
     ),
@@ -1157,7 +1157,7 @@ MUTATIONS = (
         ),
         new=(
             "            return self._with_freshness(self._db.index_status("
-            "str(_absolute(self._config.docs_dir, SearchError))), self._root)"
+            "str(headings._absolute(self._config.docs_dir, SearchError))), self._root)"
         ),
         tests="test_status_and_search_always_describe_the_same_tree",
     ),
@@ -1264,7 +1264,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="config: overrule a database that was configured on purpose",
-        module="server.py",
+        module="config.py",
         old=(
             "            db.expanduser() if db else configured_db "
             "if configured_db else _project_database(root)"
@@ -1274,7 +1274,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="config: index the trees the operator excluded",
-        module="server.py",
+        module="config.py",
         old="        exclude=tuple(exclude) or base.exclude,",
         new="        exclude=tuple(exclude),",
         tests="test_exclusions_are_inherited_rather_than_dropped "
@@ -1304,27 +1304,30 @@ MUTATIONS = (
     Mutation(
         name="freshness: never look at the disk",
         module="server.py",
-        old="        return dataclasses.replace(status, changed_files=self._changed_files(scope))",
+        old=(
+            "        return dataclasses.replace("
+            "status, changed_files=self._freshness.changed_files(scope))"
+        ),
         new="        return status",
         tests="test_an_edited_document_is_reported_without_unverifying_the_walk",
     ),
     Mutation(
         name="freshness: call a file changed because its timestamp moved",
-        module="server.py",
+        module="freshness.py",
         old="    return _Verdict.SAME_BYTES_NEW_TIME, info.st_mtime_ns",
         new="    return _Verdict.CHANGED, info.st_mtime_ns  # a touch is a change",
         tests="test_a_touch_that_changes_no_byte_is_not_a_change",
     ),
     Mutation(
         name="freshness: read a missing modification time as the epoch",
-        module="server.py",
+        module="freshness.py",
         old="    if mtime_ns is not None and info.st_mtime_ns == mtime_ns:",
         new="    if info.st_mtime_ns == (mtime_ns or 0):  # nothing recorded is the epoch",
         tests="test_a_row_from_before_nanoseconds_were_recorded_is_answered_by_its_bytes",
     ),
     Mutation(
         name="freshness: sweep the filesystem on every single query",
-        module="server.py",
+        module="freshness.py",
         old="                cached is not None",
         new="                False  # measure it again, several times per conversational turn",
         tests="test_the_sweep_speaks_for_a_few_seconds_rather_than_per_query",
@@ -1362,13 +1365,13 @@ MUTATIONS = (
     Mutation(
         name="freshness: keep reporting what the last sweep found after a re-index",
         module="server.py",
-        old="            self._invalidate_freshness()",
+        old="            self._freshness.invalidate()",
         new="            pass  # the sweep still speaks for the tree it measured",
         tests="test_indexing_forgets_what_the_last_sweep_found",
     ),
     Mutation(
         name="freshness: answer one scope's question with another scope's sweep",
-        module="server.py",
+        module="freshness.py",
         old="                and cached[0] == scope",
         new="                and True  # whatever it swept, it answers for",
         tests="test_a_narrowed_status_sweeps_the_directory_it_was_asked_about",
@@ -1382,9 +1385,9 @@ MUTATIONS = (
     ),
     Mutation(
         name="freshness: publish a sweep of a tree that changed under it",
-        module="server.py",
-        old="        self._freshness_lock = threading.Lock()",
-        new="        self._freshness_lock = threading.Semaphore(8)  # not mutual exclusion",
+        module="freshness.py",
+        old="        self._lock = threading.Lock()",
+        new="        self._lock = threading.Semaphore(8)  # not mutual exclusion",
         tests="test_a_sweep_and_an_invalidation_cannot_overlap",
     ),
     Mutation(
@@ -1396,7 +1399,7 @@ MUTATIONS = (
     ),
     Mutation(
         name="freshness: hash a touched file again on every sweep",
-        module="server.py",
+        module="freshness.py",
         old=(
             "                    self._db.record_modification_time("
             "file_path, content_hash, mtime_ns, seen_ns)"
@@ -1424,7 +1427,7 @@ MUTATIONS = (
 )
 
 
-def _ignore_caches(directory: str, names: list[str]) -> set[str]:
+def _ignore_caches(_directory: str, names: list[str]) -> set[str]:
     # eval_data holds the frozen corpus; copying it for a mutation run is pure cost.
     return {name for name in names if name in {"__pycache__", "eval_data"}}
 

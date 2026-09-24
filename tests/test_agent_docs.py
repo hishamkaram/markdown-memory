@@ -14,11 +14,12 @@ from types import ModuleType
 import pytest
 from fakes import FakeEmbedder, vectors_for
 
+from markdown_memory.config import ServerConfig
 from markdown_memory.db import Database
 from markdown_memory.embedders import Embedder
 from markdown_memory.model_cache import GEMMA_REVISION
 from markdown_memory.models import SectionDraft
-from markdown_memory.server import MarkdownMemoryService, ServerConfig, create_server
+from markdown_memory.server import MarkdownMemoryService, create_server
 
 ROOT = Path(__file__).parent.parent
 AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules")
@@ -127,7 +128,7 @@ class TestDocsMatchTheCode:
         for size, weight in (
             (counts["dev/identifier"], "10pp"),
             (counts["held_out/identifier"], "12.5pp"),
-        ):  # noqa: E501
+        ):
             assert f"{100 / size:g}".rstrip("0") in weight and weight in skill
 
     def test_documented_baseline_is_the_frozen_baseline(self) -> None:

@@ -89,7 +89,12 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "TID"]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "ARG", "ERA", "RUF100"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles and callbacks take the arguments of what they stand in for, whether or
+# not this particular fake reads them.
+"tests/*" = ["ARG"]
 
 [tool.mypy]
 python_version = "3.11"

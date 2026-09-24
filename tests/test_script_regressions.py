@@ -19,13 +19,14 @@ import pytest
 from fakes import FakeEmbedder
 from helpers import store
 
+from markdown_memory.config import ServerConfig, resolve_config
 from markdown_memory.db import Database
 from markdown_memory.models import (
     FileFailure,
     IndexReport,
     SearchResult,
 )
-from markdown_memory.server import MarkdownMemoryService, ServerConfig, resolve_config
+from markdown_memory.server import MarkdownMemoryService
 
 
 class TestEvalScript:

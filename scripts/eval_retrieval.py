@@ -32,9 +32,10 @@ from pathlib import Path
 
 import eval_cache
 
+from markdown_memory.config import ServerConfig
 from markdown_memory.embedders import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.models import SearchResult
-from markdown_memory.server import MarkdownMemoryService, ServerConfig
+from markdown_memory.server import MarkdownMemoryService
 
 DATA = Path(__file__).parent / "eval_data"
 CORPUS = DATA / "corpus"
