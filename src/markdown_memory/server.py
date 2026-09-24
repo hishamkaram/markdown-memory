@@ -7,16 +7,20 @@ nothing in this package calls ``print``.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 import hashlib
 import logging
 import os
 import re
+import stat
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import ParamSpec, TypeVar
 
@@ -34,12 +38,16 @@ from markdown_memory.exceptions import (
 )
 from markdown_memory.indexer import (
     DEFAULT_EMBEDDER,
+    DEFAULT_INDEX_WORKERS,
+    MAX_FILE_BYTES,
     Embedder,
     EmbeddingGemmaEmbedder,
     FastEmbedEmbedder,
     Indexer,
     create_embedder,
+    hash_bytes,
     parse_exclusions,
+    read_regular_file,
 )
 from markdown_memory.models import (
     PATH_SEPARATOR,
@@ -64,6 +72,7 @@ ENV_MODEL_CACHE = "MARKDOWN_MEMORY_MODEL_CACHE"
 ENV_EMBEDDER = "MARKDOWN_MEMORY_EMBEDDER"
 ENV_LOG_LEVEL = "MARKDOWN_MEMORY_LOG_LEVEL"
 ENV_EXCLUDE = "MARKDOWN_MEMORY_EXCLUDE"
+ENV_INDEX_WORKERS = "MARKDOWN_MEMORY_INDEX_WORKERS"
 # Claude Code exports this to every stdio MCP server it spawns, set to the project root.
 # `.mcp.json` cannot interpolate it - measured on Claude Code 2.1.278, `${CLAUDE_PROJECT_DIR}`
 # and `${workspaceFolder}` are both reported as "Missing environment variables" and passed
@@ -75,6 +84,12 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 _PATH_SEPARATOR_PATTERN = re.compile(r"\s*>\s*")
+# How long one filesystem sweep speaks for. An agent fires several searches in a single
+# turn, and every one of them asks for the status: on a local ext4 tree 100 stats cost
+# ~0.1 ms, but across a WSL2 or network boundary they cost 100-300 ms, which would double
+# the latency of a query to re-answer a question whose answer cannot have changed much.
+# Short enough that an edit is reported by the next search but one.
+_FRESHNESS_TTL_SECONDS = 3.0
 _MAX_LISTED_PATHS = 40
 
 SERVER_INSTRUCTIONS = (
@@ -131,6 +146,8 @@ class ServerConfig:
     # Glob patterns, relative to the docs root, that indexing must not descend into: a
     # repository's own fixtures, vendored documentation or test corpus are not its docs.
     exclude: tuple[str, ...] = ()
+    #: Files embedded at the same time while indexing.
+    index_workers: int = DEFAULT_INDEX_WORKERS
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -152,6 +169,7 @@ class ServerConfig:
                 else _xdg_dir("XDG_CACHE_HOME", ".cache") / "markdown-memory" / "models"
             ),
             exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
+            index_workers=_positive_int(ENV_INDEX_WORKERS, DEFAULT_INDEX_WORKERS),
         )
 
 
@@ -188,6 +206,7 @@ def resolve_config(
         embedder=embedder or base.embedder,
         model_cache_dir=base.model_cache_dir,
         exclude=tuple(exclude) or base.exclude,
+        index_workers=base.index_workers,
     )
 
 
@@ -210,6 +229,72 @@ def _project_root() -> Path:
     """
     exported = os.environ.get(ENV_PROJECT_DIR, "").strip()
     return Path(exported).expanduser() if exported else Path.cwd()
+
+
+class _Verdict(Enum):
+    """What one file's freshness probe found."""
+
+    UNCHANGED = auto()
+    CHANGED = auto()
+    #: Same bytes, a time that has moved: nothing to report, but worth writing down.
+    SAME_BYTES_NEW_TIME = auto()
+
+
+def _has_changed(path: Path, content_hash: str, mtime_ns: int | None) -> bool:
+    return _compare(path, content_hash, mtime_ns)[0] is _Verdict.CHANGED
+
+
+def _compare(path: Path, content_hash: str, mtime_ns: int | None) -> tuple[_Verdict, int]:
+    """Whether the file behind an indexed document differs from what was indexed.
+
+    The modification time is the cheap question and the bytes are the expensive one, so
+    the hash is only computed where the time has moved: a `touch`, a checkout that
+    rewrites a file with its own contents, or a copy that preserves nothing but the text
+    must not be reported as a change an agent should act on. A file that has vanished, no
+    longer resolves to a regular file, or cannot be read counts as changed - not because
+    its bytes are known to differ, but because they cannot be checked at all. That applies
+    where the bytes had to be read: a file whose recorded time still matches is answered
+    from the time alone, so losing permission to read it - without touching it - is not
+    reported here. The next index run cannot read it either, and records a failure, which
+    is what takes `coverage` to `"unknown"`.
+
+    A stored `None` means no modification time was recorded - a row written before the
+    column existed - rather than a time of zero, so no real timestamp can be mistaken for
+    it, the epoch included. Those files are answered by their bytes until an index run
+    writes a time for them.
+
+    The one edit this cannot see is a file rewritten with its modification time put back
+    to what it was: no timestamp moved, so no hash is taken. Indexing itself is not fooled
+    - it hashes every file it walks - so `index_directory` still rebuilds that document;
+    what is missed is only the hint that it is worth running. Seeing it here would mean
+    hashing every indexed file on every query, or storing a second timestamp to compare
+    against, and this signal is not worth either.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return _Verdict.CHANGED, 0
+    if not stat.S_ISREG(info.st_mode):
+        return _Verdict.CHANGED, 0
+    if mtime_ns is not None and info.st_mtime_ns == mtime_ns:
+        return _Verdict.UNCHANGED, info.st_mtime_ns
+    try:
+        data = read_regular_file(path)
+    except OSError:
+        return _Verdict.CHANGED, 0
+    if data is None or len(data) > MAX_FILE_BYTES or hash_bytes(data) != content_hash:
+        return _Verdict.CHANGED, 0
+    # The time from the stat that came *before* the read, never a fresher one: a file
+    # rewritten after these bytes were hashed must not be recorded as verified at the
+    # moment of its rewrite, or the next sweep would trust a time that belongs to content
+    # nobody checked.
+    return _Verdict.SAME_BYTES_NEW_TIME, info.st_mtime_ns
+
+
+def _positive_int(variable: str, default: int) -> int:
+    """A count read from the environment; anything that is not one keeps the default."""
+    value = os.environ.get(variable, "").strip()
+    return int(value) if value.isdigit() and int(value) > 0 else default
 
 
 def _configured_path(variable: str, root: Path) -> Path | None:
@@ -245,13 +330,27 @@ class MarkdownMemoryService:
             config.embedder, cache_dir=config.model_cache_dir
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
-        self._indexer = Indexer(self._db, self._embedder, exclude=config.exclude)
+        self._indexer = Indexer(
+            self._db, self._embedder, workers=config.index_workers, exclude=config.exclude
+        )
         # Resolved, because indexing resolves: a document under a symlinked or relative
         # docs root is stored by its real path, and a scope spelled any other way filters
         # every one of them out and returns nothing. Resolved ONCE, and reused: resolving
         # again per call lets a retargeted symlink answer from one tree while reporting on
         # another, which is a lie told with two correct halves.
         self._root = str(_absolute(self._config.docs_dir, SearchError))
+        #: The last sweep: which scope it measured, when, and what it found. One entry,
+        #: because the burst it exists to absorb is the same question asked several times
+        #: in a row - and a map keyed on a caller-supplied path would grow for the life of
+        #: the server, one entry per spelling anybody ever asked about.
+        self._freshness: tuple[str, float, int] | None = None
+        #: Held for the whole of a sweep, so that reading the cache, walking the
+        #: filesystem and storing the answer are one step. Without it a sweep that
+        #: indexing overtook would publish a count of a tree that no longer exists - the
+        #: one moment an agent is most likely to ask - and two sweeps racing could leave
+        #: the older one's answer behind. It also means a second caller arriving mid-sweep
+        #: waits and is served the result rather than walking the tree again.
+        self._freshness_lock = threading.Lock()
         self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
 
     @property
@@ -269,7 +368,15 @@ class MarkdownMemoryService:
     # ------------------------------------------------------------------ operations
 
     def index_directory(self, directory: str | None = None) -> IndexReport:
-        return self._indexer.index_directory(self._resolve_directory(directory))
+        try:
+            return self._indexer.index_directory(self._resolve_directory(directory))
+        finally:
+            # Whatever just happened, the sweep's answer is about the tree as it was
+            # before it: a run that refreshed the files it named would otherwise keep
+            # being reported as stale for the rest of the window, which is exactly the
+            # moment an agent looks. A run that failed partway invalidates it too - some
+            # of it may have been written.
+            self._invalidate_freshness()
 
     def list_documents(self, directory: str = "") -> list[DocumentSummary]:
         # An empty argument means "this project", not "everything this database holds".
@@ -305,7 +412,7 @@ class MarkdownMemoryService:
         answer is drawn from; `directory` only narrows which failures are worth naming.
         """
         if directory is None:
-            return self._db.index_status(self._root)
+            return self._with_freshness(self._db.index_status(self._root), self._root)
         # Narrowed in one read, not composed from two: coverage stays the root's - that is
         # the tree every answer is drawn from - while the failures and stale documents
         # named are the ones that live here. Resolved against the root this service was
@@ -314,7 +421,49 @@ class MarkdownMemoryService:
         scope = self._within_root(
             _absolute(Path(self._root) / directory.strip(), SearchError), SearchError
         )
-        return self._db.index_status(self._root, str(scope))
+        return self._with_freshness(self._db.index_status(self._root, str(scope)), str(scope))
+
+    def _with_freshness(self, status: IndexStatus, scope: str) -> IndexStatus:
+        """Add what only the filesystem knows: which indexed files have moved on.
+
+        The database's own status is one SQLite snapshot and deliberately says nothing
+        about the disk, so this is composed here rather than there. It asks only about
+        rows the index holds - a file nobody has indexed yet is found by walking the tree,
+        which is the expensive half of indexing and not something a search should pay for.
+        """
+        return dataclasses.replace(status, changed_files=self._changed_files(scope))
+
+    def _invalidate_freshness(self) -> None:
+        with self._freshness_lock:
+            self._freshness = None
+
+    def _changed_files(self, scope: str) -> int:
+        with self._freshness_lock:
+            cached = self._freshness
+            if (
+                cached is not None
+                and cached[0] == scope
+                and time.monotonic() - cached[1] < _FRESHNESS_TTL_SECONDS
+            ):
+                return cached[2]
+            fingerprints = self._db.document_fingerprints(scope)
+            changed = 0
+            for file_path, (content_hash, mtime_ns) in fingerprints.items():
+                verdict, seen_ns = _compare(Path(file_path), content_hash, mtime_ns)
+                if verdict is _Verdict.CHANGED:
+                    changed += 1
+                elif verdict is _Verdict.SAME_BYTES_NEW_TIME:
+                    # The hash was computed to answer this, and the answer was "unchanged".
+                    # Writing the time down means the next sweep reads it instead of the
+                    # file - otherwise one `touch` costs a full hash every window until an
+                    # index run happens to come past. A file that moved again in between
+                    # is simply hashed again next time; nothing is lost by missing it.
+                    self._db.record_modification_time(file_path, content_hash, mtime_ns, seen_ns)
+            # Stamped when the answer was produced, not when the sweep began: the walk
+            # itself takes time on a slow mount, and a window that starts before the
+            # measurement is a window the measurement was never true for.
+            self._freshness = (scope, time.monotonic(), changed)
+            return changed
 
     # ------------------------------------------------------------------ resolution
 
@@ -633,7 +782,10 @@ def create_server(
     def list_documents(directory: str = "") -> JsonDict:
         """List indexed documents (path, title, section count), optionally under `directory`.
 
-        Returns `{"documents": [...], "index_status": {...}}`. `index_status.coverage` is
+        Returns `{"documents": [...], "index_status": {...}}`. `index_status.changed_files`
+        counts indexed documents that no longer match the index; it is independent of
+        coverage, so read `index_status.message` whenever either is set.
+        `index_status.coverage` is
         "verified" only when a full index run of this documentation root finished and read
         every file it found; otherwise it is "unknown" and `index_status.message` says why.
         """
@@ -668,7 +820,11 @@ def create_server(
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
         Returns `{"results": [...], "index_status": {...}}`, `results` holding at most
-        `limit` sections. When `index_status.coverage` is "unknown", what you searched is
+        `limit` sections. `index_status.changed_files` counts indexed documents that no
+        longer match the index - a hit may quote text that is no longer there - and is
+        independent of coverage: it can be non-zero while coverage reads "verified", so
+        read `index_status.message` whenever either is set.
+        When `index_status.coverage` is "unknown", what you searched is
         missing part of its documentation, or was never indexed end to end: an answer drawn
         from it may be confidently incomplete, and `index_status.message` says what to run.
         """

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -1006,3 +1007,296 @@ class TestARetargetedDocsSymlinkStrandsNothing:
             assert service.index_status().verified, "the root lost the certificate it had"
         finally:
             service.close()
+
+
+class TestSayingWhenTheDocumentsMovedOn:
+    """A verified tree describes the moment the walk finished, not the disk right now.
+
+    Editing a file after a clean run used to leave every search answering from the old
+    text under `coverage: "verified"` and no message at all, with nothing but a habit -
+    "run index_directory once per session" - standing in for the signal.
+    """
+
+    @pytest.fixture
+    def service(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> Iterator[MarkdownMemoryService]:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n")
+        (docs / "b.md").write_text("# B\n\nbeta body\n")
+        built = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "index.db", docs_dir=docs), fake_embedder
+        )
+        built.index_directory()
+        try:
+            yield built
+        finally:
+            built.close()
+
+    @staticmethod
+    def status(service: MarkdownMemoryService) -> object:
+        service._freshness = None  # the sweep's cache; freshness itself is what is tested
+        return service.index_status()
+
+    def docs(self, service: MarkdownMemoryService) -> Path:
+        return Path(service._root)
+
+    def test_a_clean_index_of_an_untouched_tree_stays_quiet(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        status = self.status(service)
+        assert (status.verified, status.changed_files, status.message()) == (True, 0, None)
+        assert status.to_dict()["changed_files"] == 0
+
+    def test_an_edited_document_is_reported_without_unverifying_the_walk(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        status = self.status(service)
+        # The walk really did finish and really did read every file; what changed is the
+        # tree, not the walk. Two facts, two fields.
+        assert status.verified is True
+        assert status.changed_files == 1
+        message = status.message() or ""
+        assert "1 indexed document(s) can no longer be confirmed" in message
+        # The two things the count is not, said where an agent will read them.
+        assert "created since that scan are not counted" in message
+        assert "modification time back is not seen" in message
+
+    def test_a_touch_that_changes_no_byte_is_not_a_change(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """A checkout, a `touch` or a copy moves the modification time and nothing else.
+
+        Reporting those would teach an agent to ignore the message, which is worse than
+        not having one.
+        """
+        path = self.docs(service) / "a.md"
+        os.utime(path, (1, 1))
+        assert self.status(service).changed_files == 0
+
+    def test_a_touch_is_hashed_once_and_then_written_down(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """The sweep already paid for the hash; the answer is worth keeping.
+
+        Without this a single `touch` costs a full read of that file on every sweep - once
+        per cache window, for as long as it takes somebody to run index_directory - to
+        keep concluding what the row already knew.
+        """
+        path = self.docs(service) / "a.md"
+        os.utime(path, (1, 1))
+        assert self.status(service).changed_files == 0
+        assert (
+            service.db.document_fingerprints(service._root)[str(path)][1] == path.stat().st_mtime_ns
+        )
+
+        reads: list[str] = []
+        opener = server_module.read_regular_file
+
+        def watch(target: Path) -> bytes | None:
+            reads.append(str(target))
+            return opener(target)
+
+        service._freshness = None
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(server_module, "read_regular_file", watch)
+            assert service.index_status().changed_files == 0
+        assert reads == [], "an unchanged file was read again after its time was recorded"
+
+    def test_the_write_back_refuses_to_stamp_a_time_onto_somebody_else_s_content(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """The bytes were hashed outside the transaction that records the time.
+
+        Between the two, an index run can replace the document; writing this sweep's time
+        against that content would leave a row whose time says "checked" and whose hash
+        belongs to text nobody checked - and the next sweep would trust the time and skip
+        the file.
+        """
+        path = self.docs(service) / "a.md"
+        before = service.db.document_fingerprints(service._root)[str(path)][0]
+        path.write_text("# A\n\nsomething else entirely\n")
+        service.index_directory()  # the row now holds a different hash
+        after = service.db.document_fingerprints(service._root)[str(path)]
+        assert after[0] != before
+
+        service.db.record_modification_time(str(path), before, None, 999)  # the stale sweep
+        assert service.db.document_fingerprints(service._root)[str(path)] == after
+
+        # Nor may it roll a time backwards for content that did not change: an index run
+        # can record a newer time for the same bytes while a sweep is still walking, and
+        # putting the older one back would have that file hashed again next time.
+        newer = after[1] + 1_000
+        service.db.record_modification_time(str(path), after[0], after[1], newer)
+        service.db.record_modification_time(str(path), after[0], after[1], after[1] - 1_000)
+        assert service.db.document_fingerprints(service._root)[str(path)][1] == newer
+
+    def test_a_document_that_disappeared_counts_as_changed(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        (self.docs(service) / "b.md").unlink()
+        assert self.status(service).changed_files == 1
+
+    def test_a_file_nobody_indexed_is_not_counted_and_the_message_says_so(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """Finding new files means walking the tree, which is the expensive half of
+
+        indexing and not something a search may pay for. The count is honest about it
+        rather than quietly meaning something narrower than it sounds.
+        """
+        (self.docs(service) / "c.md").write_text("# C\n\nbrand new\n")
+        assert self.status(service).changed_files == 0
+
+    def test_a_row_from_before_nanoseconds_were_recorded_is_answered_by_its_bytes(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """Rows migrated from v4 carry no modification time at all.
+
+        Comparing the whole seconds they do carry would miss an edit made in the same
+        second as the scan, for good; nothing recorded means "ask the bytes" instead, until
+        an index run writes a real time.
+        """
+        with service.db.transaction() as conn:
+            conn.execute("UPDATE documents SET mtime_ns = NULL")
+        assert self.status(service).changed_files == 0
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        assert self.status(service).changed_files == 1
+
+        # And nothing recorded is not a recorded zero: a rewritten file that happens to
+        # sit at the epoch must still be read, not matched against the absence of a time.
+        # Put back to NULL here, because the sweep above wrote real times down.
+        edited = self.docs(service) / "b.md"
+        edited.write_text("# B\n\nrewritten too\n")
+        os.utime(edited, (0, 0))
+        with service.db.transaction() as conn:
+            conn.execute("UPDATE documents SET mtime_ns = NULL WHERE file_path = ?", (str(edited),))
+        assert self.status(service).changed_files == 2
+
+    def test_a_file_last_written_at_the_epoch_is_a_time_like_any_other(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """ "Not recorded" is NULL, not zero.
+
+        Zero was the sentinel once, which made a file whose modification time really is the
+        epoch - `touch -d @0`, some archive extractions - unrecordable: indexing saw the
+        stored zero match the file's zero and skipped writing it, so every sweep from then
+        on hashed that file again to learn what the row already knew.
+        """
+        epoch = self.docs(service) / "b.md"
+        os.utime(epoch, (0, 0))
+        service.index_directory()
+        assert service.db.document_fingerprints(service._root)[str(epoch)][1] == 0
+        assert self.status(service).changed_files == 0
+
+    def test_indexing_records_the_modification_time_it_read(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """The whole comparison rests on it, and a zero would mean the opposite."""
+        path = self.docs(service) / "a.md"
+        stored = service.db.document_fingerprints(service._root)[str(path)]
+        assert stored[1] == path.stat().st_mtime_ns
+
+    def test_the_sweep_speaks_for_a_few_seconds_rather_than_per_query(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """An agent fires several searches per turn and every one asks for the status.
+
+        On a local tree the stats are free; across a WSL2 or network boundary they cost
+        100-300 ms, which would double the latency of a query to re-answer a question
+        whose answer cannot have changed much.
+        """
+        service.index_status()  # primes the cache
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        assert service.index_status().changed_files == 0
+        service._freshness = None
+        assert service.index_status().changed_files == 1
+
+    def test_indexing_forgets_what_the_last_sweep_found(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """The sweep describes the tree as it was before the run that just refreshed it.
+
+        Re-indexing is exactly what the message asks for, and the moment an agent looks
+        again; being told for another three seconds that the files it just rebuilt are
+        stale would teach it that the count means nothing.
+        """
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        assert service.index_status().changed_files == 1
+        service.index_directory()
+        assert service.index_status().changed_files == 0
+
+    def test_a_narrowed_status_sweeps_the_directory_it_was_asked_about(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """One sweep is remembered, so it has to remember which tree it swept."""
+        inner = self.docs(service) / "api"
+        inner.mkdir()
+        (inner / "c.md").write_text("# C\n\ninner body\n")
+        service.index_directory()
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        assert service.index_status("api").changed_files == 0  # nothing changed in there
+        assert service.index_status().changed_files == 1  # but something did in the root
+
+    def test_a_sweep_and_an_invalidation_cannot_overlap(
+        self, service: MarkdownMemoryService
+    ) -> None:
+        """Indexing can finish while a sweep is still walking the tree.
+
+        The sweep is then carrying a count of a tree that no longer exists, and keeping it
+        would answer with it for the rest of the window - the one moment an agent is most
+        likely to look, because it just asked for the re-index. The sweep holds the cache
+        for as long as it walks, so an invalidation lands either before it or after it,
+        never between the count and the storing of it.
+
+        Asserted by holding that lock here: nothing may measure while it is held, and the
+        invalidation that follows the sweep leaves nothing behind. A test that raced two
+        threads and hoped for an interleaving would pass whether or not the lock existed.
+        """
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        measured: list[int] = []
+        done = threading.Event()
+
+        def sweep() -> None:
+            measured.append(service.index_status().changed_files)
+            done.set()
+
+        with service._freshness_lock:
+            # Deterministic, and the part a mutation cannot schedule its way past: whatever
+            # guards the sweep has to be mutual exclusion, not a semaphore that lets eight
+            # through. The waits below say the sweep really does queue behind it.
+            taken = service._freshness_lock.acquire(blocking=False)
+            if taken:  # pragma: no cover - only a broken lock gets here
+                service._freshness_lock.release()
+            assert not taken, "the freshness lock does not exclude anybody"
+
+            worker = threading.Thread(target=sweep)
+            worker.start()
+            assert not done.wait(timeout=1.0), "a sweep ran while the freshness lock was held"
+
+            invalidated = threading.Event()
+            invalidator = threading.Thread(
+                target=lambda: (service._invalidate_freshness(), invalidated.set())
+            )
+            invalidator.start()
+            assert not invalidated.wait(timeout=1.0), "an invalidation ran during a sweep"
+        assert done.wait(timeout=30)
+        assert invalidated.wait(timeout=30)
+        invalidator.join(timeout=30)
+        worker.join(timeout=30)
+        assert measured == [1]
+        # Deliberately nothing about the cache afterwards: which of the two got the lock
+        # first once it was released is the scheduler's business, and asserting a state
+        # this test would then have to create itself would be asserting its own cleanup.
+        # That indexing leaves nothing behind is pinned, single-threaded, by
+        # test_indexing_forgets_what_the_last_sweep_found.
+
+    def test_the_weights_mismatch_still_speaks_first(self, service: MarkdownMemoryService) -> None:
+        """It is the only message saying the answers may be wrong rather than incomplete."""
+        service.db.record_weights_mismatch("the weights changed under this index")
+        (self.docs(service) / "a.md").write_text("# A\n\nrewritten body\n")
+        status = self.status(service)
+        assert status.changed_files == 1
+        assert status.message() == "the weights changed under this index"

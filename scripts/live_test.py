@@ -447,7 +447,8 @@ class LiveTest:
         )
         self.check(
             "a freshly indexed root vouches for itself",
-            answer["index_status"] == {"coverage": "verified", "failures": [], "message": None},
+            answer["index_status"]
+            == {"coverage": "verified", "failures": [], "changed_files": 0, "message": None},
         )
         documents = answer["documents"]
         titles = {Path(d["file_path"]).name: d["title"] for d in documents}

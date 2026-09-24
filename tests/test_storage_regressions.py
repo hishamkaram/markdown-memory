@@ -119,7 +119,7 @@ class TestVectorValidation:
         vector = [bad] * db.embedding_dim if bad == 0.0 else [1.0, bad] + [0.0] * 382
         with pytest.raises(DatabaseError, match="zeros or contains NaN/inf"):
             db.replace_document(
-                file_path="/d/a.md", title="T", content_hash="h", last_modified=1,
+                file_path="/d/a.md", title="T", content_hash="h", last_modified=1, mtime_ns=1,
                 sections=[draft("A", "## A\n\nbody")],
                 vectors=[SectionVectors(section=vector, units=(vector,))],
             )  # fmt: skip
@@ -300,8 +300,11 @@ class TestWholeRunFailures:
             (root / f"doc{n}.md").write_text(f"# Doc {n}\n")
         embedder = NoModel()
         with pytest.raises(ModelLoadError, match="offline"):
-            Indexer(db, embedder).index_directory(root)
-        assert len(embedder.document_calls) == 1  # not retried once per file
+            Indexer(db, embedder, workers=1).index_directory(root)
+        # Not retried once per file: the run stops at the first refusal. What is already
+        # in flight still reaches the model - the driver reads one file ahead of the one
+        # it is writing - so the bound is the window, never the size of the tree.
+        assert len(embedder.document_calls) <= 2  # the window: max(2 * workers, 2)
 
     async def test_directory_with_undecodable_name_is_a_domain_error(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -346,6 +349,7 @@ class TestMigrationInvalidatesTheIndex:
             conn.execute("DROP TABLE index_failures")
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
+            conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
             conn.execute("PRAGMA user_version = 1")
 
     def test_v1_documents_are_dropped_so_reindexing_rebuilds_them_with_passages(
@@ -378,7 +382,38 @@ class TestMigrationInvalidatesTheIndex:
             conn.execute("DROP TABLE index_failures")
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
+            conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
             conn.execute("PRAGMA user_version = 2")
+
+    def test_a_v4_database_keeps_its_documents_and_learns_to_time_them(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The release before this one. Its rows have no modification time at all, and
+
+        inventing one would be worse than none: NULL says so, and the first index run to
+        walk past each file writes a real one. Nothing is discarded for it - the vectors
+        are still good - so an upgrade costs a walk, not half an hour of embedding.
+        """
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n")
+        path = tmp_path / "v4.db"
+        with Database(path) as database:
+            Indexer(database, fake_embedder).index_directory(docs)
+        with Database(path) as database:  # rewind to what v4 left behind
+            conn = database.connection()
+            conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
+            conn.execute("PRAGMA user_version = 4")
+
+        with Database(path) as migrated:
+            assert migrated.count_rows("documents") == 1
+            assert migrated.integrity_problems() == []
+            assert migrated.document_fingerprints(str(docs))[str(docs / "a.md")][1] is None
+            report = Indexer(migrated, fake_embedder).index_directory(docs)
+            assert (report.files_indexed, report.files_unchanged) == (0, 1)  # not re-embedded
+            assert report.notes == ()  # nothing was discarded, so nothing to announce
+            stored = migrated.document_fingerprints(str(docs))[str(docs / "a.md")]
+            assert stored[1] == (docs / "a.md").stat().st_mtime_ns
 
     def test_a_v2_database_keeps_everything_and_rebuilds_its_vectors_in_place(
         self, tmp_path: Path, fake_embedder: FakeEmbedder
@@ -596,14 +631,14 @@ class TestSectionIdsOnAnUpgradedDatabase:
     ) -> None:
         first = [draft(f"S{n}", f"## S{n}\n\nbody {n}") for n in range(3)]
         db.replace_document(
-            file_path="/d/a.md", title="D", content_hash="h1", last_modified=1,
+            file_path="/d/a.md", title="D", content_hash="h1", last_modified=1, mtime_ns=1,
             sections=first, vectors=vectors_for(fake_embedder, first),
         )  # fmt: skip
         before = self.section_ids(db)
         self.downgrade(db)
         second = [draft(f"T{n}", f"## T{n}\n\nother {n}") for n in range(3)]
         db.replace_document(
-            file_path="/d/a.md", title="D", content_hash="h2", last_modified=2,
+            file_path="/d/a.md", title="D", content_hash="h2", last_modified=2, mtime_ns=2,
             sections=second, vectors=vectors_for(fake_embedder, second),
         )  # fmt: skip
         # The mark is sampled before the document's old sections are deleted.
@@ -1132,7 +1167,9 @@ class TestOnlyAWholeWalkVouchesForATree:
         (tmp_path / "a.md").write_text("# A\n\nedited\n")
         (tmp_path / "b.md").write_text("# B\n\nedited too\n")
         with pytest.raises(KeyboardInterrupt):
-            Indexer(db, StopsAfterOneFile(fake_embedder)).index_directory(tmp_path)
+            # One worker, so "the second file" is the second one walked: with several,
+            # which file is embedded when the interrupt lands is the scheduler's business.
+            Indexer(db, StopsAfterOneFile(fake_embedder), workers=1).index_directory(tmp_path)
         assert not db.index_status(str(tmp_path)).verified
 
     def test_a_run_that_committed_nothing_leaves_the_certificate_alone(
@@ -1169,7 +1206,8 @@ class TestOnlyAWholeWalkVouchesForATree:
         (api / "a.md").write_text("# A\n\nrewritten\n")
         (api / "b.md").write_text("# B\n\nrewritten too\n")
         with pytest.raises(KeyboardInterrupt):
-            Indexer(db, StopsAfterOneFile(fake_embedder)).index_directory(api)
+            # One worker, so the file that survives is the first one walked.
+            Indexer(db, StopsAfterOneFile(fake_embedder), workers=1).index_directory(api)
         message = "the root still vouched for itself"
         assert not db.index_status(str(tmp_path)).verified, message
 

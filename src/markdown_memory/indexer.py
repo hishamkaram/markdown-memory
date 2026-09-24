@@ -8,6 +8,7 @@ a tenth of the size and ~25x faster, at a clear cost in recall on paraphrased qu
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import json
@@ -18,7 +19,9 @@ import shutil
 import stat
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -38,7 +41,7 @@ from markdown_memory.exceptions import (
     ModelLoadError,
 )
 from markdown_memory.graph_patch import gather_before_dequantize
-from markdown_memory.models import FileFailure, IndexReport, SectionVectors
+from markdown_memory.models import FileFailure, IndexReport, SectionDraft, SectionVectors
 from markdown_memory.parser import MarkdownParser
 
 if TYPE_CHECKING:
@@ -111,6 +114,19 @@ _GEMMA_BATCH_SIZE = 4
 # by ~30% of CPU and nothing in wall time, so the count stays onnxruntime's business and
 # only a machine that disagrees with it needs MARKDOWN_MEMORY_THREADS.
 _THREADS_ENV = "MARKDOWN_MEMORY_THREADS"
+#: Files embedded at the same time. One ONNX session is shared by all of them: the weights
+#: are mmapped and counted once however many threads run against them, so a second worker
+#: costs the ~150 MB of one in-flight forward pass and nothing more. Embedding alone, on 16
+#: cores over 32 passages of 512 tokens: 1 worker 0.72 vectors/s at 725 MB peak, 2 workers
+#: 1.63 at 883 MB, 4 workers 2.17 at 1,168 MB, 8 workers 2.85 at 1,784 MB. End to end over
+#: 24 files of the eval corpus (879 passages) the gain is smaller, because parsing and the
+#: writes are serial and a long file holds the head of the queue: 196.3 s at 1 worker,
+#: 145.9 s at 2 (1.35x), 96.3 s at 4 (2.04x). Two is the default because it is the last
+#: setting whose peak - 757-814 MB across live-test runs - is nowhere near the 1.2 GB this
+#: tool budgets for itself while running beside an editor. A machine with cores to spare
+#: sets the variable higher and is paid ~2x for four.
+_INDEX_WORKERS_ENV = "MARKDOWN_MEMORY_INDEX_WORKERS"
+DEFAULT_INDEX_WORKERS = 2
 # onnxruntime's intra-op threads spin-wait between operators by default. That is a good
 # trade for a server answering back-to-back requests and a bad one here: measured on a
 # 16-core machine, one warm query cost 7.2 s of CPU across 16 spinning threads, and the
@@ -454,6 +470,29 @@ def _remove(path: Path) -> None:
         raise ModelLoadError(f"Cannot clear {path} to repair the model cache")
 
 
+def read_regular_file(path: Path) -> bytes | None:
+    """The file's bytes, or ``None`` if what opened is not a regular file after all.
+
+    `stat` and `open` are two moments, and between them a path can become a FIFO - at
+    which point a blocking open waits for a writer that may never come, holding whatever
+    the caller was holding: an indexing worker, or the lock a freshness sweep runs under.
+    Opening without blocking and asking the descriptor itself what it is closes that
+    window; `O_NONBLOCK` is then cleared, because it is only the open that must not block.
+
+    At most ``MAX_FILE_BYTES + 1`` bytes, so the caller can tell "too large" from "exactly
+    at the cap" without trusting `st_size`, which the file is free to disagree with.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        os.set_blocking(descriptor, True)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return handle.read(MAX_FILE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -759,6 +798,14 @@ def create_embedder(preset: str = DEFAULT_EMBEDDER, *, cache_dir: Path | None = 
     raise IndexingError(f"Unknown embedder {preset!r}; choose 'embeddinggemma' or 'bge-small'")
 
 
+def _index_workers() -> int:
+    """How many files are read, parsed and embedded at once. Never below one."""
+    override = os.environ.get(_INDEX_WORKERS_ENV, "").strip()
+    if override.isdigit() and int(override) > 0:
+        return int(override)
+    return DEFAULT_INDEX_WORKERS
+
+
 def _inference_threads() -> int:
     """Thread count for one embedding pass: onnxruntime's own choice unless overridden.
 
@@ -981,6 +1028,35 @@ def _is_walkable(relative_directories: Sequence[str]) -> bool:
     return not any(name in _SKIPPED_DIRECTORIES for name in relative_directories)
 
 
+@dataclasses.dataclass(slots=True, frozen=True)
+class _Prepared:
+    """One file, read and embedded, waiting to be written.
+
+    Everything a worker produces and nothing it may do: the write is the driver's, so
+    that one thread owns section ids, the certificate and the provenance metadata.
+    """
+
+    file_path: str
+    title: str
+    content_hash: str
+    last_modified: int
+    mtime_ns: int
+    sections: tuple[SectionDraft, ...]
+    vectors: tuple[SectionVectors, ...]
+    #: The file is what the index already holds; only when it was last written has moved.
+    unchanged: bool = False
+    #: The time the row held when this was prepared, for the write-back to compare against.
+    previous_mtime_ns: int | None = None
+
+    @property
+    def has_vectors(self) -> bool:
+        return any(vector.units for vector in self.vectors)
+
+    @property
+    def counts(self) -> tuple[int, int]:
+        return len(self.sections), sum(len(section.units) for section in self.sections)
+
+
 class Indexer:
     """Keeps the database in sync with the Markdown files of a directory tree."""
 
@@ -988,7 +1064,7 @@ class Indexer:
         self,
         db: Database,
         embedder: Embedder,
-        parser: MarkdownParser | None = None,
+        workers: int | None = None,
         exclude: Sequence[str] = (),
     ) -> None:
         if embedder.dimension != db.embedding_dim:
@@ -998,9 +1074,21 @@ class Indexer:
             )
         self._db = db
         self._embedder = embedder
-        self._parser = parser or MarkdownParser()
+        # One parser per thread. `MarkdownParser` holds a `MarkdownIt` with mutable
+        # ruler and env state, so two files parsed through one instance at the same time
+        # would read each other's tokens.
+        self._parsers = threading.local()
+        self._workers = max(1, workers if workers is not None else _index_workers())
         self._exclude = tuple(exclude)
         self._run_lock = threading.Lock()
+
+    @property
+    def _parser(self) -> MarkdownParser:
+        parser: MarkdownParser | None = getattr(self._parsers, "parser", None)
+        if parser is None:
+            parser = MarkdownParser()
+            self._parsers.parser = parser
+        return parser
 
     @contextlib.contextmanager
     def _scan_lock(self) -> Iterator[None]:
@@ -1102,6 +1190,7 @@ class Indexer:
             # the index it just rebuilt from scratch.
             generation = self._db.generation()
             known_hashes = self._db.document_hashes(str(root))
+            weights_settled = False
 
             seen: set[str] = set()
             indexed = unchanged = sections_indexed = passages_indexed = 0
@@ -1118,23 +1207,105 @@ class Indexer:
                     )
                 )
 
-            for path in iter_markdown_files(root, record_unreadable, self._exclude):
-                file_path = str(path)
-                seen.add(file_path)
-                try:
-                    counts = self._index_file(path, known_hashes.get(file_path), about_to_write)
-                except (ModelLoadError, ForeignWeightsError):
-                    raise  # not this file's fault: every other file would fail identically
-                except (MarkdownMemoryError, OSError) as exc:
-                    logger.warning("Failed to index %s: %s", _printable(file_path), exc)
-                    failures.append(FileFailure(file_path=_printable(file_path), message=str(exc)))
-                    continue
-                if counts is None:
+            def store(prepared: _Prepared) -> None:
+                nonlocal weights_settled, indexed, unchanged, sections_indexed
+                nonlocal passages_indexed
+                if prepared.unchanged:
+                    # Not an index: the document stands, and only the time it was last
+                    # written is brought up to date. The certificate is not retracted for
+                    # it either - nothing an answer is drawn from has changed.
+                    self._db.record_modification_time(
+                        prepared.file_path,
+                        prepared.content_hash,
+                        prepared.previous_mtime_ns,
+                        prepared.mtime_ns,
+                    )
                     unchanged += 1
-                else:
-                    indexed += 1
-                    sections_indexed += counts[0]
-                    passages_indexed += counts[1]
+                    return
+                if prepared.has_vectors and not weights_settled:
+                    # Once per run, on the one thread that writes, and only once a vector
+                    # really exists to be written. A document of headings alone produces
+                    # none, and asking would make a file that needs no model fail when no
+                    # model can be loaded. The embedding is already spent by the time a
+                    # refusal lands, but nothing is stored, which is what the guard is for.
+                    self._settle_weights()
+                    weights_settled = True
+                # Here, and not in the worker: parsing and embedding can fail without
+                # touching the index, and a run that changed nothing must leave a standing
+                # certificate alone.
+                about_to_write()
+                self._db.replace_document(
+                    file_path=prepared.file_path,
+                    title=prepared.title,
+                    content_hash=prepared.content_hash,
+                    last_modified=prepared.last_modified,
+                    mtime_ns=prepared.mtime_ns,
+                    sections=prepared.sections,
+                    vectors=prepared.vectors,
+                )
+                indexed += 1
+                sections_indexed += prepared.counts[0]
+                passages_indexed += prepared.counts[1]
+
+            # Workers embed; this thread writes. Embedding is ~17 s per file and a write
+            # is under 5 ms, so nothing is gained by letting workers write and a great
+            # deal is given up: SQLite takes one writer at a time anyway, and section ids
+            # are allocated as documents are stored. Results are therefore drained in
+            # submission order - `search.py` breaks a scoring tie by section id, so ids
+            # handed out in some completion order would quietly reorder equal hits, and
+            # no later sort can give them back. The window bounds what is held in memory:
+            # a prepared file carries every vector of every passage it has.
+            files = iter_markdown_files(root, record_unreadable, self._exclude)
+            window = max(2 * self._workers, 2)
+            pending: deque[tuple[str, Future[_Prepared | None]]] = deque()
+            with ThreadPoolExecutor(
+                max_workers=self._workers, thread_name_prefix="markdown-memory-index"
+            ) as pool:
+                try:
+                    exhausted = False
+                    while True:
+                        while not exhausted and len(pending) < window:
+                            path = next(files, None)
+                            if path is None:
+                                exhausted = True
+                                break
+                            file_path = str(path)
+                            seen.add(file_path)
+                            pending.append(
+                                (
+                                    file_path,
+                                    pool.submit(
+                                        self._prepare_file, path, known_hashes.get(file_path)
+                                    ),
+                                )
+                            )
+                        if not pending:
+                            break
+                        file_path, future = pending.popleft()
+                        try:
+                            prepared = future.result()
+                            # The write is inside the same guard as the read: storing one
+                            # document can fail on its own - a vector the storage layer
+                            # rejects, a row that will not go in - and that is this file's
+                            # failure to carry, not the run's to die of.
+                            if prepared is None:
+                                unchanged += 1
+                            else:
+                                store(prepared)
+                        except (ModelLoadError, ForeignWeightsError):
+                            raise  # not this file's fault: every other file fails the same
+                        except (MarkdownMemoryError, OSError) as exc:
+                            logger.warning("Failed to index %s: %s", _printable(file_path), exc)
+                            failures.append(
+                                FileFailure(file_path=_printable(file_path), message=str(exc))
+                            )
+                            continue
+                except BaseException:
+                    # Whatever has not started will not start. What is already running is
+                    # joined by the pool on the way out; there is nowhere to put its result.
+                    for _, queued in pending:
+                        queued.cancel()
+                    raise
 
             vanished = self._vanished(root, known_hashes, seen, unreadable)
             if vanished:
@@ -1174,14 +1345,25 @@ class Indexer:
         logger.info(report.summary())
         return report
 
-    def _refuse_foreign_weights(self) -> None:
-        """Stop before embedding if the model is not the one whose vectors are stored.
+    def _settle_weights(self) -> None:
+        """Stop before storing if the model is not the one whose vectors are stored.
 
-        Called at the point of use - the line before a vector is produced - because that
-        is the only place a lazily-loaded embedder can be asked what it is without making
-        a run that needs no model load one. Nothing is discarded; a rebuild costs a
-        quarter of an hour and is the user's to ask for. But nothing new is written
-        either, and every `index_status` says why until it is resolved.
+        Called once per run, from the driver, at the first document that really has
+        vectors - so a document of headings alone, which embeds nothing, may already have
+        been stored when this refuses; what it guarantees is that no vector from another
+        model reaches the index, not that the run wrote nothing at all. That is the
+        earliest moment it can run: the only moment a lazily-loaded embedder can be asked
+        what it is without making a run that needs no model load one, and the only thread
+        allowed to write what the answer implies. Nothing is discarded; a rebuild costs a quarter of
+        an hour and is the user's to ask for. But nothing new is written either, and every
+        `index_status` says why until it is resolved.
+
+        Both facts are read here rather than carried from the start of the run. Once per
+        run is cheap - this is two queries, not two per file, which is what made the
+        per-file version a read-modify-write racing its own writes - and a value read at
+        the start can be wrong by now: a document rewritten to headings alone earlier in
+        this same run takes its passages with it, and may have been the last vectors in
+        the index.
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if self._db.count_rows("units_vec") == 0:
@@ -1196,9 +1378,9 @@ class Indexer:
             return
         if recorded is None:
             return  # no provenance to contradict
-        # The load this run is about to do anyway. A model that will not load raises here
-        # exactly as it would one line later, and a run with nothing to embed never
-        # arrives.
+        # Already loaded: a worker embedded the document this is about to refuse. Kept
+        # anyway, because `warm_up` is what makes `weights_revision` answerable and this
+        # is called from tests and from runs whose first document came from a cache.
         self._embedder.warm_up()
         weights = self._embedder.weights_revision
         if weights == recorded:
@@ -1212,15 +1394,19 @@ class Indexer:
             message = (
                 f"Which weights {self._embedder.model_name} is running could not be read, so "
                 "there is no way to tell whether they are the ones that built this index "
-                f"({recorded[:12]}). Nothing has been discarded and nothing new is being "
-                "indexed; repair the model cache and run index_directory again."
+                f"({recorded[:12]}). Nothing has been discarded and no vector has been "
+                "stored - a document of headings alone, which embeds nothing, may have "
+                "been updated before this was reached; repair the model cache and run "
+                "index_directory again."
             )
         else:
             message = (
                 f"The weights behind {self._embedder.model_name} changed since this index was "
                 f"built ({recorded[:12]} -> {weights[:12]}), so its vectors and the ones a "
                 "query would produce now come from different models. Nothing has been "
-                "discarded and nothing new is being indexed; re-index this documentation "
+                "discarded and no vector from the new model has been stored - a document "
+                "of headings alone, which embeds nothing, may have been updated before "
+                "this was reached; re-index this documentation "
                 f"root from scratch (delete {self._db.path} and run index_directory) to make "
                 "them comparable again."
             )
@@ -1281,7 +1467,7 @@ class Indexer:
     @staticmethod
     def _vanished(
         root: Path,
-        known: dict[str, tuple[str, int]],
+        known: Mapping[str, object],
         seen: set[str],
         unreadable: Sequence[str],
     ) -> list[str]:
@@ -1313,13 +1499,15 @@ class Indexer:
             vanished.append(file_path)
         return vanished
 
-    def _index_file(
-        self,
-        path: Path,
-        known: tuple[str, int] | None,
-        about_to_write: Callable[[], None],
-    ) -> tuple[int, int] | None:
-        """Index one file. Returns ``(sections, passages)``, or ``None`` when unchanged."""
+    def _prepare_file(
+        self, path: Path, known: tuple[str, int, int | None] | None
+    ) -> _Prepared | None:
+        """Read, parse and embed one file. ``None`` when it is unchanged.
+
+        Runs on a worker thread and writes nothing: every database write of a run belongs
+        to the driver, so that section ids are handed out in walk order and the index's
+        account of itself - certificate, provenance, failures - has a single author.
+        """
         file_path = str(path)
         try:
             file_path.encode("utf-8")
@@ -1329,16 +1517,35 @@ class Indexer:
         if not stat.S_ISREG(info.st_mode):
             # A FIFO or device named *.md would block or stream forever when read.
             raise IndexingError("Not a regular file; skipped")
-        with path.open("rb") as handle:
-            data = handle.read(MAX_FILE_BYTES + 1)  # st_size cannot be trusted for the cap
+        # Checked again on the descriptor: between that stat and this open the path can be
+        # replaced by a FIFO, and a blocking open would then wait for a writer that may
+        # never come - with a worker of the pool in its hand.
+        data = read_regular_file(path)
+        if data is None:
+            raise IndexingError("Not a regular file; skipped")
         if len(data) > MAX_FILE_BYTES:
             raise IndexingError(f"File is larger than {MAX_FILE_BYTES} bytes; skipped")
         content_hash = hash_bytes(data)
         # The format counts as much as the content: a file whose bytes never changed still
         # has to be rebuilt if its vectors were pooled by an older scheme, or it would keep
         # them forever and the table would answer one query two different ways.
-        if known is not None and known == (content_hash, VECTOR_FORMAT):
-            return None
+        if known is not None and known[:2] == (content_hash, VECTOR_FORMAT):
+            if known[2] == info.st_mtime_ns:
+                return None
+            # Same bytes, a different timestamp: nothing to parse, embed or store, but the
+            # time has to be written down or the freshness check hashes this file again on
+            # every sweep from here on.
+            return _Prepared(
+                file_path=file_path,
+                title="",
+                content_hash=content_hash,
+                last_modified=int(info.st_mtime),
+                mtime_ns=info.st_mtime_ns,
+                sections=(),
+                vectors=(),
+                unchanged=True,
+                previous_mtime_ns=known[2],
+            )
         parsed = self._parser.parse(
             data.decode("utf-8", errors="replace"), fallback_title=path.stem
         )
@@ -1349,12 +1556,6 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
-        if texts:
-            # Only when a vector is really about to exist. A document of headings alone
-            # embeds nothing, and `embed_documents` returns without loading the model for
-            # it - asking first would make a file that needs no model fail when none can
-            # be loaded.
-            self._refuse_foreign_weights()
         embeddings = self._embedder.embed_documents(texts)
         if len(embeddings) != len(texts):
             raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
@@ -1363,16 +1564,12 @@ class Indexer:
         for section in parsed.sections:
             units = tuple(next(embedded) for _ in section.units)
             vectors.append(SectionVectors(section=_section_vector(units), units=units))
-        # Here, and not a line earlier: parsing and embedding can fail without touching
-        # the index, and a run that changed nothing must leave a standing certificate
-        # alone. A model that will not load fails identically on every file.
-        about_to_write()
-        self._db.replace_document(
+        return _Prepared(
             file_path=file_path,
             title=parsed.title,
             content_hash=content_hash,
             last_modified=int(info.st_mtime),
-            sections=parsed.sections,
-            vectors=vectors,
+            mtime_ns=info.st_mtime_ns,
+            sections=tuple(parsed.sections),
+            vectors=tuple(vectors),
         )
-        return len(parsed.sections), sum(len(section.units) for section in parsed.sections)

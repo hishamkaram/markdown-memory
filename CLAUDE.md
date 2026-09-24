@@ -50,8 +50,8 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
-| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v4), repository methods, `integrity_problems()` |
-| `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, the versioned/verified model cache (`gemma_model_dir`, `GEMMA_MANIFEST`, `.verified` stamp, `flock`), incremental `Indexer` |
+| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v5), repository methods, `integrity_problems()` |
+| `src/markdown_memory/indexer.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`, the versioned/verified model cache (`gemma_model_dir`, `GEMMA_MANIFEST`, `.verified` stamp, `flock`), incremental `Indexer` (workers embed, the driver writes) |
 | `src/markdown_memory/graph_patch.py` | `gather_before_dequantize`: rewrites two nodes of the pinned ONNX graph on the protobuf wire format, or refuses (`None`) and leaves it alone |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/server.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), `MarkdownMemoryService`, heading-path resolution, outline, MCP tool wiring, `main()` |
@@ -149,7 +149,12 @@ Work in this order:
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
    Top-1 ~85%). When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
-   concluding the docs do not cover it.
+   concluding the docs do not cover it. When `index_status.changed_files` is non-zero,
+   that many indexed documents could not be confirmed to be what was indexed - edited,
+   unreadable or deleted - so a hit may quote text that is no longer there; re-run
+   `index_directory` before relying on it. The count is best-effort: files created since
+   the last run are not in it, and an edit that puts a file's modification time back is
+   not seen, so a zero is "nothing detected", not "everything verified".
 2. **`get_document_outline(file_path)`** - only when you need the structure of a document:
    the heading tree with line spans and per-section token estimates, at a few hundred
    tokens. Use it to choose a section, or to find sibling sections of a search hit.

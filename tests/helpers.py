@@ -28,6 +28,7 @@ def draft(title: str, content: str) -> SectionDraft:
 def store(db: Database, embedder: FakeEmbedder, file_path: str, count: int = 3) -> None:
     sections = [draft(f"S{n}", f"## S{n}\n\nbody number {n}") for n in range(count)]
     db.replace_document(
-        file_path=file_path, title="Doc", content_hash="h", last_modified=1, sections=sections,
+        file_path=file_path, title="Doc", content_hash="h", last_modified=1,
+        mtime_ns=1, sections=sections,
         vectors=vectors_for(embedder, sections),
     )  # fmt: skip

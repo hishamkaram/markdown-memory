@@ -236,23 +236,44 @@ class IndexStatus:
     #: rebuilds - a parent run prunes `.venv`, `node_modules` and the like, so one indexed
     #: deliberately inside such a directory is never reached again.
     stale_vectors: int = 0
+    #: Indexed documents a cheap probe could not confirm are still what was indexed: their
+    #: bytes differ, or they are gone, unreadable, or no longer a regular file. It is
+    #: best-effort in both directions. Counted over the rows the index holds, so a file
+    #: nobody has indexed yet is not in it - finding those needs the directory walk, which
+    #: is the expensive half. And the bytes are only read where the modification time moved,
+    #: so an edit that restores a file's own timestamp is not seen. Zero means nothing was
+    #: detected, not that every indexed file was hashed.
+    changed_files: int = 0
 
     def to_dict(self) -> JsonDict:
         shown = self.failures[:MAX_REPORTED_FAILURES]
         return {
             "coverage": "verified" if self.verified else "unknown",
             "failures": [failure.to_dict() for failure in shown],
+            "changed_files": self.changed_files,
             "message": self.message(),
         }
 
     def message(self) -> str | None:
         """One sentence, or nothing at all when there is nothing to act on."""
-        if self.verified:
-            return None
         # First, because it is the only one that says the answers themselves may be
-        # wrong rather than incomplete.
+        # wrong rather than incomplete. Hoisted above `verified` rather than left below
+        # it: the two cannot both hold today, and a reader should not have to know that.
         if self.weights_mismatch:
             return self.weights_mismatch
+        if self.verified:
+            # A walk that finished still describes the moment it finished. Files edited
+            # since are the one thing a verified tree has left to say.
+            if self.changed_files:
+                return (
+                    f"The last full index completed, but {self.changed_files} indexed "
+                    "document(s) can no longer be confirmed to be what was indexed - "
+                    "changed, unreadable or gone - so an answer may quote text that is no "
+                    "longer there; run index_directory to refresh. The check is cheap and "
+                    "best-effort: files created since that scan are not counted, and an "
+                    "edit that puts a file's modification time back is not seen."
+                )
+            return None
         if not self.failures:
             if self.stale_vectors:
                 return (

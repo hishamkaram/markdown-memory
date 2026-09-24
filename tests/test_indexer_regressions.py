@@ -8,7 +8,9 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 import os
+import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,7 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
-from markdown_memory.exceptions import IndexingError, ModelLoadError
+from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
 from markdown_memory.indexer import (
     BGE_SMALL_MODEL_NAME,
     GEMMA_FILES,
@@ -504,8 +506,13 @@ def test_a_model_whose_weights_changed_may_not_write_into_the_index(
     assert db.get_meta("embedding_weights_revision") == "a" * 40
     (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
 
-    with pytest.raises(IndexingError, match="changed since this index was built"):
+    with pytest.raises(IndexingError, match="changed since this index was built") as refused:
         Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+
+    # What the refusal promises, exactly: no vector from the new model, not "no writes".
+    # A document of headings alone embeds nothing and may already have been stored.
+    assert "no vector from the new model has been stored" in str(refused.value)
+    assert "headings alone" in str(refused.value)
 
     # Nothing discarded, nothing added, and the record still describes what is stored.
     assert db.count_rows("documents") == 1
@@ -700,16 +707,19 @@ def test_the_revision_is_written_before_the_vectors_it_describes(
     """
     seen: list[str | None] = []
     embedder = _PinnedWeights("a" * 40)
-    original = embedder.embed_documents
+    original = db.replace_document
 
-    def watch(texts: object) -> list[list[float]]:
+    def watch(**kwargs: object) -> Any:
         seen.append(db.get_meta("embedding_weights_revision"))
-        return original(texts)  # type: ignore[arg-type]
+        return original(**kwargs)  # type: ignore[arg-type]
 
-    embedder.embed_documents = watch  # type: ignore[method-assign]
-    Indexer(db, embedder).index_directory(one_document)
+    db.replace_document = watch  # type: ignore[method-assign]
+    try:
+        Indexer(db, embedder).index_directory(one_document)
+    finally:
+        del db.replace_document  # type: ignore[attr-defined]
 
-    assert seen == ["a" * 40]  # already true when the first vector was made
+    assert seen == ["a" * 40]  # already true when the first vector reached the database
 
 
 def test_a_file_that_embeds_nothing_does_not_need_a_model_that_loads(
@@ -1114,3 +1124,241 @@ def test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known(
 
     with pytest.raises(ModelLoadError, match="Cannot clear"):
         cache.embedder().warm_up()
+
+
+# ------------------------------------------------------------------ parallel indexing
+
+
+def _corpus(root: Path, files: int) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for n in range(files):
+        (root / f"doc{n:02d}.md").write_text(
+            f"# Doc {n}\n\nbody of document {n}\n\n## Detail {n}\n\nmore about {n}\n"
+        )
+    return root
+
+
+def _index_contents(db: Database) -> list[tuple[int, str, str]]:
+    conn = db.connection()
+    return [
+        (int(row[0]), str(row[1]), str(row[2]))
+        for row in conn.execute(
+            "SELECT s.id, d.file_path, s.heading_path FROM sections s "
+            "JOIN documents d ON d.id = s.doc_id ORDER BY s.id"
+        )
+    ]
+
+
+def test_several_workers_build_exactly_the_index_one_worker_builds(
+    tmp_path: Path, fake_embedder: FakeEmbedder
+) -> None:
+    """Workers embed; the driver writes, in the order the tree was walked.
+
+    Section ids are handed out as documents are stored, and search breaks a scoring tie
+    by section id - so an index whose ids depend on which worker finished first would
+    quietly answer the same query two ways on two machines.
+    """
+    root = _corpus(tmp_path / "docs", 12)
+    built: list[list[tuple[int, str, str]]] = []
+    for workers in (1, 4):
+        with Database(tmp_path / f"w{workers}.db") as db:
+            report = Indexer(db, fake_embedder, workers=workers).index_directory(root)
+            assert (report.files_indexed, report.files_unchanged) == (12, 0)
+            built.append(_index_contents(db))
+    assert built[0] == built[1]
+
+
+def test_no_worker_thread_ever_writes_to_the_database(
+    db: Database, tmp_path: Path, fake_embedder: FakeEmbedder
+) -> None:
+    """One writer, whatever the worker count.
+
+    SQLite takes one writer at a time anyway, and the ids, the certificate and the
+    provenance metadata all have to be handed out in one order by one thread.
+    """
+    root = _corpus(tmp_path / "docs", 8)
+    writers: set[int] = set()
+    original = db.transaction
+
+    def watch() -> Any:
+        writers.add(threading.get_ident())
+        return original()
+
+    db.transaction = watch  # type: ignore[method-assign]
+    try:
+        Indexer(db, fake_embedder, workers=4).index_directory(root)
+    finally:
+        del db.transaction  # type: ignore[attr-defined]
+    assert writers == {threading.get_ident()}
+
+
+def test_one_file_failing_under_concurrency_does_not_take_the_run_with_it(
+    db: Database, tmp_path: Path, fake_embedder: FakeEmbedder
+) -> None:
+    root = _corpus(tmp_path / "docs", 6)
+    os.mkfifo(root / "fifo.md")  # reading it would block forever
+    report = Indexer(db, fake_embedder, workers=4).index_directory(root)
+    assert report.files_indexed == 6
+    assert [failure.message for failure in report.errors] == ["Not a regular file; skipped"]
+    assert report.errors[0].file_path.endswith("fifo.md")
+
+
+def test_the_weights_of_a_run_are_settled_once_however_many_workers_embed(
+    db: Database, tmp_path: Path
+) -> None:
+    """The check writes - it claims an empty index, or records a mismatch - so it runs on
+
+    the thread that writes, once, rather than per file where it was a read-modify-write
+    of the same two facts racing this run's own writes.
+    """
+    root = _corpus(tmp_path / "docs", 10)
+    embedder = _PinnedWeights("a" * 40)
+    loads = 0
+    original = embedder.warm_up
+
+    def count() -> None:
+        nonlocal loads
+        loads += 1
+        original()
+
+    embedder.warm_up = count  # type: ignore[method-assign]
+    Indexer(db, embedder, workers=4).index_directory(root)
+    assert loads == 1
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+
+def test_a_run_with_nothing_to_embed_loads_no_model_however_many_workers(
+    db: Database, tmp_path: Path
+) -> None:
+    """A tree of headings alone produces no vector, so no model is needed to store it -
+
+    and asking the embedder which weights it is running would load one.
+    """
+
+    class NoModel(FakeEmbedder):
+        def warm_up(self) -> None:
+            raise ModelLoadError("Cannot load embedding model: offline")
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    for n in range(6):
+        (root / f"h{n}.md").write_text(f"# Heading {n}\n")
+    report = Indexer(db, NoModel(), workers=4).index_directory(root)
+    assert (report.files_indexed, report.passages_indexed) == (6, 0)
+
+
+def test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree(
+    db: Database, tmp_path: Path, fake_embedder: FakeEmbedder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prepared file holds every vector of every passage it has - ~1.5 MiB for a
+
+    64-passage section. Submitting the whole walk and collecting it afterwards would hold
+    the corpus in memory; the window is what keeps the pool fed without doing that. What
+    it bounds is how far ahead the *walk* runs, not how much is embedded: embedding is
+    serial per worker either way, so counting embeddings would score an unbounded
+    submission green.
+    """
+    from markdown_memory import indexer as indexer_module
+
+    root = _corpus(tmp_path / "docs", 12)
+    walked = 0
+    walk = indexer_module.iter_markdown_files
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal walked
+        for path in walk(*args, **kwargs):
+            walked += 1
+            yield path
+
+    monkeypatch.setattr(indexer_module, "iter_markdown_files", counting)
+
+    read_ahead = 0
+    original = db.replace_document
+
+    def watch(**kwargs: object) -> Any:
+        nonlocal read_ahead
+        if not read_ahead:
+            read_ahead = walked
+        return original(**kwargs)  # type: ignore[arg-type]
+
+    db.replace_document = watch  # type: ignore[method-assign]
+    try:
+        report = Indexer(db, fake_embedder, workers=2).index_directory(root)
+    finally:
+        del db.replace_document  # type: ignore[attr-defined]
+
+    assert report.files_indexed == 12
+    assert 0 < read_ahead <= 4  # max(2 * workers, 2), and nowhere near the 12 on disk
+
+
+def test_the_workers_really_do_embed_at_the_same_time(db: Database, tmp_path: Path) -> None:
+    """Otherwise the whole feature could be a thread pool of one and every other test
+
+    here would still pass: they compare what was written, and writing is deliberately
+    serial. This one cannot finish unless two files are inside the embedder together.
+    """
+
+    class MeetsInTheMiddle(FakeEmbedder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate = threading.Barrier(2, timeout=30)
+
+        def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+            self.gate.wait()  # BrokenBarrierError if nothing else arrives in time
+            return super().embed_documents(texts)
+
+    root = _corpus(tmp_path / "docs", 2)
+    report = Indexer(db, MeetsInTheMiddle(), workers=2).index_directory(root)
+    assert (report.files_indexed, report.errors) == (2, ())
+
+
+def test_a_document_the_storage_layer_rejects_fails_alone(
+    db: Database, tmp_path: Path, fake_embedder: FakeEmbedder
+) -> None:
+    """The write moved out of the worker and onto the driver, and for one revision it sat
+
+    outside the per-file guard the read had: a single document the storage layer refused
+    - a vector it will not take, a row that will not go in - then aborted the whole run
+    instead of being recorded as that file's failure.
+    """
+    root = _corpus(tmp_path / "docs", 4)
+    doomed = str(root / "doc02.md")
+    original = db.replace_document
+
+    def refuse(**kwargs: object) -> Any:
+        if kwargs["file_path"] == doomed:
+            raise DatabaseError("this document is not welcome here")
+        return original(**kwargs)  # type: ignore[arg-type]
+
+    db.replace_document = refuse  # type: ignore[method-assign]
+    try:
+        report = Indexer(db, fake_embedder, workers=2).index_directory(root)
+    finally:
+        del db.replace_document  # type: ignore[attr-defined]
+
+    assert report.files_indexed == 3
+    assert [failure.file_path for failure in report.errors] == [doomed]
+    assert "not welcome" in report.errors[0].message
+
+
+def test_a_file_whose_bytes_did_not_change_still_has_its_timestamp_brought_up_to_date(
+    db: Database, tmp_path: Path, fake_embedder: FakeEmbedder
+) -> None:
+    """A skipped file used to keep whatever time it was stored with.
+
+    A `touch`, a checkout, or a row migrated from a schema with no nanoseconds in it then
+    left the freshness check hashing an unchanged file on every sweep, for ever, to
+    conclude what the hash already in the row could have told it.
+    """
+    root = _corpus(tmp_path / "docs", 2)
+    indexer = Indexer(db, fake_embedder, workers=2)
+    indexer.index_directory(root)
+
+    touched = root / "doc00.md"
+    os.utime(touched, (1, 1))  # same bytes, a time from 1970
+    report = indexer.index_directory(root)
+
+    assert (report.files_indexed, report.files_unchanged) == (0, 2)  # nothing re-embedded
+    content_hash, mtime_ns = db.document_fingerprints(str(root))[str(touched)]
+    assert mtime_ns == touched.stat().st_mtime_ns
+    assert content_hash == hashlib.sha256(touched.read_bytes()).hexdigest()

@@ -151,7 +151,7 @@ def draft(title: str, units: Sequence[str], line: int = 1) -> SectionDraft:
 
 def store(db: Database, embedder: FakeEmbedder, path: str, sections: list[SectionDraft]) -> int:
     document = db.replace_document(
-        file_path=path, title="Doc", content_hash="h", last_modified=1,
+        file_path=path, title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
         sections=sections, vectors=vectors_for(embedder, sections),
     )  # fmt: skip
     return document.id
@@ -227,13 +227,13 @@ class TestUnitStorage:
         ):
             with pytest.raises(DatabaseError, match=message):
                 db.replace_document(
-                    file_path="/d/a.md", title="T", content_hash="h", last_modified=1,
+                    file_path="/d/a.md", title="T", content_hash="h", last_modified=1, mtime_ns=1,
                     sections=[section], vectors=[bad],
                 )  # fmt: skip
         stub = draft("Stub", [])
         with pytest.raises(DatabaseError, match="section vector is required"):
             db.replace_document(
-                file_path="/d/a.md", title="T", content_hash="h", last_modified=1,
+                file_path="/d/a.md", title="T", content_hash="h", last_modified=1, mtime_ns=1,
                 sections=[stub], vectors=[SectionVectors(section=vector)],
             )  # fmt: skip
         assert db.count_rows("documents") == 0
@@ -250,10 +250,11 @@ class TestUnitStorage:
             conn.execute("DROP TABLE index_failures")
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
+            conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
             conn.execute("PRAGMA user_version = 1")
         with Database(path) as migrated:
             version = migrated.connection().execute("PRAGMA user_version").fetchone()[0]
-            assert int(version) == SCHEMA_VERSION == 4
+            assert int(version) == SCHEMA_VERSION == 5
             store(migrated, fake_embedder, "/d/a.md", self.SECTIONS)
             assert migrated.count_rows("units_vec") == 3
 

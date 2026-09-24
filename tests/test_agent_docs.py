@@ -283,7 +283,7 @@ class TestIntegrityProblems:
         assert db.integrity_problems() == []
         sections = [_draft("A", "alpha text"), _draft("B", "beta text")]
         db.replace_document(
-            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         assert db.integrity_problems() == []
@@ -291,7 +291,7 @@ class TestIntegrityProblems:
     def test_each_kind_of_damage_is_named(self, db: Database, fake_embedder: FakeEmbedder) -> None:
         sections = [_draft("A", "alpha text"), _draft("B", "beta text")]
         db.replace_document(
-            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1,
+            file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
         conn = db.connection()
@@ -309,7 +309,7 @@ class TestIntegrityProblems:
 
     def test_outdated_schema_version_is_reported(self, db: Database) -> None:
         db.connection().execute("PRAGMA user_version = 1")
-        assert db.integrity_problems() == ["schema version is 1, expected 4"]
+        assert db.integrity_problems() == ["schema version is 1, expected 5"]
 
 
 class TestReindexScript:

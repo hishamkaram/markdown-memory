@@ -45,7 +45,12 @@ Work in this order:
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
    Top-1 ~85%). When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
-   concluding the docs do not cover it.
+   concluding the docs do not cover it. When `index_status.changed_files` is non-zero,
+   that many indexed documents could not be confirmed to be what was indexed - edited,
+   unreadable or deleted - so a hit may quote text that is no longer there; re-run
+   `index_directory` before relying on it. The count is best-effort: files created since
+   the last run are not in it, and an edit that puts a file's modification time back is
+   not seen, so a zero is "nothing detected", not "everything verified".
 2. **`get_document_outline(file_path)`** - only when you need the structure of a document:
    the heading tree with line spans and per-section token estimates, at a few hundred
    tokens. Use it to choose a section, or to find sibling sections of a search hit.
