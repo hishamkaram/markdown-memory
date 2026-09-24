@@ -9,8 +9,9 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
+from markdown_memory.embedders import Embedder
 from markdown_memory.exceptions import DatabaseError, EmbeddingError
-from markdown_memory.indexer import Embedder, Indexer
+from markdown_memory.indexer import Indexer
 from markdown_memory.search import (
     MAX_RESULT_LIMIT,
     RRF_K,

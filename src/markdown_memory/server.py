@@ -28,6 +28,18 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from markdown_memory.db import Database
+from markdown_memory.discovery import (
+    MAX_FILE_BYTES,
+    hash_bytes,
+    read_regular_file,
+)
+from markdown_memory.embedders import (
+    DEFAULT_EMBEDDER,
+    Embedder,
+    EmbeddingGemmaEmbedder,
+    FastEmbedEmbedder,
+    create_embedder,
+)
 from markdown_memory.exceptions import (
     ConfigurationError,
     DocumentNotFoundError,
@@ -37,17 +49,9 @@ from markdown_memory.exceptions import (
     SectionNotFoundError,
 )
 from markdown_memory.indexer import (
-    DEFAULT_EMBEDDER,
     DEFAULT_INDEX_WORKERS,
-    MAX_FILE_BYTES,
-    Embedder,
-    EmbeddingGemmaEmbedder,
-    FastEmbedEmbedder,
     Indexer,
-    create_embedder,
-    hash_bytes,
     parse_exclusions,
-    read_regular_file,
 )
 from markdown_memory.models import (
     PATH_SEPARATOR,

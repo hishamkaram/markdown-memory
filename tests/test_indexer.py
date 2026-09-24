@@ -10,8 +10,9 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
+from markdown_memory.discovery import hash_bytes, iter_markdown_files
 from markdown_memory.exceptions import EmbeddingError, IndexingError
-from markdown_memory.indexer import Indexer, hash_bytes, iter_markdown_files
+from markdown_memory.indexer import Indexer
 from markdown_memory.parser import MarkdownParser
 
 

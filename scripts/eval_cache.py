@@ -42,19 +42,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from markdown_memory.db import SCHEMA_VERSION, Database
-from markdown_memory.indexer import (
+from markdown_memory.discovery import MAX_FILE_BYTES, iter_markdown_files
+from markdown_memory.embedders import (
     DEFAULT_EMBEDDER,
     GEMMA_DIMENSION,
     GEMMA_DOCUMENT_PROMPT,
     GEMMA_MAX_TOKENS,
-    GEMMA_MODEL_FILE,
     GEMMA_QUERY_PROMPT,
-    GEMMA_REVISION,
-    MAX_FILE_BYTES,
     Embedder,
+)
+from markdown_memory.model_cache import (
+    GEMMA_MODEL_FILE,
+    GEMMA_REVISION,
     fastembed_model_dir,
     gemma_model_dir,
-    iter_markdown_files,
 )
 from markdown_memory.parser import (
     DEFAULT_MAX_SECTION_CHARS,
@@ -67,7 +68,15 @@ SOURCE = Path(__file__).parent.parent / "src" / "markdown_memory"
 # Modules whose source decides what goes into the index. `search.py` is deliberately
 # absent: ranking changes are what the gate exists to measure, and re-indexing for one
 # would make every comparison cost 25 minutes.
-INDEX_SOURCES = ("parser.py", "indexer.py", "db.py", "models.py")
+INDEX_SOURCES = (
+    "parser.py",
+    "indexer.py",
+    "embedders.py",
+    "model_cache.py",
+    "discovery.py",
+    "db.py",
+    "models.py",
+)
 CACHE_VERSION = 1  # bump when the layout of the cache directory itself changes
 
 

@@ -18,14 +18,10 @@ import pytest
 from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
+from markdown_memory.embedders import EmbeddingGemmaEmbedder, FastEmbedEmbedder
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
-from markdown_memory.indexer import (
-    BGE_SMALL_MODEL_NAME,
-    GEMMA_FILES,
-    EmbeddingGemmaEmbedder,
-    FastEmbedEmbedder,
-    Indexer,
-)
+from markdown_memory.indexer import Indexer
+from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME, GEMMA_FILES
 
 _SPIN_KEY = "session.intra_op.allow_spinning"
 
@@ -68,25 +64,25 @@ def _session_call(
     import onnxruntime
     import tokenizers
 
-    from markdown_memory import indexer
+    from markdown_memory import embedders, model_cache
 
     manifest = {
         name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in _FILES.items()
     }
-    monkeypatch.setattr(indexer, "GEMMA_MANIFEST", manifest)
-    monkeypatch.setattr(indexer, "GEMMA_FILES", tuple(manifest))
-    monkeypatch.setattr(indexer, "GEMMA_MODEL_FILE", "model.onnx")
-    monkeypatch.setattr(indexer, "DERIVED_GRAPH_FILE", "derived.onnx")
-    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
+    monkeypatch.setattr(model_cache, "GEMMA_MANIFEST", manifest)
+    monkeypatch.setattr(model_cache, "GEMMA_FILES", tuple(manifest))
+    monkeypatch.setattr(model_cache, "GEMMA_MODEL_FILE", "model.onnx")
+    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_FILE", "derived.onnx")
+    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
     monkeypatch.setattr(
-        indexer, "gather_before_dequantize", lambda graph: _DERIVED if derived else None
+        embedders, "gather_before_dequantize", lambda graph: _DERIVED if derived else None
     )
     monkeypatch.setattr(
         huggingface_hub,
         "snapshot_download",
         lambda *a, **k: pytest.fail("the model cache was verified, so nothing may be fetched"),
     )
-    model_dir = indexer.gemma_model_dir(tmp_path)
+    model_dir = model_cache.gemma_model_dir(tmp_path)
     for name, data in _FILES.items():
         stub = model_dir / name
         stub.parent.mkdir(parents=True, exist_ok=True)
@@ -174,18 +170,18 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Cache:
     """A Gemma embedder whose manifest is two tiny files and whose download is a stub."""
     import huggingface_hub
 
-    from markdown_memory import indexer
+    from markdown_memory import embedders, model_cache
 
     manifest = {
         name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in _FILES.items()
     }
-    monkeypatch.setattr(indexer, "GEMMA_MANIFEST", manifest)
-    monkeypatch.setattr(indexer, "GEMMA_FILES", tuple(manifest))
-    monkeypatch.setattr(indexer, "GEMMA_MODEL_FILE", "model.onnx")
-    monkeypatch.setattr(indexer, "DERIVED_GRAPH_FILE", "derived.onnx")
-    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
+    monkeypatch.setattr(model_cache, "GEMMA_MANIFEST", manifest)
+    monkeypatch.setattr(model_cache, "GEMMA_FILES", tuple(manifest))
+    monkeypatch.setattr(model_cache, "GEMMA_MODEL_FILE", "model.onnx")
+    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_FILE", "derived.onnx")
+    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(_DERIVED).hexdigest())
     harness = _Cache(tmp_path)
-    monkeypatch.setattr(indexer, "gather_before_dequantize", harness.rewrite)
+    monkeypatch.setattr(embedders, "gather_before_dequantize", harness.rewrite)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", harness.download)
     monkeypatch.setattr(EmbeddingGemmaEmbedder, "_open", lambda self: harness.open())
     return harness
@@ -195,7 +191,7 @@ class _Cache:
     """The scratch model cache, its download stub, and what each of them was asked to do."""
 
     def __init__(self, root: Path) -> None:
-        from markdown_memory.indexer import gemma_model_dir
+        from markdown_memory.model_cache import gemma_model_dir
 
         self.root = root
         self.model_dir = gemma_model_dir(root)
@@ -246,13 +242,14 @@ def test_a_verified_cache_is_neither_hashed_nor_re_fetched_on_every_start(
 
     per session. The stamp turns the steady state into a handful of stat calls.
     """
-    from markdown_memory import indexer
+
+    from markdown_memory import model_cache
 
     cache.embedder().warm_up()
     assert len(cache.downloads) == 1
 
     monkeypatch.setattr(
-        indexer, "_hash_file", lambda path: pytest.fail(f"hashed {path} on a verified cache")
+        model_cache, "_hash_file", lambda path: pytest.fail(f"hashed {path} on a verified cache")
     )
     cache.embedder().warm_up()
     assert len(cache.downloads) == 1
@@ -295,10 +292,10 @@ def test_a_file_that_changes_while_it_is_hashed_is_not_trusted(
     cache: _Cache, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Whatever the hash describes, it is not what is on disk now."""
-    from markdown_memory import indexer
+    from markdown_memory import model_cache
 
     cache.write(cache.model_dir)
-    real_hash = indexer._hash_file
+    real_hash = model_cache._hash_file
 
     sabotaged: list[Path] = []
 
@@ -309,7 +306,7 @@ def test_a_file_that_changes_while_it_is_hashed_is_not_trusted(
             os.utime(path, ns=(0, 0))
         return digest
 
-    monkeypatch.setattr(indexer, "_hash_file", hash_then_touch)
+    monkeypatch.setattr(model_cache, "_hash_file", hash_then_touch)
     cache.embedder().warm_up()
     assert len(cache.downloads) == 1
 
@@ -390,7 +387,7 @@ def test_older_versions_are_reported_and_never_deleted(
 ) -> None:
     older = cache.root / "embeddinggemma-300m-onnx-0123456789ab"
     cache.write(older)
-    with caplog.at_level("INFO", logger="markdown_memory.indexer"):
+    with caplog.at_level("INFO", logger="markdown_memory.embedders"):
         cache.embedder().warm_up()
     assert str(older) in caplog.text
     assert (older / "model.onnx").exists()
@@ -453,7 +450,7 @@ def test_the_helper_that_writes_those_files_refuses_a_symlink_outright(tmp_path:
 
     The refusal that holds is the kernel's, so it is asserted on the helper itself.
     """
-    from markdown_memory.indexer import _write_new_file
+    from markdown_memory.model_cache import _write_new_file
 
     treasure = tmp_path / "treasure.txt"
     treasure.write_text("somebody else's file")
@@ -620,13 +617,14 @@ def test_only_the_model_whose_cache_it_can_find_reports_a_revision(
     model would report a revision belonging to weights that are not the ones answering,
     which is worse than reporting none: none is merely unknown.
     """
-    from markdown_memory import indexer as module
-    from markdown_memory.indexer import BGE_SMALL_MODEL_NAME, FastEmbedEmbedder
+    from markdown_memory import model_cache
+    from markdown_memory.embedders import FastEmbedEmbedder
+    from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
 
     snapshot = tmp_path / "models--qdrant--bge-small-en-v1.5-onnx-q"
     (snapshot / "refs").mkdir(parents=True)
     (snapshot / "refs" / "main").write_text("5239827812345678\n")
-    monkeypatch.setattr(module, "fastembed_model_dir", lambda _cache_dir: snapshot)
+    monkeypatch.setattr(model_cache, "fastembed_model_dir", lambda _cache_dir: snapshot)
 
     assert FastEmbedEmbedder(BGE_SMALL_MODEL_NAME)._read_weights_revision() == "5239827812345678"
     other = FastEmbedEmbedder("sentence-transformers/all-MiniLM-L6-v2")
@@ -872,7 +870,7 @@ def test_the_bge_small_folder_is_the_one_fastembed_really_creates() -> None:
     re-export (`qdrant/bge-small-en-v1.5-onnx-q`), and guessing `models--BAAI--...` left
     the eval cache keyed on an empty string for that preset.
     """
-    from markdown_memory.indexer import fastembed_model_dir
+    from markdown_memory.model_cache import fastembed_model_dir
     from markdown_memory.server import ServerConfig
 
     cache_dir = ServerConfig.from_env().model_cache_dir
@@ -929,7 +927,7 @@ def test_the_embedder_runs_the_derived_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole point of deriving it: ~1 GB per query lives in this one path."""
-    from markdown_memory.indexer import gemma_model_dir
+    from markdown_memory.model_cache import gemma_model_dir
 
     path, _ = _session_call(tmp_path, monkeypatch)
     assert path == str(gemma_model_dir(tmp_path) / "derived.onnx")
@@ -939,7 +937,7 @@ def test_a_refused_rewrite_falls_back_to_the_published_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refusal costs the memory saving; it must not cost a server that starts."""
-    from markdown_memory.indexer import gemma_model_dir
+    from markdown_memory.model_cache import gemma_model_dir
 
     path, _ = _session_call(tmp_path, monkeypatch, derived=False)
     assert path == str(gemma_model_dir(tmp_path) / "model.onnx")
@@ -953,14 +951,14 @@ def test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files
     Every file identity still matches after the package changes, so without the pin in
     the stamp the old derived graph would keep being loaded for ever.
     """
-    from markdown_memory import indexer
+    from markdown_memory import embedders, model_cache
 
     cache.embedder().warm_up()
     assert cache.rewrites == 1
 
     newer = b"a differently rewritten graph"
-    monkeypatch.setattr(indexer, "DERIVED_GRAPH_SHA256", hashlib.sha256(newer).hexdigest())
-    monkeypatch.setattr(indexer, "gather_before_dequantize", lambda graph: newer)
+    monkeypatch.setattr(model_cache, "DERIVED_GRAPH_SHA256", hashlib.sha256(newer).hexdigest())
+    monkeypatch.setattr(embedders, "gather_before_dequantize", lambda graph: newer)
     cache.embedder().warm_up()
     assert (cache.model_dir / "derived.onnx").read_bytes() == newer
     assert cache.downloads == [cache.model_dir]  # regenerated, never re-fetched
@@ -1115,11 +1113,11 @@ def test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known(
 
     able to explain itself - or, worse, leaves the damaged file in place.
     """
-    from markdown_memory import indexer
+    from markdown_memory import model_cache
 
     cache.model_dir.mkdir(parents=True)
     (cache.model_dir / "model.onnx").write_bytes(b"damaged")
-    monkeypatch.setattr(indexer.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(model_cache.shutil, "rmtree", lambda *a, **k: None)
     monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
 
     with pytest.raises(ModelLoadError, match="Cannot clear"):
