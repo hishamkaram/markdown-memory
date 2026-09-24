@@ -17,7 +17,7 @@ from fakes import FakeEmbedder, vectors_for
 from markdown_memory.config import ServerConfig
 from markdown_memory.db import Database
 from markdown_memory.embedders import Embedder
-from markdown_memory.model_cache import GEMMA_REVISION
+from markdown_memory.model_cache import GEMMA_MODEL_FILE, GEMMA_REVISION
 from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, create_server
 
@@ -230,10 +230,22 @@ class TestDocsMatchTheCode:
         assert "warm_up()" in workflow
         assert workflow.index("warm_up()") < workflow.index("- run: uv run pytest -q")
 
-    def test_ci_caches_the_model_revision_the_code_pins(self) -> None:
-        """The cache key is the pin, so moving the pin cannot serve the old weights."""
+    def test_ci_caches_the_model_revision_and_graph_the_code_pins(self) -> None:
+        """The cache key is the pin, so moving the pin cannot serve the old weights.
+
+        The graph belongs in it as well as the revision: this repository publishes several
+        graphs at one revision, and an Actions cache entry is immutable once written. Keyed
+        on the revision alone, the entry saved for one graph would be restored for ever,
+        fail the stamp, and re-download the model on every job.
+        """
         workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
-        assert f"key: mdmem-model-{GEMMA_REVISION[:12]}-v2" in workflow
+        key = next(
+            line.split("key:", 1)[1].strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("key: mdmem-model-")
+        )
+        assert GEMMA_REVISION[:12] in key, key
+        assert Path(GEMMA_MODEL_FILE).stem in key, key
 
     def test_ci_tests_every_python_version_the_metadata_claims(self) -> None:
         """`requires-python` and the classifiers are promises; this is what keeps them."""

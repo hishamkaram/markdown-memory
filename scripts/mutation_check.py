@@ -175,13 +175,6 @@ MUTATIONS = (
         tests="test_a_model_file_replaced_by_a_symlink_is_not_trusted",
     ),
     Mutation(
-        name="cache: adopt the unversioned folder without checking its bytes",
-        module="embedders.py",
-        old="        if not legacy.is_dir() or model_cache._unverified(legacy):\n",
-        new="        if not legacy.is_dir():\n",
-        tests="test_an_unversioned_folder_that_does_not_match_is_left_where_it_is",
-    ),
-    Mutation(
         name="cache: take what was downloaded on trust",
         module="embedders.py",
         old="            still_wrong = model_cache._unverified(self._model_dir)\n",
@@ -208,56 +201,6 @@ MUTATIONS = (
         new="                    with model_cache._model_cache_lock("
         "self._cache_dir, exclusive=False):\n",
         tests="test_two_processes_starting_at_once_download_once_between_them",
-    ),
-    Mutation(
-        name="graph: run the published graph and dequantize the whole vocabulary",
-        module="embedders.py",
-        old="            graph = derived if derived and "
-        "model_cache._file_identity(derived) else None\n",
-        new="            graph = None\n",
-        tests="test_the_embedder_runs_the_derived_graph",
-    ),
-    Mutation(
-        name="graph: keep a derived graph that does not match its pin",
-        module="embedders.py",
-        old="            and model_cache._hash_file(derived) == model_cache.DERIVED_GRAPH_SHA256\n",
-        new="            and True  # whatever it hashes to\n",
-        tests="test_a_missing_or_tampered_derived_graph_is_rebuilt_rather_than_downloaded",
-    ),
-    Mutation(
-        name="graph: swap the nodes even when the scale is per axis",
-        module="graph_patch.py",
-        old="        if parameter is None or _elements(parameter[1]) != 1:\n",
-        new="        if parameter is None:\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: swap the nodes with something else still reading the whole table",
-        module="graph_patch.py",
-        old="    if consumers.get(produced) != 1:\n",
-        new="    if consumers.get(produced) is None:\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: copy a wire type the rewrite does not model",
-        module="graph_patch.py",
-        old='            raise _RefusedError(f"wire type {wire} is not modelled")\n',
-        new="            value_start, position = position, position\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="cache: keep the stamp valid when the derived graph's pin moves",
-        module="model_cache.py",
-        old='    if stamp.get("derived") != DERIVED_GRAPH_SHA256:\n        return False\n',
-        new="",
-        tests="test_moving_the_derived_pin_invalidates_a_stamp_that_still_matches_the_files",
-    ),
-    Mutation(
-        name="cache: keep a derived graph that is a symlink out of the cache",
-        module="embedders.py",
-        old="            model_cache._file_identity(derived) is not None\n",
-        new="            derived.is_file()\n",
-        tests="test_a_derived_graph_that_is_a_symlink_is_never_trusted",
     ),
     Mutation(
         name="cache: leave a directory sitting where the stamp goes",
@@ -295,41 +238,6 @@ MUTATIONS = (
         tests="test_discarding_every_document_discards_the_revision_that_described_them",
     ),
     Mutation(
-        name="graph: swap two nodes that are the wrong way round",
-        module="graph_patch.py",
-        old="        and node.field.start > dequantize.field.start\n",
-        new="        and node.field.start != dequantize.field.start\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: rewrite a node carrying a domain or a doc string",
-        module="graph_patch.py",
-        old="    if dequantize.extras:\n",
-        new="    if False:\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: remove the producer of a value the graph exports",
-        module="graph_patch.py",
-        old="    if produced in outputs:\n",
-        new="    if False:\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: introduce a name another node already writes",
-        module="graph_patch.py",
-        old='    if f"{produced}_rows" in taken:\n',
-        new="    if False:\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: accept field number zero as a field",
-        module="graph_patch.py",
-        old='            raise _RefusedError("field number 0 does not exist")\n',
-        new="            pass\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
         name="cache: follow a symlinked directory out of the model cache",
         module="model_cache.py",
         old="    current = model_dir\n",
@@ -344,31 +252,6 @@ MUTATIONS = (
         tests="test_a_file_that_cannot_be_cleared_says_so_where_the_path_is_known",
     ),
     Mutation(
-        name="graph: refuse a Gather that spells out the axis it already has",
-        module="graph_patch.py",
-        old="                        _NODE_ATTRIBUTE,\n",
-        new="",
-        tests="test_a_gather_that_spells_out_axis_zero_is_still_rewritten",
-    ),
-    Mutation(
-        name="graph: index the outputs of a node that has none",
-        module="graph_patch.py",
-        old="    if len(dequantize.outputs) != 1:\n        return []\n    produced = "
-        "dequantize.outputs[0]\n",
-        new="    produced = dequantize.outputs[0]\n    if len(dequantize.outputs) != 1:\n"
-        "        return []\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-        # The bug is the IndexError escaping the refusal contract, which is the point.
-        fails_with="IndexError",
-    ),
-    Mutation(
-        name="graph: move indices above the node that produces them",
-        module="graph_patch.py",
-        old="        and written_by.get(node.inputs[1], -1) < dequantize.field.start\n",
-        new="",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
         name="weights: call an index verified while another model's vectors answer it",
         module="indexer.py",
         old="        self._db.record_weights_mismatch(message)\n",
@@ -381,20 +264,6 @@ MUTATIONS = (
         old="        if weights == recorded:\n",
         new="        if weights is None or weights == recorded:\n",
         tests="test_weights_that_cannot_be_identified_are_not_assumed_to_be_the_right_ones",
-    ),
-    Mutation(
-        name="graph: let the rewrite shadow a name only the graph's inputs declare",
-        module="graph_patch.py",
-        old="        if field.number in (_GRAPH_INPUT, _GRAPH_VALUE_INFO)\n",
-        new="        if False\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
-    ),
-    Mutation(
-        name="graph: read an axis that is taken from somewhere else as a plain zero",
-        module="graph_patch.py",
-        old="        if any(field.number not in _AXIS_FIELDS for field in inner):\n",
-        new="        if False:  # the attribute is read as though it said what it appears to\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(
         name="cache: let a repair failure escape as whatever the Hub raised",
@@ -413,13 +282,6 @@ MUTATIONS = (
         ),
         new="    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n",
         tests="test_the_helper_that_writes_those_files_refuses_a_symlink_outright",
-    ),
-    Mutation(
-        name="graph: rewrite a graph whose sparse initializers name tensors unseen",
-        module="graph_patch.py",
-        old="    if any(entry.number == _GRAPH_SPARSE_INITIALIZER for entry in graph):\n",
-        new="    if False:  # sparse initializers are assumed to name nothing\n",
-        tests="test_anything_but_the_expected_pattern_is_refused",
     ),
     Mutation(
         name="weights: embed with whatever model happens to be loaded",
@@ -486,6 +348,34 @@ MUTATIONS = (
         old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:\n",
         new="        if False:  # the check speaks for rows read after it\n",
         tests="test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on",
+    ),
+    Mutation(
+        name="cache: look only at other revisions, and miss the graph this one replaced",
+        module="embedders.py",
+        old="            wanted = {self._model_dir / name for name in model_cache.GEMMA_FILES}\n",
+        new="            wanted = {entry for entry in self._model_dir.rglob('*')}\n",
+        tests="test_the_graph_an_upgrade_left_behind_is_reported_not_hidden",
+    ),
+    Mutation(
+        name="weights: shorten two graphs' identities to the same twelve characters",
+        module="embedders.py",
+        old='    return f"{revision[:12]}/{graph}" if separator else revision[:12]\n',
+        new="    return revision[:12]\n",
+        tests="test_a_mismatch_message_distinguishes_two_graphs_at_one_revision",
+    ),
+    Mutation(
+        name="cache: trust a stamp that vouches for a different graph's files",
+        module="model_cache.py",
+        old="    if not isinstance(recorded, dict) or set(recorded) != set(GEMMA_FILES):\n",
+        new="    if not isinstance(recorded, dict):\n",
+        tests="test_a_cache_holding_another_graph_is_refetched_rather_than_trusted",
+    ),
+    Mutation(
+        name="weights: name the revision but not which of its graphs answered",
+        module="embedders.py",
+        old='        return f"{model_cache.GEMMA_REVISION}/{model_cache.GEMMA_MODEL_FILE}"\n',
+        new="        return model_cache.GEMMA_REVISION\n",
+        tests="test_two_graphs_at_one_revision_report_different_weights",
     ),
     Mutation(
         name="weights: report one model's revision for another model's weights",
@@ -591,7 +481,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7240),',
+        old='    ("README.md", 7182),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

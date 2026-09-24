@@ -19,6 +19,7 @@ import pytest
 from fakes import FakeEmbedder
 from helpers import store
 
+from markdown_memory import model_cache
 from markdown_memory.config import ServerConfig, resolve_config
 from markdown_memory.db import Database
 from markdown_memory.models import (
@@ -320,9 +321,10 @@ class TestEvalIndexCache:
         corpus.mkdir()
         (corpus / "a.md").write_text("# A\n\nbody\n", encoding="utf-8")
         cache_dir = tmp_path / "models"
-        models = eval_cache.gemma_model_dir(cache_dir) / "onnx"
-        models.mkdir(parents=True)
-        weights = models / "model_quantized.onnx"
+        # The graph this version actually loads, not a name frozen into the test: a file
+        # nothing reads would prove the key digests *something*, not the weights.
+        weights = eval_cache.gemma_model_dir(cache_dir) / model_cache.GEMMA_MODEL_FILE
+        weights.parent.mkdir(parents=True)
         weights.write_bytes(b"first")
         before = eval_cache.build_key(corpus, "embeddinggemma", model_cache_dir=cache_dir).digest
         weights.write_bytes(b"a different download entirely")

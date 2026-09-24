@@ -58,16 +58,17 @@ jobs:
       # a vendored licence or NOTICE goes missing, is edited, or gains a stray file.
       - run: uv run python scripts/fetch_eval_corpus.py --check
 
-      # EmbeddingGemma is ~330 MB and pinned by revision, so the key is that revision:
-      # move the pin and the key moves with it. The `-v2` suffix is the cache layout
-      # itself, which now keeps the files in a folder named after the revision. A warm
-      # cache means no download at all; it does cost one verification pass (under a
-      # second), because a restore recreates the files with new inodes and timestamps,
+      # EmbeddingGemma is ~218 MB. The key names the revision *and* the graph, because
+      # one revision publishes several and a cache entry is immutable once saved: keyed
+      # on the revision alone, a q4 job would restore the int8 files for ever, fail the
+      # stamp, and re-download on every run. The `-v3` suffix is the cache layout itself.
+      # A warm cache means no download at all; it does cost one verification pass (under
+      # a second), because a restore recreates the files with new inodes and timestamps,
       # which is exactly the change the stamp is there to notice.
       - uses: actions/cache@v6
         with:
           path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
-          key: mdmem-model-5090578d9565-v2
+          key: mdmem-model-5090578d9565-model_q4-v3
 
       # The 15 tests that need the model SKIP rather than fail when it cannot load, so a
       # cache miss would leave the job green over fifteen untested behaviours. Loading the
@@ -77,7 +78,7 @@ jobs:
         run: |
           uv run python -c "
           from markdown_memory.embedders import DEFAULT_EMBEDDER, create_embedder
-          from markdown_memory.server import ServerConfig
+          from markdown_memory.config import ServerConfig
           create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
           print('embedding model loaded')
           "

@@ -7,10 +7,10 @@ heading-delimited sections, and stored in a single SQLite file with three indexe
 embedder truncates at 512 tokens), and `sqlite-vec` passage vectors (one per
 paragraph, list item, table row, code block). Embeddings are local ONNX on CPU:
 EmbeddingGemma-300m by default (768 dims), `bge-small-en-v1.5` via fastembed as the light
-preset (384 dims). Gemma's graph is rewritten on each machine so the int8 vocabulary table
-is gathered *before* it is dequantized - bit-identical vectors, and ~0.7 GB resident rather
-than ~1.6 GB, because the published order materialises all 262144x768 rows in float32 on
-every run. Search fuses keyword and vector rankings with Reciprocal Rank Fusion.
+preset (384 dims). Gemma runs the published 4-bit graph (`onnx/model_q4.onnx`), which
+quantizes the 262144x768 vocabulary table with `GatherBlockQuantized` and the projections
+with `MatMulNBits`, so the table is never materialised in float32. Search fuses keyword and
+vector rankings with Reciprocal Rank Fusion.
 Built on the MCP Python SDK **2.x**, where `FastMCP` is named `MCPServer`.
 
 ## Commands
@@ -39,7 +39,7 @@ revision. The hook is the one to satisfy - it is what you can run - but `git pus
 two step lists in the same order. The retrieval gate stays out of CI: it holds an exclusive
 lock and asserts on latency, which a shared runner cannot hold still.
 
-The first run downloads the embedding model (~330 MB) into
+The first run downloads the embedding model (~218 MB) into
 `$XDG_CACHE_HOME/markdown-memory/models`. Tests that need the real model are marked
 `embedding` and skip (not fail) when it cannot be loaded.
 
@@ -52,10 +52,9 @@ The first run downloads the embedding model (~330 MB) into
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v5), repository methods, `integrity_problems()` |
 | `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, exclusions, symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
-| `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the `.verified` stamp, `flock`, atomic writes |
-| `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds |
+| `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the graph file, the `.verified` stamp, `flock`, atomic writes |
+| `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds. `weights_revision` names the revision *and* the graph, because one revision publishes several |
 | `src/markdown_memory/indexer.py` | Incremental `Indexer`: the scan, SHA-256 change detection, the bounded window (workers embed, the driver writes), section/passage vectors |
-| `src/markdown_memory/graph_patch.py` | `gather_before_dequantize`: rewrites two nodes of the pinned ONNX graph on the protobuf wire format, or refuses (`None`) and leaves it alone |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
@@ -118,7 +117,7 @@ run before proposing the change; nothing will stop a regression at review time:
 
 | Gate | Floor | Frozen baseline (EmbeddingGemma) |
 | --- | --- | --- |
-| Paraphrase Top-1 | >= 80% | 85% |
+| Paraphrase Top-1 | >= 80% | 88% |
 | Paraphrase Top-5 | >= 90% | 97% |
 | Identifier Top-1 (dev and held-out) | = 100% | 100% |
 
@@ -134,8 +133,8 @@ is discarded and rebuilt (`IndexReport.notes` says so).
 
 The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
 content, the chunking constants, the source of the modules that decide what is indexed
-(`parser.py`, `indexer.py`, `embedders.py`, `model_cache.py`, `discovery.py`, `db.py`,
-`models.py`),
+(`parser.py`, `indexer.py`, `embedders.py`, `model_cache.py`, `discovery.py`, `config.py`,
+`db.py`, `models.py`),
 the embedder's revision, prompts and dimension, the size and mtime of the model files
 actually on disk, and `MARKDOWN_MEMORY_THREADS` (`scripts/eval_cache.py`). A cached index
 is never trusted on its key alone: before it is scored, its parse fingerprint - every
@@ -164,7 +163,7 @@ Work in this order:
    `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
    `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
    questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
-   Top-1 ~85%). When `index_status.coverage` is `"unknown"`, the documentation you just
+   Top-1 ~88%). When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it. When `index_status.changed_files` is non-zero,
    that many indexed documents could not be confirmed to be what was indexed - edited,

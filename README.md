@@ -12,34 +12,34 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 13,717
+       alt="One question asked of four documentation files. Reading them whole costs 13,634
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,527 tokens - the
-            one that answers is 401.">
+            vectors, fuses the two, and returns five sections totalling 2,503 tokens - the
+            one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 13,717 tokens in all:
+`docs/evaluation-protocol.md`, 13,634 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
-  401 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  638 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+  626 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   494 tok  CLAUDE.md  markdown-memory > Commands
-  397 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
+  383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,527 tokens instead of 13,717**, and the section that actually answers is 401 - a
-thirtieth of what reading the files costs. Every hit carries its full text, so a good
+**2,503 tokens instead of 13,634**, and the section that actually answers is 403 - a
+thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
 protocol agents use to call tools - and it runs entirely on your machine: parsing with
 `markdown-it-py`, embeddings with
 [EmbeddingGemma-300m](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)
-(quantized ONNX on CPU, 768 dimensions), storage in SQLite - one database per documentation
+(4-bit ONNX on CPU, 768 dimensions), storage in SQLite - one database per documentation
 root, with a keyword index and two vector indexes over it. No API key, no network after the
 first model download, nothing leaves the machine.
 
@@ -52,7 +52,7 @@ first model download, nothing leaves the machine.
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh     # macOS / Linux
   ```
-- **Roughly 1 GB of disk**: ~330 MB for the embedding model, the rest for the index.
+- **Roughly 1 GB of disk**: ~218 MB for the embedding model, the rest for the index.
 - Linux or macOS. Everything runs on CPU; there is no GPU path and no API key.
 
 ### Get it
@@ -146,30 +146,30 @@ is the tree, and the message says so.
 
 The server starts a background thread that fetches three files from
 [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)
-at a pinned revision: the quantized ONNX graph, its external weights, and the tokenizer.
-About **330 MB**, once per machine, into:
+at a pinned revision: the 4-bit ONNX graph, its external weights, and the tokenizer.
+About **218 MB**, once per machine, into:
 
 ```
 $XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx-5090578d9565/   # ~/.cache/... by default
 ```
 
 The revision is part of the folder name, so moving the pin fetches the new weights instead
-of serving the old ones under a name that claims to be the new ones. A folder from an older
-version of this package (without the suffix) is *moved* into place on the first start, not
-downloaded again.
+of serving the old ones under a name that claims to be the new ones. One revision can publish
+several graphs, though, so the folder name is not the whole answer: a `.verified` stamp that
+does not name exactly the files this version needs - a cache left behind by the int8 graph at
+this same revision, say - is rejected and the files are fetched, rather than half-trusted.
 
 The cache is shared by every project on purpose - the weights are identical and read-only,
 so copying them per project would be pure waste. Point `MARKDOWN_MEMORY_MODEL_CACHE`
 somewhere else to move it.
 
-Beside the three downloaded files, the server writes
-`onnx/model_quantized.gather_first.onnx`: the same graph with the vocabulary table gathered
-*before* it is dequantized, which is worth about 1 GB of memory per query. It is derived
-from the verified download on your machine, never fetched, and regenerated whenever it is
-missing. Vectors are bit-identical to the published graph's, so an existing index stays
-valid. It is a modification of Gemma and is covered by the
-[Gemma Terms of Use](https://ai.google.dev/gemma/terms): this repository distributes nothing
-modified, but those terms apply to anyone who shares or hosts that derived file.
+The graph is `onnx/model_q4.onnx`, published 4-bit: the 262144x768 vocabulary table is
+quantized and gathered by a single `GatherBlockQuantized`, and the projections run as
+`MatMulNBits`, so the table is never expanded to float32. Nothing is derived or rewritten on
+your machine - earlier versions ran the int8 graph and patched it here to get the same
+effect. Using Gemma is covered by the
+[Gemma Terms of Use](https://ai.google.dev/gemma/terms); this repository distributes no
+weights.
 
 ### What is checked before the model is loaded
 
@@ -187,16 +187,15 @@ guaranteed:** silent disk bit-rot, with no write at all.
 A failure to *load* verified files is not treated as damage: it means onnxruntime,
 permissions or memory, so the error is raised as it stands and nothing is downloaded.
 
-Verification and loading hold a shared `flock`; downloading, repairing and migrating hold it
+Verification and loading hold a shared `flock`; downloading and repairing hold it
 exclusively, so several servers starting at once download once between them. A model cache
 on **NFS or SMB shared between machines is not supported** - `flock` can be local-only
-there. Nor is running an old and a new version of this package side by side during the
-one-time folder migration: an older checkout that starts at that exact instant fails once,
-then re-downloads.
+there.
 
-Old revisions are never deleted. After a successful start, one log line on stderr names any
-other `embeddinggemma-300m-onnx*` folders and what they cost, and removing them is yours to
-do.
+Nothing is ever deleted to reclaim space. After a successful start, one log line on stderr
+names any other `embeddinggemma-300m-onnx*` folders and what they cost, and any file sitting
+in the current folder that this version does not use - the int8 graph an upgrade left behind
+weighs about 310 MB - and removing them is yours to do.
 
 ### Pre-download it, or install offline
 
@@ -205,16 +204,15 @@ To fetch the model deliberately rather than on the first query:
 ```bash
 uv run python -c "
 from markdown_memory.embedders import DEFAULT_EMBEDDER, create_embedder
-from markdown_memory.server import ServerConfig
+from markdown_memory.config import ServerConfig
 create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
 "
 ```
 
 For a machine with no network, copy the three files into
 `$XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx-5090578d9565/`, keeping
-`onnx/model_quantized.onnx`, `onnx/model_quantized.onnx_data` and `tokenizer.json` where
-they are. The first start hashes them once, writes the `.verified` stamp, derives the
-gather-first graph, and never touches the network.
+`onnx/model_q4.onnx`, `onnx/model_q4.onnx_data` and `tokenizer.json` where they are. The
+first start hashes them once, writes the `.verified` stamp, and never touches the network.
 
 `bge-small` is downloaded by `fastembed`, which pins no revision: if that cache is deleted,
 it can come back with different weights under the same model name. The snapshot the index
@@ -248,13 +246,13 @@ Two presets, chosen with `MARKDOWN_MEMORY_EMBEDDER`:
 
 | Preset | Dimensions | Download | Peak RAM | Indexing | Held-out Top-1 / Top-3 / Top-5 |
 | --- | --- | --- | --- | --- | --- |
-| `embeddinggemma` (default) | 768 | ~330 MB | ~0.7 GB | ~7 vectors/s | 85% / 97% / 97% |
+| `embeddinggemma` (default) | 768 | ~218 MB | ~0.65 GB | ~7 vectors/s | 88% / 97% / 97% |
 | `bge-small` | 384 | ~65 MB | ~1.1 GB | ~12 vectors/s | 68% / 82% / 88% |
 
 Accuracy is the frozen baseline in `scripts/eval_data/baseline.json`, recorded by
 `scripts/eval_retrieval.py` over a 54-section corpus and the 34 **held-out** paraphrase
 queries, which were written before any parameter was tuned. The **dev** set - the one
-tuning is allowed to look at, and deliberately harder - scores 71% / 88% / 91% with
+tuning is allowed to look at, and deliberately harder - scores 71% / 85% / 94% with
 EmbeddingGemma and 53% / 68% / 79% with bge-small. Exact identifiers - flags, environment
 variables, error strings - are 100% Top-1 with either preset, because FTS5 answers them.
 Query latency is not in the table on purpose: it swings by 2-3x with what else the machine
@@ -266,11 +264,10 @@ which cannot be compared, so every documentation root has to be indexed again.
 
 **The first index of a large documentation set is slow.** Every paragraph, list item, table
 row and code block costs one vector; a section costs none of its own, because its vector is
-pooled from its passages. A 1,700-section set is therefore on the order of 7,000 vectors at
-2.4-3.8 vectors per second. Pooling cut the reference corpus from 148 embeddings to 104 and
-a full rebuild from 49.1 s to 27.4 s, which scales that budget to roughly **15-35 minutes**
-- an order of magnitude rather than a measurement, since nobody has timed a set that size
-since the change. Budget for it, and run it once: indexing is incremental by SHA-256, so a
+pooled from its passages. Measured on a 97-file set: 1,682 sections and 8,453 passages -
+10,135 vectors - indexed in **24 minutes** at 7.1 vectors per second, peaking at 667 MB,
+after which a query over those 1,682 sections takes about 200 ms. Budget for it, and run it
+once: indexing is incremental by SHA-256, so a
 re-index that finds nothing changed takes milliseconds (8 ms for 36 sections) and only
 edited files are re-embedded. `bge-small` indexes several times faster at a real cost in
 accuracy.
@@ -285,7 +282,7 @@ the revision is pinned. See [License](#license) for what that means for you.
   The failure surfaces on the first tool call instead, as
   `Cannot load embedding model onnx-community/embeddinggemma-300m-ONNX: ...`. So "the server
   is running" is not evidence the model is there.
-- **The first `search_docs` can block for the length of a 330 MB download.** Pre-download it
+- **The first `search_docs` can block for the length of a 218 MB download.** Pre-download it
   (above) if that matters.
 - **All logging goes to stderr.** stdout carries JSON-RPC frames only, so a client that
   shows you "the output" may be showing you nothing. Set `MARKDOWN_MEMORY_LOG_LEVEL=DEBUG`

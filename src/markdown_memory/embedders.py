@@ -25,7 +25,6 @@ from markdown_memory.exceptions import (
     MarkdownMemoryError,
     ModelLoadError,
 )
-from markdown_memory.graph_patch import gather_before_dequantize
 
 if TYPE_CHECKING:
     from fastembed import TextEmbedding
@@ -85,6 +84,19 @@ _SPIN_CONFIG = ("session.intra_op.allow_spinning", "0")
 
 
 _EMBED_BATCH_SIZE = 32
+
+
+def short_weights(identity: str | None) -> str:
+    """A weights identity short enough for a message, keeping what distinguishes it.
+
+    Twelve characters of the revision used to be enough. It is not any more: one revision
+    publishes several graphs, so both sides of "the weights changed from X to Y" would
+    print the same string and the message would read as nonsense while being true.
+    """
+    if not identity:
+        return "no readable revision"
+    revision, separator, graph = identity.partition("/")
+    return f"{revision[:12]}/{graph}" if separator else revision[:12]
 
 
 class Embedder(Protocol):
@@ -259,7 +271,16 @@ class EmbeddingGemmaEmbedder:
 
     @property
     def weights_revision(self) -> str | None:
-        return model_cache.GEMMA_REVISION
+        """Which weights these vectors came from - the revision *and* the graph.
+
+        The revision alone is not enough. This repository publishes several graphs at one
+        revision, and they do not agree: swapping the int8 graph for the 4-bit one moves a
+        query's vector by about 0.03 cosine, which is far more than the distance search
+        ranks on. With the bare revision, an index built by one graph and searched by the
+        other passes this check, so the query is embedded by one model and compared
+        against another's vectors - no error, just quietly worse answers.
+        """
+        return f"{model_cache.GEMMA_REVISION}/{model_cache.GEMMA_MODEL_FILE}"
 
     def warm_up(self) -> None:
         """Download (first run only) and load the model now instead of on first use."""
@@ -347,7 +368,7 @@ class EmbeddingGemmaEmbedder:
         against the manifest moments ago: nothing is deleted and nothing is downloaded.
         What is left is an onnxruntime that cannot load this graph, a permission problem,
         or a machine out of memory, and the original exception says which. (The server
-        still retries on the next request; what it will not do is fetch 330 MB again.)
+        still retries on the next request; what it will not do is fetch 218 MB again.)
         """
         try:
             import onnxruntime
@@ -360,12 +381,8 @@ class EmbeddingGemmaEmbedder:
             options.add_session_config_entry(*_SPIN_CONFIG)
             if threads := _inference_threads():
                 options.intra_op_num_threads = threads
-            derived = model_cache._cache_path(self._model_dir, model_cache.DERIVED_GRAPH_FILE)
-            graph = derived if derived and model_cache._file_identity(derived) else None
-            if graph is None:  # refused, or not a regular file inside the cache
-                graph = self._model_dir / model_cache.GEMMA_MODEL_FILE
             session: _OrtSession = onnxruntime.InferenceSession(
-                str(graph),
+                str(self._model_dir / model_cache.GEMMA_MODEL_FILE),
                 options,
                 providers=["CPUExecutionProvider"],
             )
@@ -379,8 +396,6 @@ class EmbeddingGemmaEmbedder:
         """Bring the cache up to the manifest. Runs under the exclusive lock."""
         if model_cache._stamp_is_current(self._model_dir):
             return  # another process did the work while this one waited for the lock
-        if not self._model_dir.exists():
-            self._migrate_unversioned()
         self._model_dir.mkdir(parents=True, exist_ok=True)
         wrong = model_cache._unverified(self._model_dir)
         for name in wrong:
@@ -401,56 +416,12 @@ class EmbeddingGemmaEmbedder:
                     f"{', '.join(sorted(still_wrong))} does not match the expected size "
                     "and checksum"
                 )
-        self._derive_graph()
         model_cache._write_stamp(self._model_dir)
-
-    def _derive_graph(self) -> None:
-        """Write the gather-first graph beside the downloaded one, from verified bytes.
-
-        It shares `model_quantized.onnx_data` untouched: the initializers name that file
-        relatively, and onnxruntime resolves it against the graph's own folder.
-        """
-        derived = model_cache._cache_path(self._model_dir, model_cache.DERIVED_GRAPH_FILE)
-        if derived is None:
-            return  # the path leaves the cache; the published graph is still correct
-        if (
-            model_cache._file_identity(derived) is not None
-            and model_cache._hash_file(derived) == model_cache.DERIVED_GRAPH_SHA256
-        ):
-            return
-        model_cache._remove(derived)
-        rewritten = gather_before_dequantize(
-            (self._model_dir / model_cache.GEMMA_MODEL_FILE).read_bytes()
-        )
-        if rewritten is None:
-            return  # refused, and graph_patch has said why: run the published graph
-        temporary = derived.with_name(f"{derived.name}.{os.getpid()}")
-        model_cache._remove(temporary)
-        model_cache._write_new_file(temporary, rewritten)
-        os.replace(temporary, derived)
-        if model_cache._hash_file(derived) != model_cache.DERIVED_GRAPH_SHA256:
-            # The source was verified, so this is the rewriter and the pin disagreeing.
-            # Neither is worth refusing to start over: run the published graph instead.
-            logger.warning(
-                "The rewritten embedding graph does not match its pinned checksum; "
-                "running the published graph, which costs about 1 GB more per query"
-            )
-            derived.unlink(missing_ok=True)
-
-    def _migrate_unversioned(self) -> None:
-        """Adopt the pre-versioning folder, if its bytes are the pinned revision's."""
-        legacy = model_cache.model_cache_root(self._cache_dir) / model_cache._GEMMA_DIR_PREFIX
-        if not legacy.is_dir() or model_cache._unverified(legacy):
-            return  # nothing there, or bytes that have to be fetched anyway
-        # One rename, inside one directory: nobody sees half the files moved. Descriptors
-        # and mappings another process already holds keep reading the same inodes.
-        os.replace(legacy, self._model_dir)
-        logger.info("Moved the model cache %s to %s", legacy, self._model_dir)
 
     def _fetch(self) -> None:
         from huggingface_hub import snapshot_download
 
-        logger.info("Downloading %s (~330 MB, first run only)", model_cache.GEMMA_REPOSITORY)
+        logger.info("Downloading %s (~218 MB, first run only)", model_cache.GEMMA_REPOSITORY)
         snapshot_download(
             model_cache.GEMMA_REPOSITORY,
             revision=model_cache.GEMMA_REVISION,
@@ -459,10 +430,14 @@ class EmbeddingGemmaEmbedder:
         )
 
     def _report_other_versions(self) -> None:
-        """Say what other revisions cost, once, and never delete any of them.
+        """Say what weights this version does not use cost, once, and delete none of them.
 
         Weights another checkout is using, or one pinned deliberately, are not this
-        process's to remove; saying how much room they take is.
+        process's to remove; saying how much room they take is. Two kinds qualify: a folder
+        for another revision, and - because one revision publishes several graphs - a file
+        sitting in *this* folder that the manifest does not name. The second is what an
+        upgrade from the int8 graph leaves behind, and looking only at other folders would
+        miss all 310 MB of it.
         """
         others: dict[Path, int] = {}
         for path in sorted(
@@ -474,10 +449,17 @@ class EmbeddingGemmaEmbedder:
                 others[path] = sum(
                     entry.stat().st_size for entry in path.rglob("*") if entry.is_file()
                 )
+        with contextlib.suppress(OSError):
+            wanted = {self._model_dir / name for name in model_cache.GEMMA_FILES}
+            for entry in sorted(self._model_dir.rglob("*")):
+                stamp = entry.name.startswith(model_cache._VERIFIED_STAMP)
+                if entry.is_file() and entry not in wanted and not stamp:
+                    others[entry] = entry.stat().st_size
         if others:
             logger.info(
-                "The model cache also holds %d older copy/copies of %s (%.0f MB in total): "
-                "%s. Nothing is deleted automatically; remove them to reclaim the space.",
+                "The model cache also holds %d copy/copies of %s this version does not use "
+                "(%.0f MB in total): %s. Nothing is deleted automatically; remove them to "
+                "reclaim the space.",
                 len(others),
                 model_cache.GEMMA_REPOSITORY,
                 sum(others.values()) / 1e6,

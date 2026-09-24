@@ -189,7 +189,7 @@ def _model_identity(model_cache_dir: Path | None, embedder: str) -> str:
 
     The constants say which revision was *asked for*; this says which bytes are there.
     A re-download, a hand-edited tokenizer or a half-written file all change the vectors
-    while every constant stays put. Size and mtime, not content: the weights are ~330 MB
+    while every constant stays put. Size and mtime, not content: the weights are ~218 MB
     and hashing them on every run would cost more than the check is worth, while the
     vector probes catch a change that somehow survives both.
 

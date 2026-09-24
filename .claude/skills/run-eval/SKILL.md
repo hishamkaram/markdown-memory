@@ -17,7 +17,7 @@ uv run python scripts/eval_retrieval.py --show-misses
 ```
 
 Takes about a minute with the default embedder (EmbeddingGemma-300m; the first run also
-downloads ~330 MB). The script always scores the default embedder, whatever
+downloads ~218 MB). The script always scores the default embedder, whatever
 `MARKDOWN_MEMORY_EMBEDDER` is set to, so the gate cannot be switched off by the
 environment. `--embedder bge-small` scores the light preset instead: that run is
 informational, prints `GATES NOT CHECKED`, and must never be reported as "gates passed".
@@ -31,7 +31,7 @@ means the gates passed - an exit code of 0 alone does not.
 
 | Gate (held-out set) | Floor | Frozen baseline |
 | --- | --- | --- |
-| Paraphrase Top-1 | >= 80% | 85% |
+| Paraphrase Top-1 | >= 80% | 88% |
 | Paraphrase Top-5 | >= 90% | 97% |
 | Identifier Top-1 (dev and held-out) | = 100% | 100% |
 
