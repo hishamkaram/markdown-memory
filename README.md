@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 13,634
+       alt="One question asked of four documentation files. Reading them whole costs 13,800
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,503 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,597 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 13,634 tokens in all:
+`docs/evaluation-protocol.md`, 13,800 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -27,11 +27,11 @@ search_docs("where does the embedding model get downloaded")
   403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
   626 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
-  494 tok  CLAUDE.md  markdown-memory > Commands
+  588 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,503 tokens instead of 13,634**, and the section that actually answers is 403 - a
+**2,597 tokens instead of 13,800**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -47,13 +47,17 @@ first model download, nothing leaves the machine.
 
 ### Prerequisites
 
-- **Python 3.11 or newer.** The project develops on 3.12 and CI runs 3.11 through 3.14.
+- **Python 3.11 or newer.** The project develops on 3.12 and CI runs 3.11 through 3.14 on
+  x86-64 Linux.
 - **[uv](https://docs.astral.sh/uv/)**, which manages the interpreter and the dependencies:
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh     # macOS / Linux
   ```
 - **Roughly 1 GB of disk**: ~218 MB for the embedding model, the rest for the index.
-- Linux or macOS. Everything runs on CPU; there is no GPU path and no API key.
+- Linux or macOS, x86-64 or arm64. Everything runs on CPU; there is no GPU path and no API
+  key. CI covers arm64 Linux on every change and Apple Silicon on `main`, because the 4-bit
+  graph picks its `MatMulNBits` kernel from what the CPU offers rather than from the file -
+  see [What downloads, when, and where](#what-downloads-when-and-where).
 
 ### Get it
 

@@ -33,8 +33,12 @@ git config core.hooksPath .githooks             # once per clone: run that gate 
 `.githooks/pre-push` runs `scripts/check.sh` before anything leaves the machine, and
 `.github/workflows/gate.yml` runs the same steps on every pull request and on pushes to
 `main`,
-across Python 3.11 to 3.14, with the ONNX model restored from a cache keyed on its pinned
-revision. The hook is the one to satisfy - it is what you can run - but `git push
+across Python 3.11 to 3.14 on x86-64 Linux, plus one leg on arm64 Linux and - on `main`
+and `workflow_dispatch` only, at roughly ten times the per-minute rate - one on Apple
+Silicon: the 4-bit graph asks for the int8 `MatMulNBits` kernel and gets it only where the
+CPU has one, so architecture is a thing the gate has to cover rather than assume. The ONNX model is restored from a cache
+keyed on the pinned revision *and* the graph file, since one revision publishes several.
+The hook is the one to satisfy - it is what you can run - but `git push
 --no-verify` skips it, which is why CI also exists. `tests/test_agent_docs.py` holds the
 two step lists in the same order. The retrieval gate stays out of CI: it holds an exclusive
 lock and asserts on latency, which a shared runner cannot hold still.

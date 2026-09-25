@@ -7,6 +7,7 @@ day is killed by memory long before it is killed by being slightly wrong.
 
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from markdown_memory.config import ServerConfig
-from markdown_memory.model_cache import GEMMA_MODEL_FILE, gemma_model_dir
+from markdown_memory.embedders import GEMMA_QUERY_PROMPT
+from markdown_memory.model_cache import GEMMA_MODEL_FILE, GEMMA_REVISION, gemma_model_dir
 
 #: One 512-token run measured 448-449 MB across three runs on the reference machine. The
 #: ceiling is that with room for an onnxruntime release to move it, and far below the
@@ -147,3 +149,77 @@ def test_the_graph_an_upgrade_left_behind_is_reported_not_hidden(
     assert model_cache._VERIFIED_STAMP not in caplog.text, "the stamp is not wasted space"
     for name in model_cache.GEMMA_FILES:
         assert str(model_dir / name) not in caplog.text, f"{name} is in use, not an orphan"
+
+
+#: How far a vector may sit from the committed reference and still be the same compute path.
+#:
+#: Both ends measured by `scripts/compare_compute_paths.py` on the reference machine
+#: (x86_64, onnxruntime 1.30.0). Running the same graph twice, and again at a different
+#: thread count, moves a vector by **~1e-7**, with every coordinate bit-identical. Forcing
+#: the fp32 compute path moves it by **2.1e-4 to 6.1e-4**. This ceiling sits four times
+#: below the smaller of those and several hundred times above the noise.
+_COMPUTE_PATH_TOLERANCE = 5e-5
+
+#: Past here it is not a compute path, it is a different model. Swapping the int8 graph for
+#: the 4-bit one at the same revision moves a query vector by **~0.03** cosine (#20), which
+#: is what this has to stay well under while leaving the whole fp32-fallback band below it.
+#: Between the two the test skips rather than passes, and CI fails on that skip (the gate
+#: runs no CPU that should land there) so the band cannot go quietly green.
+_DIFFERENT_MODEL = 1e-3
+
+_REFERENCE = Path(__file__).parent / "fixtures" / "gemma_q4_reference.json"
+
+
+@pytest.mark.embedding
+def test_the_real_model_returns_the_vector_it_was_baselined_on(real_embedder: object) -> None:
+    """One fixed string, one committed vector: the only test that says the numbers agree.
+
+    Everything else about this model is checked by proxy - that it loads, that it returns
+    768 dimensions, that the manifest matches. None of that notices arithmetic. onnxruntime
+    picks its `MatMulNBits` kernel from what the CPU offers, so the same graph can compute
+    differently on another machine with no error and no log, and the provenance key names
+    the revision and the graph but not the compute path.
+
+    Cosine rather than elementwise: it is the unit search ranks in, and an `allclose` over
+    768 coordinates either flakes on one near-zero coordinate or admits exactly the coherent
+    shift a compute path produces.
+    """
+    import json
+    import math
+
+    reference = json.loads(_REFERENCE.read_text(encoding="utf-8"))
+    # The static identity only. A runtime component - were the provenance key ever widened
+    # to name the compute path - would differ on precisely the hosts this test is here to
+    # measure, and would fail here before reaching the comparison that carries the finding.
+    assert reference["revision"] == GEMMA_REVISION, "regenerate with --update-reference"
+    assert reference["graph"] == GEMMA_MODEL_FILE, "regenerate with --update-reference"
+    assert reference["prompt"] == GEMMA_QUERY_PROMPT, "the prompt moved; re-baseline it"
+
+    actual = real_embedder.embed_query(reference["text"])  # type: ignore[attr-defined]
+    assert len(actual) == len(reference["vector"])
+    # Normalisation is what makes the dot product below a cosine, and cosine cannot see a
+    # vector that stopped being a unit vector.
+    assert abs(math.sqrt(sum(value * value for value in actual)) - 1.0) < 1e-5
+
+    distance = 1.0 - sum(a * b for a, b in zip(reference["vector"], actual, strict=True))
+    where = f"{platform.machine()} / {platform.system()}, reference from {reference['produced_on']}"
+    # Three outcomes, not two, because "different numbers" and "different model" are not
+    # the same finding. onnxruntime asks the CPU for the int8 `MatMulNBits` kernel and
+    # quietly computes in fp32 where there is none - measured at 2.1e-4 to 6.1e-4 here,
+    # and measured *not* to move a top-1 result on any of the 86 labelled eval queries.
+    # Failing a machine for that would be failing it for working correctly; saying nothing
+    # would waste the one place that can notice.
+    assert distance < _DIFFERENT_MODEL, (
+        f"this vector is {distance:.3e} from the reference ({where}), past the "
+        f"{_DIFFERENT_MODEL:.0e} that separates a compute path from a different model. "
+        "Either the pin moved without the fixture, or these weights are not ours."
+    )
+    if distance >= _COMPUTE_PATH_TOLERANCE:
+        pytest.skip(
+            f"this CPU takes a different MatMulNBits path: {distance:.3e} from the reference "
+            f"({where}), inside the band measured for the fp32 fallback. What that costs "
+            "retrieval has NOT been measured on this host - on the reference machine it left the "
+            "labelled section in the top five on both splits, moving the fifth result on one "
+            "query in 44. "
+            "Run scripts/compare_compute_paths.py here before relying on the numbers."
+        )
