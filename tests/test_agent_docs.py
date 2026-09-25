@@ -34,11 +34,35 @@ GATE_STEPS = (
     "uv run pytest -q",
     "uv run python scripts/live_test.py",
 )
+# Every runner the gate uses, and what it actually is. A label says neither: `macos-latest`
+# has been an Intel machine and is an Apple Silicon one now, and `platform.machine()` spells
+# the same architecture `aarch64` on Linux and `arm64` on Darwin. Written down once, and the
+# workflow, the classifiers, the README and the job's own assertion are all held to it.
+GATE_RUNNERS = {
+    "ubuntu-latest": ("POSIX :: Linux", "x86_64"),
+    "ubuntu-24.04-arm": ("POSIX :: Linux", "aarch64"),
+    "macos-latest": ("MacOS", "arm64"),
+}
 NAVIGATION_BLOCK = re.compile(
     r"<!-- markdown-memory:navigation-rules:start -->.*?"
     r"<!-- markdown-memory:navigation-rules:end -->",
     re.DOTALL,
 )
+
+
+def _gate_job() -> str:
+    """Just the `gate` job's own text.
+
+    The runner checks have to be scoped to it. Read over the whole file, the `package`
+    job's plain `runs-on: ubuntu-latest` stands in for the gate's matrix dimension, and
+    swapping the two jobs' runners leaves every label still present and the check green.
+    """
+    workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+    jobs = workflow[workflow.index("\njobs:\n") :]
+    blocks = re.split(r"^  (?=\w[\w-]*:$)", jobs, flags=re.M)
+    gate = [block for block in blocks if block.startswith("gate:")]
+    assert len(gate) == 1, f"expected exactly one `gate` job, found {len(gate)}"
+    return gate[0]
 
 
 def load_script(name: str) -> ModuleType:
@@ -220,7 +244,7 @@ class TestDocsMatchTheCode:
         assert positions == sorted(positions), "CI runs the gate's steps out of order"
 
     def test_ci_loads_the_model_before_the_tests_that_would_skip_without_it(self) -> None:
-        """A cache miss must fail the job, not quietly skip fifteen behaviours.
+        """A cache miss must fail the job, not quietly skip eighteen behaviours.
 
         The `embedding` fixture turns a model that will not load into `pytest.skip`, so
         without this step a broken cache leaves CI green over everything the real model
@@ -260,6 +284,130 @@ class TestDocsMatchTheCode:
         assert matrix is not None, "the workflow has no python matrix"
         tested = set(re.findall(r'"([0-9.]+)"', matrix.group(1)))
         assert claimed == tested, f"classifiers claim {sorted(claimed)}, CI runs {sorted(tested)}"
+        # The architecture legs arrive through `include`, which pins its own interpreter
+        # outside that list. A version dropped from the classifiers while an include entry
+        # still names it would leave one leg testing something nothing claims.
+        pinned = set(re.findall(r'"python":"([0-9.]+)"', workflow))
+        assert pinned <= claimed, f"the workflow pins {sorted(pinned - claimed)}, unclaimed"
+
+    def test_ci_fails_when_the_golden_vector_skips(self) -> None:
+        """The skip is the quiet failure mode, so something has to be loud about it.
+
+        On a CPU that takes onnxruntime's other `MatMulNBits` kernel the golden vector
+        skips rather than fails, because that machine is computing correctly. No runner in
+        the gate is such a machine - so a skip there means the numbers moved, and deleting
+        the step that notices would restore exactly the silence it was added to remove.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        nodeid = (
+            "tests/test_embedders.py::test_the_real_model_returns_the_vector_it_was_baselined_on"
+        )
+        # Read out of `env`, not merely found somewhere in the file. Pointing that entry at
+        # another passing test, while leaving this nodeid in a comment, was a false green
+        # until the value itself was compared.
+        declared = re.search(r"GOLDEN_VECTOR_TEST: >-\n\s+(\S+)", workflow)
+        assert declared is not None, "the workflow no longer names the golden test in `env`"
+        assert declared.group(1) == nodeid, (
+            f"GOLDEN_VECTOR_TEST is {declared.group(1)!r}, expected {nodeid!r}"
+        )
+        # And the step has to run *that* name, rather than one written out beside it.
+        assert 'pytest "${{ env.GOLDEN_VECTOR_TEST }}"' in workflow, (
+            "the golden-vector step does not run the test `env` declares"
+        )
+        assert "--junitxml=golden.xml" in workflow, (
+            "the golden vector's result is read from prose again, not from its JUnit record"
+        )
+        assert "'skipped': 0" in workflow, "the workflow no longer fails when it skips"
+        # Collection matching nothing must not read as success either.
+        assert "'tests': 1" in workflow, "the workflow no longer requires the test to have run"
+
+    def test_ci_runs_on_exactly_the_runners_this_table_records(self) -> None:
+        """A runner nobody wrote down is a runner nothing else in this file can check.
+
+        Three places name one, and all three are read: the matrix dimension, the `include`
+        entries that add an architecture, and a plain `runs-on` on a job with no matrix.
+        Reading only some of them was this test's first bug - the base dimension was
+        missed, and the `package` job's identical label stood in for it, so swapping the
+        whole gate onto another operating system would have gone through unnoticed.
+        """
+        workflow = _gate_job()
+        dimension = set(re.findall(r"^\s+runner: \[(.+?)\]$", workflow, re.M))
+        assert dimension, "the gate has no `runner` matrix dimension"
+        base = {label.strip().strip('"') for line in dimension for label in line.split(",")}
+        included = set(re.findall(r'"runner":"([^"]+)"', workflow))
+        assert included, "no architecture legs arrive through `include`"
+        plain = {
+            label
+            for label in re.findall(r"runs-on: (\S+)", workflow)
+            if not label.startswith("${{")
+        }
+        used = base | included | plain
+        assert used == set(GATE_RUNNERS), (
+            f"the workflow runs on {sorted(used)}, the table records {sorted(GATE_RUNNERS)}"
+        )
+        # Each source has to contribute its own share, or the union hides a swap. Moving
+        # the base dimension to the arm runner leaves the union identical - the `package`
+        # job still spells `ubuntu-latest` - while quietly moving all four interpreters
+        # off x86. The Python matrix belongs on the architecture everything is measured on.
+        assert base == {
+            name for name, (_, machine) in GATE_RUNNERS.items() if machine == "x86_64"
+        }, f"the Python matrix runs on {sorted(base)}, which is not the x86_64 runner"
+        legs = set(GATE_RUNNERS) - base
+        assert included == legs, (
+            f"the architecture legs are {sorted(included)}, expected {sorted(legs)}"
+        )
+        # Naming the runners is half of it: the gate has to be *wired* to the dimension.
+        # Pinning its `runs-on` back to a literal leaves every label above still present
+        # and every architecture leg silently running on the same machine as the rest.
+        assert "runs-on: ${{ matrix.runner }}" in workflow, (
+            "the gate job no longer takes its runner from the matrix"
+        )
+
+    def test_ci_runs_every_operating_system_the_metadata_claims(self) -> None:
+        """The twin of the Python test, for the promise no runner used to keep.
+
+        `Operating System :: MacOS` sat in the classifiers while CI was Linux-only: a
+        platform claimed and never once exercised, which is the shape of a broken install
+        found by its first user.
+        """
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        claimed = {
+            line.split(" :: ", 1)[1]
+            for line in metadata["project"]["classifiers"]
+            if line.startswith("Operating System :: ")
+        }
+        tested = {system for system, _ in GATE_RUNNERS.values()}
+        assert claimed == tested, f"classifiers claim {sorted(claimed)}, CI runs {sorted(tested)}"
+
+    def test_the_readme_names_every_architecture_ci_covers(self) -> None:
+        """Architecture has no trove classifier, so the prose is the only thing that claims it.
+
+        It is worth claiming: the 4-bit graph picks its `MatMulNBits` kernel from what the
+        CPU offers, so "runs on Linux" is a weaker statement than it looks.
+        """
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for architecture in {machine for _, machine in GATE_RUNNERS.values()}:
+            spelled = {"x86_64": "x86-64", "aarch64": "arm64", "arm64": "arm64"}[architecture]
+            assert spelled in readme, f"the README does not mention {spelled}"
+
+    def test_the_job_asserts_the_same_architectures_this_table_records(self) -> None:
+        """The workflow carries the table too, because only the job can see the machine.
+
+        Both halves are checked. A mapping the job merely prints proves nothing, so the
+        comparison that turns it into a failure is pinned as well - deleting that one line
+        would otherwise leave a green job happily reporting the wrong architecture.
+        """
+        workflow = (ROOT / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        asserted = dict(re.findall(r"'([a-z0-9.-]+)': '(x86_64|aarch64|arm64)',", workflow))
+        expected = {runner: machine for runner, (_, machine) in GATE_RUNNERS.items()}
+        assert asserted == expected, f"the job checks {asserted}, the table says {expected}"
+        assert "assert actual == expected" in workflow, (
+            "the job reads platform.machine() but no longer fails when it disagrees"
+        )
+        # And that what it compares is the machine, not a constant that always agrees.
+        assert "actual = platform.machine()" in workflow, (
+            "the job asserts on something other than platform.machine()"
+        )
 
 
 class TestSkills:

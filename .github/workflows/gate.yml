@@ -13,6 +13,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # So the macOS leg, which is off the pull-request path below, can be asked for by hand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,15 +28,39 @@ env:
   # assuming a path. Setting it explicitly is what makes the cache below the directory
   # the run actually uses.
   MARKDOWN_MEMORY_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+  # The one test that says this machine's arithmetic matches the committed vector.
+  # tests/test_agent_docs.py holds this nodeid too, so neither can be dropped quietly.
+  GOLDEN_VECTOR_TEST: >-
+    tests/test_embedders.py::test_the_real_model_returns_the_vector_it_was_baselined_on
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        # Which interpreter, on the architecture everything else is measured on. Kept a
+        # real matrix dimension, with `runner` beside it, because the architecture legs
+        # below arrive through `include`: an include entry that contradicts an existing
+        # combination becomes a *new* one rather than editing the four here.
         python: ["3.11", "3.12", "3.13", "3.14"]
+        runner: ["ubuntu-latest"]
+        # Which CPU. The 4-bit graph asks for the int8 `MatMulNBits` kernel and gets it
+        # only where MLAS has one - on arm64 that needs FEAT_DotProd, and without it
+        # onnxruntime silently computes in fp32 instead. One interpreter is enough for
+        # that question; the kernel is chosen by the CPU, not by Python.
+        #
+        # macOS is Apple Silicon too, so it buys Darwin (no /proc, its own libm, its own
+        # wheels) rather than a second architecture - at roughly ten times the per-minute
+        # rate. Worth having on `main`, not on every branch push, so the list is built by
+        # hand: `matrix` is not in scope for a job-level `if`, and a second job would be
+        # these same steps written twice and free to drift from them.
+        include: >-
+          ${{ github.event_name == 'pull_request'
+          && fromJSON('[{"python":"3.13","runner":"ubuntu-24.04-arm"}]')
+          || fromJSON('[{"python":"3.13","runner":"ubuntu-24.04-arm"},{"python":"3.13","runner":"macos-latest"}]')
+          }}
     steps:
       - uses: actions/checkout@v7
 
@@ -54,6 +80,39 @@ jobs:
           uv run python -c "import sys; print(sys.version)"
           uv run python -c "import sys; assert sys.version_info[:2] == tuple(int(p) for p in '${{ matrix.python }}'.split('.')), sys.version"
 
+      # A runner label is a promise about a machine, and `macos-latest` has been both an
+      # Intel and an Apple Silicon one. The whole reason these legs exist is the CPU, so
+      # the CPU is what gets asserted - a label-only check would walk straight through the
+      # day GitHub repoints one. tests/test_agent_docs.py holds the same table.
+      - name: Confirm the architecture this leg claims to cover
+        run: |
+          uv run python -c "
+          import platform
+          expected = {
+              'ubuntu-latest': 'x86_64',
+              'ubuntu-24.04-arm': 'aarch64',
+              'macos-latest': 'arm64',
+          }['${{ matrix.runner }}']
+          actual = platform.machine()
+          print(f'${{ matrix.runner }} is {actual} ({platform.system()})')
+          assert actual == expected, f'expected {expected}, got {actual}'
+          "
+          # Which CPU, not just which architecture, and which of the instructions that
+          # decide the kernel. onnxruntime picks its MatMulNBits implementation from what
+          # the host offers, and a hosted pool is a mix of chips - so the golden distance
+          # printed later in this job is only attributable with the chip beside it.
+          # `|| true`, because this is evidence for a human, never a gate.
+          {
+            lscpu 2>/dev/null | grep -Ei '^model name' \
+              || sysctl -n machdep.cpu.brand_string 2>/dev/null \
+              || echo 'CPU model unavailable'
+            echo -n 'kernel-selecting instructions: '
+            { lscpu 2>/dev/null || true; } \
+              | grep -Eoiw 'avx512_vnni|avx_vnni|avx512f|avx2|asimddp|i8mm|sve' \
+              | sort -u | tr '\n' ' '
+            echo
+          } || true
+
       # Apache-2.0 asks that the licence travel with the copy: this fails the job when
       # a vendored licence or NOTICE goes missing, is edited, or gains a stray file.
       - run: uv run python scripts/fetch_eval_corpus.py --check
@@ -65,13 +124,21 @@ jobs:
       # A warm cache means no download at all; it does cost one verification pass (under
       # a second), because a restore recreates the files with new inodes and timestamps,
       # which is exactly the change the stamp is there to notice.
+      #
+      # The key is deliberately not per-architecture: an ONNX graph and a tokenizer are
+      # the same bytes everywhere, and which kernel runs them is decided when the session
+      # is built, not baked into the file. Actions still stores more than one entry, because
+      # a cache's version covers its paths and this path is absolute under a workspace that
+      # differs by operating system - so Linux and macOS each keep their own copy under the
+      # one key. And on a cold cache every leg can miss before any of them saves, so the
+      # first run after a key change downloads once per leg.
       - uses: actions/cache@v6
         with:
           path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
           key: mdmem-model-5090578d9565-model_q4-v3
 
-      # The 15 tests that need the model SKIP rather than fail when it cannot load, so a
-      # cache miss would leave the job green over fifteen untested behaviours. Loading the
+      # The 18 tests that need the model SKIP rather than fail when it cannot load, so a
+      # cache miss would leave the job green over eighteen untested behaviours. Loading the
       # model here turns that silence into a failure - and counting skips would not, since
       # any unrelated skip would trip it and a file-existence check is weaker than a load.
       - name: Load the embedding model before anything can skip over it
@@ -81,6 +148,26 @@ jobs:
           from markdown_memory.config import ServerConfig
           create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
           print('embedding model loaded')
+          "
+
+      # The golden vector skips - rather than fails - on a CPU whose MatMulNBits path is
+      # not one of the recorded ones, because such a machine may well be computing
+      # correctly and nothing here has measured what its numbers cost retrieval. Every
+      # runner below is recorded, so a skip means a host moved, or onnxruntime did, and a
+      # skip nobody reads is how it would get to stay moved. `-s` so the distance reaches
+      # the log on the legs that pass too: these four values are the whole dataset, and
+      # they only stay a dataset if every run adds to it. Asserted from the JUnit record
+      # of that one test rather than from pytest's printed summary: a reason string is
+      # prose, and prose gets reworded.
+      - name: The golden vector ran, rather than skipping
+        run: |
+          uv run pytest "${{ env.GOLDEN_VECTOR_TEST }}" -q -s --junitxml=golden.xml
+          uv run python -c "
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('golden.xml').getroot().find('testsuite')
+          counts = {key: int(suite.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')}
+          print(counts)
+          assert counts == {'tests': 1, 'skipped': 0, 'failures': 0, 'errors': 0}, counts
           "
 
       - run: uv run ruff check .

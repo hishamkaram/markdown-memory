@@ -1674,7 +1674,14 @@ class TestOnlyAWholeWalkVouchesForATree:
         venv.mkdir(parents=True)
         (root / "good.md").write_text("# G\n\nbody\n")
         raw = os.path.join(os.fsdecode(bytes(venv)), os.fsdecode(b"caf\xe9.md"))
-        with open(os.fsencode(raw), "wb") as handle:
+        try:
+            descriptor = os.open(os.fsencode(raw), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except OSError as error:
+            # APFS enforces UTF-8 in a filename and answers EILSEQ, and it is not alone.
+            # The behaviour under test is about a name the filesystem allowed and Python
+            # could not decode, so where no such name can exist there is nothing to stage.
+            pytest.skip(f"this filesystem will not hold a name that is not UTF-8: {error}")
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(b"# C\n\nbody\n")
         os.chmod(os.fsencode(raw), 0o000)
         try:
