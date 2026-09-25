@@ -29,14 +29,28 @@ held out) - a proxy for the Recall@5 that `docs/evaluation-protocol.md` makes pr
 that metric itself. One query in 44 saw a different fifth section, and it was not the
 labelled one.
 
-Which is the reason the provenance key still names the revision and the graph and not the
-compute path. Note what that claim is: no observed retrieval loss, on this frozen corpus,
-on this machine, through vector ranking alone. It is not a proof that no CPU anywhere can
-do worse, and it is not production either - the server fuses these ranks with BM25, which
-should damp a disagreement, but it also embeds passages and takes a max over them, which
-is a different calculation and not one this bounds.
+Note what that claim is: no observed retrieval loss, on this frozen corpus, on this
+machine, through vector ranking alone. It is not a proof that no CPU anywhere can do worse,
+and it is not production either - the server fuses these ranks with BM25, which should damp
+a disagreement, but it also embeds passages and takes a max over them, which is a different
+calculation and not one this bounds.
 
-Re-run it rather than trusting those numbers on other hardware - and note the script now
+**And the gate has since shown that bound is not the whole range.** Running the golden
+vector on four kinds of host gave four values, each repeating to every printed digit rather
+than drifting, because the kernel is chosen by the instruction set and not by luck:
+
+    0.0        x86_64 without VNNI (AMD EPYC 7763 / 9V74 as avx2) - the reference
+    2.414e-4   x86_64 with VNNI (Intel Xeon 6973P-C; AMD EPYC 9V74) - identical on both
+    1.626e-3   aarch64 with dot product (Neoverse-N2)
+    1.645e-3   arm64 Darwin (Apple M2 Pro)
+
+So the effect this script sizes by forcing fp32 - 2.1e-4 to 6.1e-4 - is about the size of
+the VNNI difference and roughly seven times smaller than the arm64 one. **Nothing has
+measured what 1.6e-3 does to rank**, because the churn above needs both sessions on one
+machine and no arm64 host here can produce the x86 side. That gap, not the numbers above,
+is what decides whether the provenance key should grow to name the compute path.
+
+Re-run it rather than trusting those numbers on other hardware - and note the script
 refuses to pretend: if this host has no int8 kernel to lose, both sessions compute the same
 way and it says so instead of reporting agreement.
 
@@ -444,9 +458,12 @@ def _write_reference(session: Session) -> None:
         json.dumps(
             {
                 "_about": (
-                    "What the pinned graph returns for one fixed string. Regenerate with "
-                    "`uv run python scripts/compare_compute_paths.py --update-reference` "
-                    "when the revision or the graph moves - never to quiet a failing test."
+                    "What the pinned graph returns for one fixed string, and the distances "
+                    "the other compute paths return for it. Regenerate with `uv run python "
+                    "scripts/compare_compute_paths.py --update-reference` when the revision "
+                    "or the graph moves - never to quiet a failing test. Regenerating resets "
+                    "`compute_paths` to the host that ran it: every distance is measured "
+                    "against `vector`, so a new vector retires all of them."
                 ),
                 "revision": GEMMA_REVISION,
                 "graph": GEMMA_MODEL_FILE,
@@ -457,6 +474,16 @@ def _write_reference(session: Session) -> None:
                     "system": platform.system(),
                     "onnxruntime": onnxruntime.__version__,
                 },
+                # Reset, not preserved: the recorded distances are all relative to
+                # `vector`, so writing a new one makes every other entry a number about a
+                # vector that no longer exists. The gate re-measures them on its own hosts.
+                "compute_paths": [
+                    {
+                        "distance": 0.0,
+                        "cpu": f"{platform.machine()} ({platform.processor() or 'unknown'})",
+                        "note": "the path this vector was produced on",
+                    }
+                ],
                 "vector": vector,
             },
             indent=1,
@@ -465,6 +492,7 @@ def _write_reference(session: Session) -> None:
         encoding="utf-8",
     )
     print(f"wrote {REFERENCE.relative_to(ROOT)} ({GEMMA_DIMENSION} dimensions)")
+    print("compute_paths now holds this host only; the other paths have to be re-measured")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

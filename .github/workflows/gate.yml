@@ -150,12 +150,15 @@ jobs:
           print('embedding model loaded')
           "
 
-      # The golden vector skips - rather than fails - on a CPU that takes onnxruntime's
-      # other MatMulNBits kernel, because that machine is computing correctly and the
-      # measurement found it costs no labelled answer. No runner here is such a machine, so a
-      # skip means something moved, and a skip nobody reads is how it would get to stay
-      # moved. Asserted from the JUnit record of that one test rather than from pytest's
-      # printed summary: a reason string is prose, and prose gets reworded.
+      # The golden vector skips - rather than fails - on a CPU whose MatMulNBits path is
+      # not one of the recorded ones, because such a machine may well be computing
+      # correctly and nothing here has measured what its numbers cost retrieval. Every
+      # runner below is recorded, so a skip means a host moved, or onnxruntime did, and a
+      # skip nobody reads is how it would get to stay moved. `-s` so the distance reaches
+      # the log on the legs that pass too: these four values are the whole dataset, and
+      # they only stay a dataset if every run adds to it. Asserted from the JUnit record
+      # of that one test rather than from pytest's printed summary: a reason string is
+      # prose, and prose gets reworded.
       - name: The golden vector ran, rather than skipping
         run: |
           uv run pytest "${{ env.GOLDEN_VECTOR_TEST }}" -q -s --junitxml=golden.xml

@@ -1,5 +1,5 @@
 {
- "_about": "What the pinned graph returns for one fixed string. Regenerate with `uv run python scripts/compare_compute_paths.py --update-reference` when the revision or the graph moves - never to quiet a failing test.",
+ "_about": "What the pinned graph returns for one fixed string, and the distances the other compute paths return for it. Regenerate with `uv run python scripts/compare_compute_paths.py --update-reference` when the revision or the graph moves - never to quiet a failing test. Regenerating resets `compute_paths` to the host that ran it: every distance is measured against `vector`, so a new vector retires all of them.",
  "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
  "graph": "onnx/model_q4.onnx",
  "prompt": "task: search result | query: ",
@@ -9,6 +9,28 @@
   "system": "Linux",
   "onnxruntime": "1.30.0"
  },
+ "compute_paths": [
+  {
+   "distance": 0.0,
+   "cpu": "x86_64 without VNNI (AMD EPYC 7763 / 9V74 reporting avx2)",
+   "note": "the path the vector above was produced on; measured -1.263211e-07"
+  },
+  {
+   "distance": 0.0002414317,
+   "cpu": "x86_64 with VNNI (Intel Xeon 6973P-C avx512_vnni avx_vnni; AMD EPYC 9V74 avx512_vnni avx512f)",
+   "note": "identical to every printed digit on both chips, on Python 3.11 and 3.12"
+  },
+  {
+   "distance": 0.00162599,
+   "cpu": "aarch64 with dot product (Neoverse-N2, asimddp i8mm sve)",
+   "note": "1.9e-5 from the Apple Silicon entry below - the two arm64 hosts are nearer each other than the match radius, so this check cannot tell them apart"
+  },
+  {
+   "distance": 0.001644847,
+   "cpu": "arm64 Darwin (Apple M2 Pro, virtualised)",
+   "note": "the largest distance a healthy host has produced; churn unmeasured here"
+  }
+ ],
  "vector": [
   -0.081611268222332,
   0.026266684755682945,

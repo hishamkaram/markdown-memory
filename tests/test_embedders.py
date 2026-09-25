@@ -151,21 +151,22 @@ def test_the_graph_an_upgrade_left_behind_is_reported_not_hidden(
         assert str(model_dir / name) not in caplog.text, f"{name} is in use, not an orphan"
 
 
-#: How far a vector may sit from the committed reference and still be the same compute path.
+#: How near a recorded compute path a vector must sit to count as that same path.
 #:
-#: Both ends measured by `scripts/compare_compute_paths.py` on the reference machine
-#: (x86_64, onnxruntime 1.30.0). Running the same graph twice, and again at a different
-#: thread count, moves a vector by **~1e-7**, with every coordinate bit-identical. Forcing
-#: the fp32 compute path moves it by **2.1e-4 to 6.1e-4**. This ceiling sits four times
-#: below the smaller of those and several hundred times above the noise.
+#: The distance a host produces is a property of the instruction set, not a drift: across
+#: the gate's runners each value below repeated to every printed digit, on different chips
+#: and different interpreters. So the check is "which recorded path is this", within a
+#: radius set by the only real noise there is - running the same graph twice, and again at
+#: a different thread count, moves a vector by **~1e-7** with every coordinate identical
+#: (`scripts/compare_compute_paths.py`). 5e-5 is several hundred times that, and four times
+#: below the nearest gap between two recorded paths.
 _COMPUTE_PATH_TOLERANCE = 5e-5
 
-#: Past here it is not a compute path, it is a different model. Swapping the int8 graph for
-#: the 4-bit one at the same revision moves a query vector by **~0.03** cosine (#20), which
-#: is what this has to stay well under while leaving the whole fp32-fallback band below it.
-#: Between the two the test skips rather than passes, and CI fails on that skip (the gate
-#: runs no CPU that should land there) so the band cannot go quietly green.
-_DIFFERENT_MODEL = 1e-3
+#: Past here it is not a compute path, it is a different model. The furthest a healthy host
+#: has been measured is **1.6e-3** (aarch64), and swapping the int8 graph for the 4-bit one
+#: at the same revision moves a query vector by **~0.03** cosine (#20). This sits three
+#: times above the first and six times below the second.
+_DIFFERENT_MODEL = 5e-3
 
 _REFERENCE = Path(__file__).parent / "fixtures" / "gemma_q4_reference.json"
 
@@ -208,22 +209,28 @@ def test_the_real_model_returns_the_vector_it_was_baselined_on(real_embedder: ob
     # that runs this to report its number where a human can read it (CI passes `-s`).
     print(f"golden vector distance: {distance:.6e} ({where})")
     # Three outcomes, not two, because "different numbers" and "different model" are not
-    # the same finding. onnxruntime asks the CPU for the int8 `MatMulNBits` kernel and
-    # quietly computes in fp32 where there is none - measured at 2.1e-4 to 6.1e-4 here,
-    # and measured *not* to move a top-1 result on any of the 86 labelled eval queries.
-    # Failing a machine for that would be failing it for working correctly; saying nothing
-    # would waste the one place that can notice.
+    # the same finding. Four kinds of host have been measured and no two architectures
+    # agreed; failing a machine for that would be failing it for working correctly, and
+    # saying nothing would waste the one place that can notice.
     assert distance < _DIFFERENT_MODEL, (
         f"this vector is {distance:.3e} from the reference ({where}), past the "
         f"{_DIFFERENT_MODEL:.0e} that separates a compute path from a different model. "
         "Either the pin moved without the fixture, or these weights are not ours."
     )
-    if distance >= _COMPUTE_PATH_TOLERANCE:
+
+    # There is more than one right answer, and that is the finding: onnxruntime picks its
+    # `MatMulNBits` kernel from what the CPU offers, so a healthy host lands on one of a
+    # few discrete values rather than on the reference. Each is recorded with the machine
+    # that produced it, and matching *some* recorded path is what passes - which is what
+    # still notices the thing this test exists for, an onnxruntime release that moves the
+    # numbers underneath a host whose path has not changed.
+    paths = reference["compute_paths"]
+    nearest = min(paths, key=lambda path: abs(distance - path["distance"]))
+    if abs(distance - nearest["distance"]) >= _COMPUTE_PATH_TOLERANCE:
         pytest.skip(
-            f"this CPU takes a different MatMulNBits path: {distance:.3e} from the reference "
-            f"({where}), inside the band measured for the fp32 fallback. What that costs "
-            "retrieval has NOT been measured on this host - on the reference machine it left the "
-            "labelled section in the top five on both splits, moving the fifth result on one "
-            "query in 44. "
-            "Run scripts/compare_compute_paths.py here before relying on the numbers."
+            f"this CPU takes a MatMulNBits path nothing has recorded: {distance:.6e} from the "
+            f"reference ({where}), nearest recorded {nearest['distance']:.6e} "
+            f"({nearest['cpu']}). What it costs retrieval has NOT been measured here - the "
+            "churn measurement covered 2.4e-4, and the largest recorded distance is 1.6e-3. "
+            "Run scripts/compare_compute_paths.py on this machine, then record the value."
         )
