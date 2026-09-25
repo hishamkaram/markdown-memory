@@ -153,19 +153,22 @@ def test_the_graph_an_upgrade_left_behind_is_reported_not_hidden(
 
 #: How near a recorded compute path a vector must sit to count as that same path.
 #:
-#: The distance a host produces is a property of the instruction set, not a drift: across
-#: the gate's runners each value below repeated to every printed digit, on different chips
-#: and different interpreters. So the check is "which recorded path is this", within a
-#: radius set by the only real noise there is - running the same graph twice, and again at
-#: a different thread count, moves a vector by **~1e-7** with every coordinate identical
-#: (`scripts/compare_compute_paths.py`). 5e-5 is several hundred times that, and four times
-#: below the nearest gap between two recorded paths.
+#: The distance a host produces looks like a property of its instruction set rather than a
+#: drift: the x86_64 values repeated to every printed digit across chips, interpreters and
+#: runs. The two arm64 values are single observations at that precision, so read them as
+#: measurements rather than as constants. The radius is set by the only real noise there
+#: is - running the same graph twice, and again at a different thread count, moves a vector
+#: by **~1e-7** with every coordinate identical (`scripts/compare_compute_paths.py`) - so
+#: 5e-5 is several hundred times the noise, and it is smaller than every gap between
+#: recorded paths except the two arm64 ones, which sit 1.9e-5 apart and are therefore
+#: indistinguishable here.
 _COMPUTE_PATH_TOLERANCE = 5e-5
 
 #: Past here it is not a compute path, it is a different model. The furthest a healthy host
-#: has been measured is **1.6e-3** (aarch64), and swapping the int8 graph for the 4-bit one
-#: at the same revision moves a query vector by **~0.03** cosine (#20). This sits three
-#: times above the first and six times below the second.
+#: has been measured is **1.645e-3** (Apple M2 Pro), and swapping the int8 graph for the
+#: 4-bit one at the same revision moves a query vector by **~0.03** cosine (#20). This sits
+#: three times above the first and six times below the second - a margin chosen between two
+#: measurements, not a bound derived from a distribution, since the 0.03 is one probe.
 _DIFFERENT_MODEL = 5e-3
 
 _REFERENCE = Path(__file__).parent / "fixtures" / "gemma_q4_reference.json"
@@ -224,6 +227,14 @@ def test_the_real_model_returns_the_vector_it_was_baselined_on(real_embedder: ob
     # that produced it, and matching *some* recorded path is what passes - which is what
     # still notices the thing this test exists for, an onnxruntime release that moves the
     # numbers underneath a host whose path has not changed.
+    #
+    # Read this for what it is: a sentinel, not an identity. One cosine is one scalar, so
+    # each entry accepts a shell of vectors rather than a point, four entries accept five
+    # times the range one did, and which machine is running is not checked against which
+    # entry matched - a host that landed on another host's value would pass as that host.
+    # Pinning the identity would mean committing a vector per path, and the paths that are
+    # not this machine's exist only on CI. Recorded rather than papered over, because the
+    # failure it would miss is a vector engineered onto a shell, not a regression.
     paths = reference["compute_paths"]
     nearest = min(paths, key=lambda path: abs(distance - path["distance"]))
     if abs(distance - nearest["distance"]) >= _COMPUTE_PATH_TOLERANCE:

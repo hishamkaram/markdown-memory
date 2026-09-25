@@ -1,5 +1,5 @@
 {
- "_about": "What the pinned graph returns for one fixed string, and the distances the other compute paths return for it. Regenerate with `uv run python scripts/compare_compute_paths.py --update-reference` when the revision or the graph moves - never to quiet a failing test. Regenerating resets `compute_paths` to the host that ran it: every distance is measured against `vector`, so a new vector retires all of them.",
+ "_about": "What the pinned graph returns for one fixed string, and the distances the other compute paths return for it. Regenerate with `uv run python scripts/compare_compute_paths.py --update-reference` when the revision or the graph moves - never to quiet a failing test. Regenerating resets `compute_paths` to the host that ran it: every distance is measured against `vector`, so a new vector retires all of them. Each entry is one cosine distance, so it accepts a shell of vectors rather than a point, and nothing checks that the host which matched an entry is the host that entry names: a sentinel against the numbers moving, not proof of which path ran.",
  "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
  "graph": "onnx/model_q4.onnx",
  "prompt": "task: search result | query: ",

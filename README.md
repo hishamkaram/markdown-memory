@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 13,885
+       alt="One question asked of four documentation files. Reading them whole costs 13,888
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,597 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 13,885 tokens in all:
+`docs/evaluation-protocol.md`, 13,888 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,597 tokens instead of 13,885**, and the section that actually answers is 403 - a
+**2,597 tokens instead of 13,888**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -60,8 +60,8 @@ first model download, nothing leaves the machine.
   see [What downloads, when, and where](#what-downloads-when-and-where). Those kernels do
   not all return the same numbers: the gate measures four CPU families and the same text
   embeds up to 1.6e-3 cosine apart between x86-64 and arm64. Index and search on the one
-  machine and it never arises; copy an index between two and its vectors were computed by
-  two different kernels, which nothing currently detects.
+  machine and it never arises; copy an index between two and its vectors may have been
+  computed by two different kernels, which nothing currently detects.
 
 ### Get it
 
