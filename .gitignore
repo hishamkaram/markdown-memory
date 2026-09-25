@@ -20,3 +20,7 @@ wheels/
 # under $XDG_DATA_HOME - but a relative MARKDOWN_MEMORY_DB still resolves inside the
 # repository, so this keeps a deliberately local database out of a commit.
 .markdown-memory/
+
+# A plugin or hook that passed ":memory:" where a path was expected once created a
+# file with that name in the repository root. It is not ours and nothing reads it.
+:memory:*
