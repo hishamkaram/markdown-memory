@@ -203,6 +203,10 @@ def test_the_real_model_returns_the_vector_it_was_baselined_on(real_embedder: ob
 
     distance = 1.0 - sum(a * b for a, b in zip(reference["vector"], actual, strict=True))
     where = f"{platform.machine()} / {platform.system()}, reference from {reference['produced_on']}"
+    # Printed on every outcome, not only the failing ones. The bands below were set from
+    # one machine, and the only way they stop being one machine's guess is for every host
+    # that runs this to report its number where a human can read it (CI passes `-s`).
+    print(f"golden vector distance: {distance:.6e} ({where})")
     # Three outcomes, not two, because "different numbers" and "different model" are not
     # the same finding. onnxruntime asks the CPU for the int8 `MatMulNBits` kernel and
     # quietly computes in fp32 where there is none - measured at 2.1e-4 to 6.1e-4 here,

@@ -97,6 +97,21 @@ jobs:
           print(f'${{ matrix.runner }} is {actual} ({platform.system()})')
           assert actual == expected, f'expected {expected}, got {actual}'
           "
+          # Which CPU, not just which architecture, and which of the instructions that
+          # decide the kernel. onnxruntime picks its MatMulNBits implementation from what
+          # the host offers, and a hosted pool is a mix of chips - so the golden distance
+          # printed later in this job is only attributable with the chip beside it.
+          # `|| true`, because this is evidence for a human, never a gate.
+          {
+            lscpu 2>/dev/null | grep -Ei '^model name' \
+              || sysctl -n machdep.cpu.brand_string 2>/dev/null \
+              || echo 'CPU model unavailable'
+            echo -n 'kernel-selecting instructions: '
+            { lscpu 2>/dev/null || true; } \
+              | grep -Eoiw 'avx512_vnni|avx_vnni|avx512f|avx2|asimddp|i8mm|sve' \
+              | sort -u | tr '\n' ' '
+            echo
+          } || true
 
       # Apache-2.0 asks that the licence travel with the copy: this fails the job when
       # a vendored licence or NOTICE goes missing, is edited, or gains a stray file.
@@ -143,7 +158,7 @@ jobs:
       # printed summary: a reason string is prose, and prose gets reworded.
       - name: The golden vector ran, rather than skipping
         run: |
-          uv run pytest "${{ env.GOLDEN_VECTOR_TEST }}" -q --junitxml=golden.xml
+          uv run pytest "${{ env.GOLDEN_VECTOR_TEST }}" -q -s --junitxml=golden.xml
           uv run python -c "
           import xml.etree.ElementTree as ET
           suite = ET.parse('golden.xml').getroot().find('testsuite')
