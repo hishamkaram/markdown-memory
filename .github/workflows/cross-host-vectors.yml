@@ -1,0 +1,76 @@
+# Query vectors as each CPU embeds them, so the cost of carrying an index between two
+# machines can be measured rather than argued about (issue #23).
+#
+# Dispatch only. This answers a question rather than guarding a change, it costs an
+# Apple Silicon runner at roughly ten times the Linux rate, and the answer moves only
+# when onnxruntime or the pin does. `gate.yml` is the workflow that runs on its own.
+#
+# What comes back is one ~1.6 MB JSON per runner, holding the 86 labelled queries as that
+# host embeds them plus the golden probe's distance from the committed reference - which
+# is what says which compute path produced it, since the CPU model does not: the same
+# chip reported the VNNI flag on one gate run and not on another. Score them with
+#
+#     uv run python scripts/cross_host_churn.py --score vectors-*.json
+#
+# x86_64 is a lottery between a VNNI host and a non-VNNI one, so collecting both may take
+# more than one dispatch. The export says which one it got.
+name: cross-host vectors
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MARKDOWN_MEMORY_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+
+jobs:
+  export:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      # The same key gate.yml uses, so this workflow reads that cache rather than
+      # downloading 218 MB again, and cannot serve a different graph at one revision.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.MARKDOWN_MEMORY_MODEL_CACHE }}
+          key: mdmem-model-5090578d9565-model_q4-v3
+
+      - name: Say which machine these vectors came from
+        run: |
+          uv run python -c "
+          import platform
+          print(f'{platform.machine()} / {platform.system()}')
+          "
+          {
+            lscpu 2>/dev/null | grep -Ei '^model name' \
+              || sysctl -n machdep.cpu.brand_string 2>/dev/null \
+              || echo 'CPU model unavailable'
+            echo -n 'kernel-selecting instructions: '
+            { lscpu 2>/dev/null || true; } \
+              | grep -Eoiw 'avx512_vnni|avx_vnni|avx512f|avx2|asimddp|i8mm|sve' \
+              | sort -u | tr '\n' ' '
+            echo
+          } || true
+
+      - name: Embed the labelled queries
+        run: uv run python scripts/cross_host_churn.py --export "vectors-${{ matrix.runner }}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vectors-${{ matrix.runner }}
+          path: vectors-${{ matrix.runner }}.json
+          if-no-files-found: error
