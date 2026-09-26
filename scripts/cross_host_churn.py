@@ -11,8 +11,20 @@ forcing the fp32 kernel on one machine, which moves a vector 2.1e-4 to 6.1e-4 - 
 of the VNNI difference, and seven times smaller than the arm64 one - and it ranked by
 vector distance alone. Production does not: it fuses BM25 with vector ranking through RRF
 and takes a max over per-passage vectors, all of which should damp a disagreement that
-vector ranking alone would show. So the number that decides issue #23 is this one, and
-nothing had produced it.
+vector ranking alone would show. So the number that decides issue #23 is this one.
+
+**It has now been produced, and it is zero.** Replaying the queries of an Apple M2 Pro
+(1.645e-3 from the reference) and a Neoverse-N2 (1.626e-3) against an index built on
+x86_64 moved **no top-1 result** on any of the 86 labelled queries, left the labelled
+section in the top five in every cell, and changed neither count. What moved is the tail:
+the top-five list differed on 22 of 86 queries from Apple Silicon and 19 of 86 from
+Neoverse-N2, never at the first position and never at the labelled section. Replaying
+x86_64's own export against the x86_64 index gives zero everywhere, which is the control
+that says the harness reports no difference where there is none. #23 is closed on that.
+
+Re-run it rather than trusting the numbers: a different corpus, a further-out compute path
+or a new onnxruntime could all move them, and this instrument exists so that costs one
+dispatch rather than an argument.
 
 The trick that makes it cheap: a query is one vector. Rather than shipping an index
 between machines, each host exports the 86 labelled queries as it embeds them - about

@@ -481,7 +481,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7342),',
+        old='    ("README.md", 7368),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
