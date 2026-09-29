@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import NoReturn, TypeVar
 
-from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, WEIGHTS_REVOKED, Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.models import SearchResult
@@ -458,10 +458,10 @@ class HybridSearcher:
         agent reading it is told the index is healthy by an `index_status` that no
         indexing run will correct - weights can change while no document does.
         """
-        # Only where nothing is recorded yet: an indexing run's account - which names the
-        # directories still to re-index - says more than this query can.
-        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:
-            self._db.record_weights_mismatch(message)
+        # Only where nothing is recorded yet, decided in the write itself: an indexing run's
+        # account - which names the directories still to re-index - says more than this
+        # query can, and may land between a check and a write.
+        self._db.record_weights_mismatch(message, replace=False)
         raise SearchError(message)
 
     def _nearest(

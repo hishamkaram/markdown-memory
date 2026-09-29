@@ -373,10 +373,13 @@ MUTATIONS = (
         tests="test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch",
     ),
     Mutation(
-        name="search: overwrite the indexer's account of a mismatch with its own",
-        module="search.py",
-        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:\n",
-        new="        if True:\n",
+        name="storage: let a search overwrite the indexer's account of a mismatch",
+        module="db.py",
+        old=(
+            "                    + "
+            '("DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"),\n'
+        ),
+        new='                    + "DO UPDATE SET value = excluded.value",\n',
         tests="test_a_search_does_not_replace_the_indexers_account_of_a_mismatch",
     ),
     Mutation(
@@ -567,8 +570,8 @@ MUTATIONS = (
     Mutation(
         name="search: keep the mismatch to itself while the status says all is well",
         module="search.py",
-        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:\n",
-        new="        if False:  # the status goes on calling the index healthy\n",
+        old="        self._db.record_weights_mismatch(message, replace=False)\n",
+        new="        pass  # the status goes on calling the index healthy\n",
         tests="test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status",
     ),
     Mutation(

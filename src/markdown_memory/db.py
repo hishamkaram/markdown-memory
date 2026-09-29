@@ -1104,20 +1104,21 @@ class Database:
 
     # ------------------------------------------------------------------ sections
 
-    def record_weights_mismatch(self, message: str | None) -> None:
+    def record_weights_mismatch(self, message: str | None, *, replace: bool = True) -> None:
         """Remember (or clear) that the index and the loaded model disagree.
 
         Persisted rather than held in memory: every `search_docs` and `list_documents`
         answer carries an `index_status`, and a fact this serious may not depend on
-        which process, or which run, happens to have noticed it.
+        which process, or which run, happens to have noticed it. ``replace=False`` keeps a
+        message already recorded, in the same statement that would have written this one.
         """
         with self.transaction() as conn:
             if message is None:
                 conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
             else:
                 conn.execute(
-                    "INSERT INTO meta (key, value) VALUES (?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) "
+                    + ("DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"),
                     (WEIGHTS_MISMATCH_KEY, message),
                 )
 
