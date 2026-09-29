@@ -373,6 +373,13 @@ MUTATIONS = (
         tests="test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch",
     ),
     Mutation(
+        name="search: overwrite the indexer's account of a mismatch with its own",
+        module="search.py",
+        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:\n",
+        new="        if True:\n",
+        tests="test_a_search_does_not_replace_the_indexers_account_of_a_mismatch",
+    ),
+    Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
         module="indexer.py",
         old="            except ModelLoadError as exc:\n",
@@ -450,7 +457,7 @@ MUTATIONS = (
         tests="test_certifying_writes_the_revision_and_clears_the_reason_together",
     ),
     Mutation(
-        name="search: replace the indexer's account of a repair with its own",
+        name="search: describe an index being re-embedded as one built by other weights",
         module="search.py",
         old="        if recorded == WEIGHTS_REVOKED:\n",
         new="        if False:\n",
@@ -560,7 +567,7 @@ MUTATIONS = (
     Mutation(
         name="search: keep the mismatch to itself while the status says all is well",
         module="search.py",
-        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:\n",
+        old="        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:\n",
         new="        if False:  # the status goes on calling the index healthy\n",
         tests="test_a_search_that_finds_the_weights_changed_says_so_in_the_index_status",
     ),

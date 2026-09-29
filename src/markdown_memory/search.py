@@ -458,7 +458,9 @@ class HybridSearcher:
         agent reading it is told the index is healthy by an `index_status` that no
         indexing run will correct - weights can change while no document does.
         """
-        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:
+        # Only where nothing is recorded yet: an indexing run's account - which names the
+        # directories still to re-index - says more than this query can.
+        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is None:
             self._db.record_weights_mismatch(message)
         raise SearchError(message)
 

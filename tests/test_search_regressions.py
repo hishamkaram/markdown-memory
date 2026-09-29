@@ -241,6 +241,24 @@ class TestSearchRobustness:
             searcher.close()
         assert all(r.vec_rank is None for r in results)
 
+    def test_a_search_does_not_replace_the_indexers_account_of_a_mismatch(
+        self, db: Database
+    ) -> None:
+        """A run that finds stale vectors names the directories to re-index. A search by
+
+        other weights used to overwrite that with a generic sentence of its own.
+        """
+        store(db, _RevisedEmbedder("a" * 40), "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        db.record_weights_mismatch("stale vectors under /d/.venv")
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert results and all(r.vec_rank is None for r in results)
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "stale vectors under /d/.venv"
+
     def test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -552,11 +570,13 @@ class TestRankingIsActuallyTested:
         assert heading_match[0] == "Vacuuming"  # bm25(5.0, 3.0, 1.0) weights the heading
 
 
-def test_a_revoked_index_keeps_the_reason_the_indexer_gave(tmp_path: Path) -> None:
+def test_a_revoked_index_keeps_the_reason_the_indexer_gave(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """While a run re-embeds the index, the revision matches no model, and search used to
 
     overwrite the indexer's account - which names what is left to do - with its own guess
-    that the index needed rebuilding from scratch.
+    that the index needed rebuilding from scratch, naming the sentinel as a revision.
     """
     with Database(tmp_path / "index.db") as db:
         store(db, FakeEmbedder(), "/d/a.md")
@@ -568,3 +588,4 @@ def test_a_revoked_index_keeps_the_reason_the_indexer_gave(tmp_path: Path) -> No
             searcher.close()
         assert results and all(result.vec_rank is None for result in results)
         assert db.get_meta("embedding_weights_mismatch") == "re-embedding under /d"
+    assert "being re-embedded" in caplog.text
