@@ -1141,14 +1141,19 @@ class Database:
         vouch for, and a revision over nothing would turn the next model away. None means
         this run could not tell which weights it ran, and so vouches for nothing.
         """
+        recorded = self.get_meta(WEIGHTS_META_KEY)
+        mismatch = self.get_meta(WEIGHTS_MISMATCH_KEY)
+        if (recorded, mismatch) != (None, None) and self.count_rows("units_vec") == 0:
+            # A revision claimed for vectors that never arrived - the run died between
+            # the claim and the write - describes nothing, whoever is asking.
+            with self.transaction() as conn:
+                _forget_weights_without_vectors(conn)
+            return
         # Unknown weights vouch for nothing. Known and already certified, with nothing
         # said against it: the invariant holds by construction, so the whole-database
         # check would find nothing, and a no-op run need not take the write lock to learn
         # that.
-        if weights is None or (
-            self.get_meta(WEIGHTS_META_KEY) == weights
-            and self.get_meta(WEIGHTS_MISMATCH_KEY) is None
-        ):
+        if weights is None or (recorded == weights and mismatch is None):
             return
         with self.transaction() as conn:
             if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is None:

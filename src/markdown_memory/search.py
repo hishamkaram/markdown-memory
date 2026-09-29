@@ -390,7 +390,12 @@ class HybridSearcher:
         # Again, against what was read rather than what was checked: a model *name* change
         # in another process discards every vector and rebuilds it, and a check that
         # happened before those rows were read cannot speak for them.
-        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:
+        if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (
+            # Nothing was recorded because nothing was stored; whatever the lookup found
+            # was written since, by weights that named nothing - a model that can name
+            # itself would have recorded them first.
+            recorded is None and best and self._embedder.weights_revision is not None
+        ):
             raise SearchError(
                 "The index was rebuilt by another model while this search was ranking; "
                 "only keyword ranking is used"

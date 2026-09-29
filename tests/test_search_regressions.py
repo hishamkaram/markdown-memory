@@ -219,6 +219,28 @@ class TestSearchRobustness:
         assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
         assert db.index_status(str(root)).verified
 
+    def test_vectors_written_unvouched_during_the_lookup_are_not_ranked(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty index records no revision, so the check before the lookup passes. If a
+
+        model that cannot name its weights stores vectors before the lookup reads them,
+        the revision is still absent afterwards and the check after it used to pass too.
+        """
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        lookup = searcher._nearest
+
+        def racing(embedding: list[float], limit: int) -> tuple[dict[int, float], dict[int, str]]:
+            store(db, FakeEmbedder(), "/d/a.md")  # another process, weights unnamed
+            return lookup(embedding, limit)
+
+        monkeypatch.setattr(searcher, "_nearest", racing)
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert all(r.vec_rank is None for r in results)
+
     def test_vectors_no_revision_vouches_for_are_not_ranked_by_named_weights(
         self, db: Database, tmp_path: Path
     ) -> None:

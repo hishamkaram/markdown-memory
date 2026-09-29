@@ -707,6 +707,27 @@ def test_a_revision_left_over_a_vectorless_index_does_not_refuse_unnamed_weights
     assert db.get_meta("embedding_weights_revision") is None
 
 
+def test_a_revision_claimed_for_vectors_that_never_arrived_is_dropped_by_the_next_run(
+    db: Database, tmp_path: Path
+) -> None:
+    """The revision is claimed before the first vector is written, so a run that dies in
+
+    between leaves it over an empty index. A later run with the same weights and nothing
+    to embed returned early - the revision agreed with it - and kept it for good.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.set_meta("embedding_weights_revision", "a" * 40)  # the claim, and then the crash
+
+    report = Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    assert report.files_unchanged == 1, "a run that writes nothing"
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
+
+
 def test_the_revision_is_written_before_the_vectors_it_describes(
     db: Database, one_document: Path
 ) -> None:

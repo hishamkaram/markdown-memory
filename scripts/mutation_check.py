@@ -346,6 +346,26 @@ MUTATIONS = (
         tests="test_vectors_no_revision_vouches_for_are_a_pending_repair",
     ),
     Mutation(
+        name="search: rank vectors stored unvouched while the lookup ran",
+        module="search.py",
+        old=(
+            "            recorded is None and best "
+            "and self._embedder.weights_revision is not None\n"
+        ),
+        new="            False\n",
+        tests="test_vectors_written_unvouched_during_the_lookup_are_not_ranked",
+    ),
+    Mutation(
+        name="storage: keep a revision claimed for vectors that never arrived",
+        module="db.py",
+        old=(
+            "        if (recorded, mismatch) != (None, None) "
+            'and self.count_rows("units_vec") == 0:\n'
+        ),
+        new="        if False:\n",
+        tests="test_a_revision_claimed_for_vectors_that_never_arrived_is_dropped_by_the_next_run",
+    ),
+    Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
         module="indexer.py",
         old="            except ModelLoadError as exc:\n",
@@ -484,8 +504,8 @@ MUTATIONS = (
     Mutation(
         name="search: trust a revision checked before the rows were read",
         module="search.py",
-        old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:\n",
-        new="        if False:  # the check speaks for rows read after it\n",
+        old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (\n",
+        new="        if False or (  # the check speaks for rows read after it\n",
         tests="test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on",
     ),
     Mutation(

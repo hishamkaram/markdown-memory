@@ -1798,6 +1798,7 @@ class TestPerDocumentWeights:
         """An index as the release before this one left it: no stamp on any document."""
         docs.mkdir()
         (docs / "a.md").write_text("# A\n\nalpha body\n")
+        (docs / "b.md").write_text("# B\n\nbeta body\n")
         with Database(path) as database:
             Indexer(database, embedder).index_directory(docs)
         with Database(path) as database:
@@ -1828,9 +1829,10 @@ class TestPerDocumentWeights:
         self.build_v5(path, docs, named)
 
         with Database(path) as migrated:
-            assert migrated.document_hashes(str(docs))[str(docs / "a.md")][3] == "a" * 40
+            stamps = {value[3] for value in migrated.document_hashes(str(docs)).values()}
+            assert stamps == {"a" * 40}
             report = Indexer(migrated, named).index_directory(docs)
-            assert (report.files_indexed, report.files_unchanged) == (0, 1)
+            assert (report.files_indexed, report.files_unchanged) == (0, 2)
             assert self.ranks_by_vector(migrated, named)
 
     def test_an_upgrade_quarantines_vectors_no_record_vouches_for(self, tmp_path: Path) -> None:
