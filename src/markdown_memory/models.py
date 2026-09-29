@@ -244,6 +244,9 @@ class IndexStatus:
     #: so an edit that restores a file's own timestamp is not seen. Zero means nothing was
     #: detected, not that every indexed file was hashed.
     changed_files: int = 0
+    #: This server's own background run is indexing the tree right now. A hint about one
+    #: process only: another process's run shows as coverage withdrawn, as it always did.
+    indexing: bool = False
 
     def to_dict(self) -> JsonDict:
         shown = self.failures[:MAX_REPORTED_FAILURES]
@@ -251,6 +254,7 @@ class IndexStatus:
             "coverage": "verified" if self.verified else "unknown",
             "failures": [failure.to_dict() for failure in shown],
             "changed_files": self.changed_files,
+            "indexing": self.indexing,
             "message": self.message(),
         }
 
@@ -261,6 +265,14 @@ class IndexStatus:
         # it: the two cannot both hold today, and a reader should not have to know that.
         if self.weights_mismatch:
             return self.weights_mismatch
+        if self.indexing:
+            # Before everything that ends in "run index_directory": that run would be
+            # refused as busy, and it would be refused for doing what is already being done.
+            return (
+                "An automatic index run is in progress, so an answer may be missing a file "
+                "changed or added since the last one finished; there is no need to run "
+                "index_directory."
+            )
         if self.verified:
             # A walk that finished still describes the moment it finished. Files edited
             # since are the one thing a verified tree has left to say.

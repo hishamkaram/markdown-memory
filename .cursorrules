@@ -53,9 +53,10 @@ Work in this order:
 
 Supporting tools: `list_documents(directory="")` returns
 `{"documents": [...], "index_status": {...}}` - what is indexed, and whether anything
-vouches for it; `index_directory(directory=None)` (re)indexes - run it once per session if
-searches come back empty or stale, or if `index_status.coverage` is `"unknown"`. It is
-incremental (SHA-256 per file), so re-running is cheap.
+vouches for it; `index_directory(directory=None)` (re)indexes. The stdio server keeps its
+own docs root indexed in the background (at start, and when a search sees change), so
+call it only when `index_status.message` asks for it - never while `index_status.indexing`
+is true. It is incremental (SHA-256 per file), so re-running is cheap.
 `file_path` may be absolute, relative to the docs root, or any unique path suffix. An
 error from `read_section` lists the valid heading paths - retry with one of them rather
 than falling back to reading the file.

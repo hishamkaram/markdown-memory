@@ -17,7 +17,7 @@ import stat
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from markdown_memory.exceptions import (
     EmbeddingError,
     ForeignWeightsError,
     IndexBusyError,
+    IndexCancelled,
     IndexingError,
     MarkdownMemoryError,
     ModelLoadError,
@@ -217,10 +218,14 @@ class Indexer:
             os.close(handle)
             self._run_lock.release()
 
-    def index_directory(self, directory: Path) -> IndexReport:
+    def index_directory(
+        self, directory: Path, should_stop: Callable[[], bool] | None = None
+    ) -> IndexReport:
         """Index new/changed files, skip unchanged ones, purge files that disappeared.
 
         A failure in one file is recorded in the report and does not abort the run.
+        ``should_stop`` is asked between documents; once it answers true the run raises
+        `IndexCancelled` and leaves what a killed run leaves.
         """
         try:
             root = directory.expanduser().resolve(strict=True)
@@ -362,6 +367,8 @@ class Indexer:
                 try:
                     exhausted = False
                     while True:
+                        if should_stop is not None and should_stop():
+                            raise IndexCancelled("index run stopped by its owner")
                         while not exhausted and len(pending) < window:
                             path = next(files, None)
                             if path is None:
@@ -391,6 +398,10 @@ class Indexer:
                             # failure to carry, not the run's to die of.
                             if prepared is None:
                                 unchanged += 1
+                            elif should_stop is not None and should_stop():
+                                # Checked again after the wait: embedding one file can take
+                                # seconds, and a stop asked meanwhile writes nothing more.
+                                raise IndexCancelled("index run stopped by its owner")
                             else:
                                 store(prepared)
                         except (ModelLoadError, ForeignWeightsError):

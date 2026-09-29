@@ -383,6 +383,168 @@ MUTATIONS = (
         tests="test_a_search_does_not_replace_the_indexers_account_of_a_mismatch",
     ),
     Mutation(
+        name="auto: start a run for every save instead of one per burst",
+        module="autoindex.py",
+        old=(
+            "                (status.changed_files > self._baseline "
+            "and since >= self._change_gap)\n"
+        ),
+        new="                (status.changed_files > self._baseline)\n",
+        tests="test_an_edit_a_search_sees_starts_a_run_once_the_gap_has_passed",
+    ),
+    Mutation(
+        name="auto: walk the tree again on every search over a file that cannot be indexed",
+        module="autoindex.py",
+        old=(
+            "                (status.changed_files > self._baseline "
+            "and since >= self._change_gap)\n"
+        ),
+        new="                (status.changed_files > 0 and since >= self._change_gap)\n",
+        tests="test_a_file_the_last_run_could_not_index_does_not_start_one_per_search",
+    ),
+    Mutation(
+        name="auto: let a clean run adopt an edit made while it ran as the norm",
+        module="autoindex.py",
+        old="            baseline = self._changed() if report.errors else 0\n",
+        new="            baseline = self._changed()\n",
+        tests="test_an_edit_made_while_a_clean_run_ran_starts_the_next_one",
+    ),
+    Mutation(
+        name="auto: let a stopped run absorb the edits it never saw",
+        module="autoindex.py",
+        old='            logger.info("Automatic index run stopped")\n',
+        new=(
+            '            logger.info("Automatic index run stopped")\n'
+            "            baseline = self._changed()\n"
+        ),
+        tests="test_a_stopped_run_keeps_the_baseline",
+    ),
+    Mutation(
+        name="auto: retry a run that failed whole for the same edit every few seconds",
+        module="autoindex.py",
+        old=(
+            '            logger.exception("Automatic index run failed")\n'
+            "            baseline = self._changed()\n"
+        ),
+        new='            logger.exception("Automatic index run failed")\n',
+        tests="test_a_run_that_fails_whole_is_not_retried_for_the_same_edit",
+    ),
+    Mutation(
+        name="auto: mark a mismatch a search recorded mid-run as already handled",
+        module="autoindex.py",
+        old="            if after is None or after == before:\n",
+        new="            if True:\n",
+        tests="test_a_mismatch_recorded_while_a_run_was_busy_is_still_acted_on",
+    ),
+    Mutation(
+        name="auto: wait a whole walk interval after a run another process blocked",
+        module="autoindex.py",
+        old="                self._last_finished -= self._walk_gap - self._change_gap\n",
+        new="                pass\n",
+        tests="test_a_run_another_process_blocked_is_retried_once_per_gap",
+    ),
+    Mutation(
+        name="auto: retry a blocked run on every search while the lock is held",
+        module="autoindex.py",
+        old="                self._retry_after = self._last_finished + self._walk_gap\n",
+        new="                pass\n",
+        tests="test_a_run_another_process_blocked_is_retried_once_per_gap",
+    ),
+    Mutation(
+        name="auto: never walk the tree for files nobody indexed yet",
+        module="autoindex.py",
+        old="                or since >= self._walk_gap\n",
+        new="                or False\n",
+        tests="test_the_walk_that_finds_new_files_is_due_after_the_interval",
+    ),
+    Mutation(
+        name="auto: leave a weights mismatch a search found for the next walk",
+        module="autoindex.py",
+        old="                    status.weights_mismatch is not None\n",
+        new="                    False\n",
+        tests="test_a_weights_mismatch_starts_one_run_not_one_per_search",
+    ),
+    Mutation(
+        name="auto: start a run per search over a mismatch no run can repair",
+        module="autoindex.py",
+        old="                    and status.weights_mismatch != self._seen_mismatch\n",
+        new="                    and True\n",
+        tests="test_a_weights_mismatch_starts_one_run_not_one_per_search",
+    ),
+    Mutation(
+        name="auto: start a second run beside a running one, or after stop",
+        module="autoindex.py",
+        old=(
+            "    def _start(self) -> bool:\n"
+            "        if self._stopping or self._thread is not None:\n"
+        ),
+        new="    def _start(self) -> bool:\n        if False:\n",
+        tests="test_nothing_starts_while_a_run_is_running_or_after_stop",
+    ),
+    Mutation(
+        name="auto: return from stop while the run still holds the database",
+        module="autoindex.py",
+        old="            thread.join()\n",
+        new="            pass\n",
+        tests="test_stop_asks_the_run_to_stop_and_waits_for_it",
+    ),
+    Mutation(
+        name="auto: close the database under a running background run",
+        module="server.py",
+        old="            self._auto.stop()\n",
+        new="            pass\n",
+        tests="test_close_stops_the_run_before_the_database_closes",
+    ),
+    Mutation(
+        name="auto: never look at what a search measured",
+        module="server.py",
+        old="                self._auto.consider(status)\n",
+        new="                pass\n",
+        tests="test_a_search_after_an_edit_brings_the_index_up_to_date",
+    ),
+    Mutation(
+        name="auto: start the background run whatever the configuration says",
+        module="server.py",
+        old="    if config.auto_index:\n",
+        new="    if True:\n",
+        tests="test_only_the_stdio_server_starts_it_and_only_when_asked_to",
+    ),
+    Mutation(
+        name="auto: keep telling the agent to run what is already running",
+        module="models.py",
+        old="        if self.indexing:\n",
+        new="        if False:\n",
+        tests="test_the_status_says_a_run_is_in_progress_instead_of_asking_for_one",
+    ),
+    Mutation(
+        name="auto: never report the background run in the status",
+        module="server.py",
+        old="        active = self._auto is not None and self._auto.active\n",
+        new="        active = False\n",
+        tests="test_the_status_says_a_run_is_in_progress_instead_of_asking_for_one",
+    ),
+    Mutation(
+        name="index: never ask whether the run should stop",
+        module="indexer.py",
+        old="                        if should_stop is not None and should_stop():\n",
+        new="                        if False:\n",
+        tests="test_a_stop_asked_before_the_run_starts_embeds_nothing",
+    ),
+    Mutation(
+        name="index: write the file embedded while a stop was asked",
+        module="indexer.py",
+        old="                            elif should_stop is not None and should_stop():\n",
+        new="                            elif False:\n",
+        tests="test_the_file_being_embedded_is_not_written_and_not_called_a_failure",
+    ),
+    Mutation(
+        name="index: let the per-file handler swallow a stop as one file's failure",
+        module="exceptions.py",
+        old="class IndexCancelled(Exception):",
+        new="class IndexCancelled(MarkdownMemoryError):",
+        tests="test_the_file_being_embedded_is_not_written_and_not_called_a_failure",
+    ),
+    Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
         module="indexer.py",
         old="            except ModelLoadError as exc:\n",
@@ -667,7 +829,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7452),',
+        old='    ("README.md", 7761),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1228,11 +1390,9 @@ MUTATIONS = (
     Mutation(
         name="scope: resolve the docs root again on every question",
         module="server.py",
-        old=(
-            "            return self._with_freshness(self._db.index_status(self._root), self._root)"
-        ),
+        old=("        return self._with_freshness(self._db.index_status(self._root), self._root)"),
         new=(
-            "            return self._with_freshness(self._db.index_status("
+            "        return self._with_freshness(self._db.index_status("
             "str(headings._absolute(self._config.docs_dir, SearchError))), self._root)"
         ),
         tests="test_status_and_search_always_describe_the_same_tree",
@@ -1264,10 +1424,8 @@ MUTATIONS = (
     Mutation(
         name="answers: never mention that the index is missing files",
         module="server.py",
-        old=(
-            "            return self._with_freshness(self._db.index_status(self._root), self._root)"
-        ),
-        new="            return IndexStatus(verified=True)",
+        old=("        return self._with_freshness(self._db.index_status(self._root), self._root)"),
+        new="        return IndexStatus(verified=True)",
         tests="test_a_search_says_the_index_is_missing_files",
     ),
     Mutation(

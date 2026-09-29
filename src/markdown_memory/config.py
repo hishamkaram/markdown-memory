@@ -39,6 +39,9 @@ ENV_EXCLUDE = "MARKDOWN_MEMORY_EXCLUDE"
 ENV_INDEX_WORKERS = "MARKDOWN_MEMORY_INDEX_WORKERS"
 
 
+ENV_AUTO_INDEX = "MARKDOWN_MEMORY_AUTO_INDEX"
+
+
 # Claude Code exports this to every stdio MCP server it spawns, set to the project root.
 # `.mcp.json` cannot interpolate it - measured on Claude Code 2.1.278, `${CLAUDE_PROJECT_DIR}`
 # and `${workspaceFolder}` are both reported as "Missing environment variables" and passed
@@ -96,6 +99,8 @@ class ServerConfig:
     exclude: tuple[str, ...] = ()
     #: Files embedded at the same time while indexing.
     index_workers: int = DEFAULT_INDEX_WORKERS
+    #: Whether the stdio server keeps its own docs root indexed in the background.
+    auto_index: bool = True
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -118,6 +123,8 @@ class ServerConfig:
             ),
             exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
             index_workers=_positive_int(ENV_INDEX_WORKERS, DEFAULT_INDEX_WORKERS),
+            auto_index=os.environ.get(ENV_AUTO_INDEX, "").strip().lower()
+            not in {"0", "false", "off", "no"},
         )
 
 
@@ -127,6 +134,7 @@ def resolve_config(
     docs_dir: Path | None = None,
     embedder: str | None = None,
     exclude: Sequence[str] = (),
+    auto_index: bool | None = None,
 ) -> ServerConfig:
     """Environment configuration with explicit overrides laid over it.
 
@@ -155,6 +163,7 @@ def resolve_config(
         model_cache_dir=base.model_cache_dir,
         exclude=tuple(exclude) or base.exclude,
         index_workers=base.index_workers,
+        auto_index=base.auto_index if auto_index is None else auto_index,
     )
 
 
@@ -165,6 +174,7 @@ def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
         docs_dir=arguments.docs_dir,
         embedder=arguments.embedder,
         exclude=arguments.exclude,
+        auto_index=False if getattr(arguments, "no_auto_index", False) else None,
     )
 
 

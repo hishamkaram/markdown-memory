@@ -340,6 +340,7 @@ async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[No
         "coverage": "verified",
         "failures": [],
         "changed_files": 0,
+        "indexing": False,
         "message": None,
     }
     results = answer["results"]

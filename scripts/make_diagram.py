@@ -67,10 +67,10 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 7452),
-    ("CLAUDE.md", 3884),
+    ("README.md", 7761),
+    ("CLAUDE.md", 3991),
     ("evaluation-protocol.md", 1661),
-    ("AGENTS.md", 1098),
+    ("AGENTS.md", 1124),
 ]
 RIGHT_HITS = [
     (403, "What downloads, when, and where", True),
