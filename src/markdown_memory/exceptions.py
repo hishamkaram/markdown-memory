@@ -41,6 +41,16 @@ class IndexBusyError(IndexingError):
     """
 
 
+class IndexCancelled(Exception):  # noqa: N818 - a request honoured, not an error
+    """An index run stopped because its owner asked it to, between two documents.
+
+    Deliberately outside `MarkdownMemoryError`: the indexer's per-file handler catches
+    that hierarchy and carries on with the next file, and a stop that was swallowed as
+    one file's failure would not be a stop. What it leaves is what a killed run leaves -
+    the documents written so far, and coverage withdrawn until a run finishes.
+    """
+
+
 class EmbeddingError(IndexingError):
     """The embedding model failed to load or to produce usable vectors."""
 

@@ -772,6 +772,51 @@ class LiveTest:
         return (self.docs / relative).read_text(encoding="utf-8")
 
 
+async def _search_finds(probe: LiveTest, token: str, timeout: float) -> bool:
+    """Search for ``token`` until a hit quotes it, or give up after ``timeout`` seconds."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload, _, _ = await probe.call("search_docs", query=token)
+        if payload and any(token in hit["content"] for hit in payload["results"]):
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
+async def auto_index_check(test: LiveTest, root: Path, model_cache: str) -> None:
+    docs = root / "auto-docs"
+    docs.mkdir()
+    guide = docs / "guide.md"
+    guide.write_text("# Guide\n\nThe batcher reads HELIOS_BATCH at start.\n", encoding="utf-8")
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "markdown_memory.server"],
+        env={
+            **os.environ,
+            "MARKDOWN_MEMORY_DB": str(root / "auto.db"),
+            "MARKDOWN_MEMORY_DOCS_DIR": str(docs),
+            "MARKDOWN_MEMORY_MODEL_CACHE": model_cache,
+            "MARKDOWN_MEMORY_EMBEDDER": DEFAULT_EMBEDDER,
+            "MARKDOWN_MEMORY_AUTO_INDEX": "1",
+        },
+    )
+    with (root / "auto.stderr.log").open("w", encoding="utf-8") as errlog:
+        async with Client(stdio_client(parameters, errlog=errlog)) as client:
+            probe = LiveTest(client, docs, {})
+            test.check(
+                await _search_finds(probe, "HELIOS_BATCH", timeout=180),
+                "the server indexed its root at start without being asked",
+            )
+            guide.write_text(
+                "# Guide\n\nThe batcher now reads ZEPHYR_QUOTA instead.\n", encoding="utf-8"
+            )
+            await asyncio.sleep(11)  # past the gap after the last run
+            test.check(
+                await _search_finds(probe, "ZEPHYR_QUOTA", timeout=180),
+                "an edited file became searchable once a search noticed it",
+            )
+
+
 async def main() -> int:
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="markdown-memory-live-") as workspace:
@@ -793,6 +838,9 @@ async def main() -> int:
                 "MARKDOWN_MEMORY_LOG_LEVEL": "INFO",
                 # Pinned: an exported MARKDOWN_MEMORY_EMBEDDER must not change what is tested.
                 "MARKDOWN_MEMORY_EMBEDDER": DEFAULT_EMBEDDER,
+                # Off here: these scenarios call index_directory themselves and time it, and
+                # a background run holding the lock would make them busy. [13] turns it on.
+                "MARKDOWN_MEMORY_AUTO_INDEX": "0",
             },
         )
         print(f"workspace : {root}")
@@ -854,6 +902,9 @@ async def main() -> int:
         print("        --- last server stderr lines ---")
         for line in log_text.strip().splitlines()[-4:]:
             print(f"        {line[:150]}")
+
+        print("\n[13] automatic indexing (a second server, nobody calls index_directory)")
+        await auto_index_check(test, root, model_cache)
 
         metrics = test.metrics
         print("\n================ timing metrics ================")

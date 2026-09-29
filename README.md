@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 14,095
+       alt="One question asked of four documentation files. Reading them whole costs 14,537
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,681 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 14,095 tokens in all:
+`docs/evaluation-protocol.md`, 14,537 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,681 tokens instead of 14,095**, and the section that actually answers is 403 - a
+**2,681 tokens instead of 14,537**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -120,14 +120,30 @@ claude mcp list                    # markdown-memory should be listed and connec
 
 ### Index once, then search
 
-A freshly registered server knows nothing yet. From the client, call it once:
+The server keeps its documentation root indexed by itself. It indexes once when it starts,
+in the background - catching whatever changed while no server ran, new files included - and
+after that each `search_docs` (and `list_documents` without a directory) decides whether
+another run is due:
+
+- a file it sees edited, deleted or unreadable starts one, at most every 10 seconds;
+- a weights mismatch a search has just recorded starts one at once;
+- otherwise one walks the tree every 5 minutes while the server is in use, which is what
+  finds a file nobody indexed yet.
+
+One run at a time, in one thread, stopped between two documents when the server shuts down;
+a stopped run leaves what a killed run leaves, and the next one resumes. While it runs,
+`index_status.indexing` is `true` and the message says so instead of asking for
+`index_directory`. Nothing watches the filesystem, so a server nobody is using does not
+spend anything; `read_section` and `get_document_outline` do not start a run. The first
+run of a large tree embeds everything and competes with queries for CPU until it is done;
+`--no-auto-index` (or `MARKDOWN_MEMORY_AUTO_INDEX=0`) turns all of this off, and then:
 
 ```
 index_directory()                  # scans the docs root, embeds what it finds
 list_documents()                   # index_status.coverage should read "verified"
 ```
 
-The first call downloads the embedding model and then indexes, so it is the slow one - see
+The first run downloads the embedding model and then indexes, so it is the slow one - see
 [The embedding model](#the-embedding-model). After that, indexing is incremental: re-running
 it costs milliseconds when nothing changed. If `coverage` reads `"unknown"`, something was
 missed and `index_status.message` says what to run.
@@ -335,6 +351,7 @@ or just the title); an ambiguous request lists the exact candidates.
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 | `MARKDOWN_MEMORY_THREADS` | - | unset: onnxruntime picks. A positive integer caps the threads one embedding pass may use |
 | `MARKDOWN_MEMORY_INDEX_WORKERS` | - | `2` - files read, parsed and embedded at the same time while indexing |
+| `MARKDOWN_MEMORY_AUTO_INDEX` | `--no-auto-index` | on - `0`, `false`, `off` or `no` stops the server indexing its root by itself |
 
 The default preset does not spin-wait between operators, which is what makes a query cost ~0.6 s of
 CPU instead of ~5.5 s and leaves the process idle at 0 while nothing is being asked of it; the

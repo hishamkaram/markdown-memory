@@ -62,6 +62,7 @@ The first run downloads the embedding model (~218 MB) into
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
+| `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, at start and when a search's `index_status` says one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
 | `src/markdown_memory/headings.py` | Breadcrumb resolution (`Root > Child`), section selection, the outline tree |
 | `src/markdown_memory/server.py` | `MarkdownMemoryService`, MCP tool wiring, `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
@@ -191,9 +192,10 @@ Work in this order:
 
 Supporting tools: `list_documents(directory="")` returns
 `{"documents": [...], "index_status": {...}}` - what is indexed, and whether anything
-vouches for it; `index_directory(directory=None)` (re)indexes - run it once per session if
-searches come back empty or stale, or if `index_status.coverage` is `"unknown"`. It is
-incremental (SHA-256 per file), so re-running is cheap.
+vouches for it; `index_directory(directory=None)` (re)indexes. The stdio server keeps its
+own docs root indexed in the background (at start, and when a search sees change), so
+call it only when `index_status.message` asks for it - never while `index_status.indexing`
+is true. It is incremental (SHA-256 per file), so re-running is cheap.
 `file_path` may be absolute, relative to the docs root, or any unique path suffix. An
 error from `read_section` lists the valid heading paths - retry with one of them rather
 than falling back to reading the file.

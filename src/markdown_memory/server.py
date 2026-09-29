@@ -25,7 +25,9 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from markdown_memory import headings
+from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import (
+    ENV_AUTO_INDEX,
     ENV_DB_PATH,
     ENV_DOCS_DIR,
     ENV_EMBEDDER,
@@ -72,9 +74,11 @@ _R = TypeVar("_R")
 
 
 SERVER_INSTRUCTIONS = (
-    "Markdown documentation memory. Workflow: index_directory once, then search_docs to "
-    "locate relevant sections, or get_document_outline followed by read_section to fetch "
-    "one heading's text. Prefer these tools over reading whole Markdown files."
+    "Markdown documentation memory. The server keeps its documentation root indexed by "
+    "itself (unless started with --no-auto-index); call index_directory only when "
+    "index_status says so. Use search_docs to locate relevant sections, or "
+    "get_document_outline followed by read_section to fetch one heading's text. Prefer "
+    "these tools over reading whole Markdown files."
 )
 
 
@@ -98,6 +102,9 @@ class MarkdownMemoryService:
         self._root = str(headings._absolute(self._config.docs_dir, SearchError))
         self._freshness = FreshnessSweep(self._db)
         self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
+        #: Only the stdio server starts one (`main`): a service built by a test or a
+        #: script does exactly what it is asked and nothing in the background.
+        self._auto: AutoIndexer | None = None
 
     @property
     def db(self) -> Database:
@@ -108,14 +115,31 @@ class MarkdownMemoryService:
         return self._embedder
 
     def close(self) -> None:
+        # The background run first, and waited for: it writes through the database that
+        # is about to close, and a stop lands between two documents.
+        if self._auto is not None:
+            self._auto.stop()
         self._searcher.close()
         self._db.close()
 
+    def start_auto_index(self) -> None:
+        """Keep the docs root indexed from now on: one run now, more as searches see change."""
+        if self._auto is None:
+            self._auto = AutoIndexer(
+                lambda should_stop: self.index_directory(None, should_stop=should_stop),
+                self._root_status,
+            )
+        self._auto.request()
+
     # ------------------------------------------------------------------ operations
 
-    def index_directory(self, directory: str | None = None) -> IndexReport:
+    def index_directory(
+        self, directory: str | None = None, should_stop: Callable[[], bool] | None = None
+    ) -> IndexReport:
         try:
-            return self._indexer.index_directory(self._resolve_directory(directory))
+            return self._indexer.index_directory(
+                self._resolve_directory(directory), should_stop=should_stop
+            )
         finally:
             # Whatever just happened, the sweep's answer is about the tree as it was
             # before it: a run that refreshed the files it named would otherwise keep
@@ -160,7 +184,12 @@ class MarkdownMemoryService:
         answer is drawn from; `directory` only narrows which failures are worth naming.
         """
         if directory is None:
-            return self._with_freshness(self._db.index_status(self._root), self._root)
+            status = self._root_status()
+            # The root's own status is what a search reads, so it is also what decides
+            # whether the background run is due - there is no other look at the disk.
+            if self._auto is not None:
+                self._auto.consider(status)
+            return self._with_indexing(status)
         # Narrowed in one read, not composed from two: coverage stays the root's - that is
         # the tree every answer is drawn from - while the failures and stale documents
         # named are the ones that live here. Resolved against the root this service was
@@ -169,7 +198,16 @@ class MarkdownMemoryService:
         scope = self._within_root(
             headings._absolute(Path(self._root) / directory.strip(), SearchError), SearchError
         )
-        return self._with_freshness(self._db.index_status(self._root, str(scope)), str(scope))
+        return self._with_indexing(
+            self._with_freshness(self._db.index_status(self._root, str(scope)), str(scope))
+        )
+
+    def _root_status(self) -> IndexStatus:
+        return self._with_freshness(self._db.index_status(self._root), self._root)
+
+    def _with_indexing(self, status: IndexStatus) -> IndexStatus:
+        active = self._auto is not None and self._auto.active
+        return dataclasses.replace(status, indexing=active) if active else status
 
     def _with_freshness(self, status: IndexStatus, scope: str) -> IndexStatus:
         """Add what only the filesystem knows: which indexed files have moved on.
@@ -434,6 +472,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"(env {ENV_EXCLUDE}, comma separated)",
     )
     parser.add_argument(
+        "--no-auto-index",
+        action="store_true",
+        help=f"Do not keep the docs root indexed in the background (env {ENV_AUTO_INDEX}=0)",
+    )
+    parser.add_argument(
         "--embedder",
         choices=("embeddinggemma", "bge-small"),
         help=f"Embedding model preset (env {ENV_EMBEDDER}; default {DEFAULT_EMBEDDER})",
@@ -451,6 +494,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     threading.Thread(
         target=_warm_up, args=(service.embedder,), name="mdmem-warmup", daemon=True
     ).start()
+    if config.auto_index:
+        service.start_auto_index()
     try:
         create_server(config, service=service).run("stdio")
     finally:
