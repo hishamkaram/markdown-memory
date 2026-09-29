@@ -113,9 +113,10 @@ class AutoIndexer:
 
     def _work(self) -> None:
         baseline: int | None = None
+        before = self._mismatch()
         try:
             report = self._run(self._is_stopping)
-            baseline = self._measure().changed_files if report.errors else 0
+            baseline = self._changed() if report.errors else 0
         except IndexCancelled:
             logger.info("Automatic index run stopped")
         except IndexBusyError as exc:
@@ -123,15 +124,33 @@ class AutoIndexer:
             # so nothing is learnt about this tree; the next search asks again.
             logger.info("Automatic index run skipped: %s", exc)
         except Exception:
+            # The whole run failed - a model that will not load, say. Retrying it for the
+            # same edit every few seconds would load the model every few seconds: what
+            # it left behind becomes the baseline, and only a further change is news.
             logger.exception("Automatic index run failed")
-        try:
-            mismatch = self._measure().weights_mismatch
-        except Exception:
-            logger.exception("Cannot read the index status after an automatic run")
-            mismatch = self._seen_mismatch
+            baseline = self._changed()
+        after = self._mismatch()
         with self._lock:
             self._last_finished = self._clock()
             if baseline is not None:
                 self._baseline = baseline
-            self._seen_mismatch = mismatch
+            # Seen only if this run met it and could not clear it. One a search recorded
+            # while the run was busy is news the run never acted on.
+            if after is None or after == before:
+                self._seen_mismatch = after
             self._thread = None
+
+    def _changed(self) -> int | None:
+        try:
+            return self._measure().changed_files
+        except Exception:
+            logger.exception("Cannot read the index status around an automatic run")
+            return None
+
+    def _mismatch(self) -> str | None:
+        try:
+            return self._measure().weights_mismatch
+        except Exception:
+            logger.exception("Cannot read the index status around an automatic run")
+            with self._lock:
+                return self._seen_mismatch

@@ -13,7 +13,7 @@ from fakes import FakeEmbedder
 import markdown_memory.server as server_module
 from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import ServerConfig, resolve_config
-from markdown_memory.exceptions import IndexBusyError, IndexCancelled
+from markdown_memory.exceptions import IndexBusyError, IndexCancelled, ModelLoadError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import FileFailure, IndexReport, IndexStatus
 from markdown_memory.server import MarkdownMemoryService
@@ -47,12 +47,15 @@ class _Harness:
     def __init__(self, *outcomes: IndexReport | Exception) -> None:
         self.outcomes = list(outcomes)
         self.runs = 0
+        #: Called inside a run, as a search in another thread would act meanwhile.
+        self.during: Callable[[], None] = lambda: None
         self.after = IndexStatus(verified=True)
         self.clock = _Clock()
         self.runner = AutoIndexer(self._run, lambda: self.after, clock=self.clock)
 
     def _run(self, _should_stop: Callable[[], bool]) -> IndexReport:
         self.runs += 1
+        self.during()
         outcome = self.outcomes.pop(0) if self.outcomes else _report()
         if isinstance(outcome, Exception):
             raise outcome
@@ -128,6 +131,32 @@ class TestWhatStartsARun:
         assert not h.consider(changed=1), "the baseline absorbed what nobody indexed"
         assert h.consider(changed=2), "an edit the interrupted run never saw still counts"
 
+    def test_a_run_that_fails_whole_is_not_retried_for_the_same_edit(self) -> None:
+        """A model that will not load fails every run. Measured against the old baseline,
+        the same edit started one - and a model load - every ten seconds."""
+        h = _Harness(ModelLoadError("the model will not load"))
+        h.after = IndexStatus(verified=True, changed_files=1)
+        h.runner.request()
+        h.settle()
+        h.clock.now += 60
+        assert not h.consider(changed=1)
+        assert h.consider(changed=2), "a further edit still counts"
+
+    def test_a_mismatch_recorded_while_a_run_was_busy_is_still_acted_on(self) -> None:
+        """A search can record a mismatch while a run that never saw it is finishing.
+        Marking it seen at the end of that run left it for the walk, minutes later."""
+        h = _Harness()
+
+        def a_search_records_one() -> None:
+            h.after = IndexStatus(verified=False, weights_mismatch="drift")
+
+        h.during = a_search_records_one
+        h.runner.request()
+        h.settle()
+        h.during = lambda: None
+        assert h.consider(mismatch="drift"), "news the run never acted on"
+        assert not h.consider(mismatch="drift"), "met and not cleared: seen"
+
     def test_the_walk_that_finds_new_files_is_due_after_the_interval(
         self, harness: _Harness
     ) -> None:
@@ -170,6 +199,7 @@ class TestOneRunAtATime:
         def run(should_stop: Callable[[], bool]) -> IndexReport:
             while not should_stop():
                 time.sleep(0.001)
+            time.sleep(0.2)  # the file in hand, finished before the stop lands
             asked.set()
             raise IndexCancelled("stopped")
 
@@ -257,6 +287,7 @@ class _Slow(FakeEmbedder):
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         self.entered.set()
         self.release.wait(5)
+        time.sleep(0.2)  # still embedding when the closer moves on, if it does not wait
         return super().embed_documents(texts)
 
 
@@ -298,6 +329,7 @@ class TestTheService:
         embedder.release.set()
         closer.join(10)
         assert not closer.is_alive()
+        assert service._auto is not None and not service._auto.active, "closed under a run"
         assert "Automatic index run failed" not in caplog.text
         assert "mdmem-autoindex" not in {thread.name for thread in threading.enumerate()}
 

@@ -405,8 +405,8 @@ MUTATIONS = (
     Mutation(
         name="auto: let a clean run adopt an edit made while it ran as the norm",
         module="autoindex.py",
-        old="            baseline = self._measure().changed_files if report.errors else 0\n",
-        new="            baseline = self._measure().changed_files\n",
+        old="            baseline = self._changed() if report.errors else 0\n",
+        new="            baseline = self._changed()\n",
         tests="test_an_edit_made_while_a_clean_run_ran_starts_the_next_one",
     ),
     Mutation(
@@ -415,7 +415,7 @@ MUTATIONS = (
         old='            logger.info("Automatic index run skipped: %s", exc)\n',
         new=(
             '            logger.info("Automatic index run skipped: %s", exc)\n'
-            "            baseline = self._measure().changed_files\n"
+            "            baseline = self._changed()\n"
         ),
         tests="test_a_run_that_did_not_happen_keeps_the_baseline",
     ),
@@ -425,9 +425,26 @@ MUTATIONS = (
         old='            logger.info("Automatic index run stopped")\n',
         new=(
             '            logger.info("Automatic index run stopped")\n'
-            "            baseline = self._measure().changed_files\n"
+            "            baseline = self._changed()\n"
         ),
         tests="test_a_run_that_did_not_happen_keeps_the_baseline",
+    ),
+    Mutation(
+        name="auto: retry a run that failed whole for the same edit every few seconds",
+        module="autoindex.py",
+        old=(
+            '            logger.exception("Automatic index run failed")\n'
+            "            baseline = self._changed()\n"
+        ),
+        new='            logger.exception("Automatic index run failed")\n',
+        tests="test_a_run_that_fails_whole_is_not_retried_for_the_same_edit",
+    ),
+    Mutation(
+        name="auto: mark a mismatch a search recorded mid-run as already handled",
+        module="autoindex.py",
+        old="            if after is None or after == before:\n",
+        new="            if True:\n",
+        tests="test_a_mismatch_recorded_while_a_run_was_busy_is_still_acted_on",
     ),
     Mutation(
         name="auto: never walk the tree for files nobody indexed yet",
