@@ -1844,6 +1844,9 @@ class TestPerDocumentWeights:
 
         with Database(path) as migrated:
             assert migrated.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+            assert set(migrated.document_hashes(str(docs)).values()) == {
+                (*value[:3], None) for value in migrated.document_hashes(str(docs)).values()
+            }, "a stamp invented for vectors nobody can vouch for"
             assert migrated.get_meta("embedding_weights_mismatch") is not None
             assert not self.ranks_by_vector(migrated, FakeEmbedder(weights="b" * 40))
 

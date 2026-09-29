@@ -1433,10 +1433,18 @@ def test_a_repair_killed_partway_resumes_where_it_stopped(db: Database, tmp_path
 class _NothingDiscardedFirst(FakeEmbedder):
     """A renamed model with named weights that checks, as it embeds, what is still stored."""
 
-    def __init__(self, db: Database, expected: int) -> None:
+    def __init__(self, db: Database, expected: int, lazy: bool = False) -> None:
         super().__init__(model_name="renamed", weights="b" * 40)
         self._db = db
         self._expected = expected
+        self._loaded = not lazy
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._weights if self._loaded else None
+
+    def warm_up(self) -> None:
+        self._loaded = True
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         assert self._db.count_rows("documents") == self._expected, "discarded first"
@@ -1462,6 +1470,28 @@ def test_a_renamed_model_with_named_weights_repairs_instead_of_discarding(
 
     assert report.files_indexed == 2
     assert report.notes == (), "nothing was discarded, so nothing to announce"
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too(
+    db: Database, tmp_path: Path
+) -> None:
+    """A lazily loaded model cannot name its weights until it loads, and the rename was
+
+    decided before that - so it discarded the index anyway. It is loaded first: the run
+    re-embeds everything regardless, and knowing the weights is what spares the index.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in ("a", "b"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+    Indexer(db, FakeEmbedder(model_name="original", weights="a" * 40)).index_directory(root)
+
+    embedder = _NothingDiscardedFirst(db, expected=2, lazy=True)
+    report = Indexer(db, embedder).index_directory(root)
+
+    assert report.files_indexed == 2
+    assert report.notes == ()
     assert db.get_meta("embedding_weights_revision") == "b" * 40
 
 

@@ -252,10 +252,14 @@ class Indexer:
                     retracted = True
 
             previous_model = self._db.get_meta(_MODEL_META_KEY)
-            if (
-                previous_model not in {None, self._embedder.model_name}
-                and self._embedder.weights_revision is None
-            ):
+            renamed = previous_model not in {None, self._embedder.model_name}
+            if renamed and self._embedder.weights_revision is None:
+                # A model that names its weights only once loaded is loaded now: this run
+                # re-embeds everything anyway, and knowing the weights is what spares the
+                # index the discard below. One that will not load is discarded as before.
+                with contextlib.suppress(ModelLoadError):
+                    self._embedder.warm_up()
+            if renamed and self._embedder.weights_revision is None:
                 # Vectors from different models are not comparable, and they share one
                 # vector table. A model that names its weights up front leaves this to the
                 # per-document stamps, which re-embed each document in place while keyword

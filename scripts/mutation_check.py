@@ -314,15 +314,28 @@ MUTATIONS = (
     Mutation(
         name="weights: discard every document when a model with named weights is renamed",
         module="indexer.py",
-        old="                and self._embedder.weights_revision is None\n",
-        new="",
+        old=(
+            "            if renamed and self._embedder.weights_revision is None:\n"
+            "                # Vectors from"
+        ),
+        new="            if renamed:\n                # Vectors from",
         tests="test_a_renamed_model_with_named_weights_repairs_instead_of_discarding",
+    ),
+    Mutation(
+        name="weights: discard the index before a renamed lazy model can name its weights",
+        module="indexer.py",
+        old=(
+            "                with contextlib.suppress(ModelLoadError):\n"
+            "                    self._embedder.warm_up()\n"
+        ),
+        new="                with contextlib.suppress(ModelLoadError):\n                    pass\n",
+        tests="test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too",
     ),
     Mutation(
         name="weights: leave a pending repair to a model that has not loaded",
         module="indexer.py",
-        old="                self._embedder.warm_up()\n",
-        new="                pass\n",
+        old="            try:\n                self._embedder.warm_up()\n",
+        new="            try:\n                pass\n",
         tests="test_a_pending_repair_loads_the_model_at_the_start_of_the_run",
     ),
     Mutation(
@@ -526,11 +539,21 @@ MUTATIONS = (
         fails_with="markdown_memory.exceptions.ModelLoadError",
     ),
     Mutation(
-        name="search: leave a mismatch standing after the weights come back",
+        name="search: withdraw a pending repair because these weights agree",
         module="search.py",
-        old="            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:\n",
-        new="            if False:  # nobody withdraws it, so it stands for good\n",
-        tests="test_weights_that_come_back_clear_the_mismatch_the_search_recorded",
+        old="            # repair is pending. That run withdraws it once the whole index agrees.\n",
+        new=(
+            "            # repair is pending. That run withdraws it once the whole index agrees.\n"
+            "            self._db.record_weights_mismatch(None)\n"
+        ),
+        tests="test_weights_that_come_back_rank_again_and_leave_the_mismatch_to_a_run",
+    ),
+    Mutation(
+        name="search: rank named weights against vectors no revision vouches for",
+        module="search.py",
+        old='            if weights is None or self._db.count_rows("units_vec") == 0:\n',
+        new="            if True:\n",
+        tests="test_vectors_no_revision_vouches_for_are_not_ranked_by_named_weights",
     ),
     Mutation(
         name="status: report a mismatched index as verified anyway",
@@ -600,7 +623,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7405),',
+        old='    ("README.md", 7408),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

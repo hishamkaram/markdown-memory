@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 14,048
+       alt="One question asked of four documentation files. Reading them whole costs 14,051
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,634 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,637 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 14,048 tokens in all:
+`docs/evaluation-protocol.md`, 14,051 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  663 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  666 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   588 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,634 tokens instead of 14,048**, and the section that actually answers is 403 - a
+**2,637 tokens instead of 14,051**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -247,8 +247,8 @@ for all of its vectors:
 A model that loads but cannot say which weights it is may not write into an index that
 names its weights: its vectors could never be told apart from the ones already stored. An
 index whose vectors no revision vouches for - built while the weights could not be read -
-is withheld from vector ranking when the database is upgraded (schema v6), and the first
-run with weights that name themselves re-embeds it.
+is not ranked against a query from weights that can name themselves - from the upgrade to
+schema v6 on - and the first run with such weights re-embeds it.
 
 ### Presets
 

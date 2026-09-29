@@ -20,7 +20,7 @@ import logging
 import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
@@ -410,16 +410,22 @@ class HybridSearcher:
         Returns what was recorded, so the caller can tell whether it still is.
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
-        if recorded is None:
-            return None  # no provenance to contradict
         weights = self._embedder.weights_revision
+        if recorded is None:
+            if weights is None or self._db.count_rows("units_vec") == 0:
+                return None  # nothing named on either side, or nothing to rank
+            # Vectors no revision vouches for, and weights that can say what they are:
+            # nothing says the two are the same model, so they are not ranked together.
+            # Recorded, so the next index run loads its model and re-embeds them.
+            self._record(
+                "No record says which weights built this index's vectors, so they are not "
+                "compared with a query: only keyword ranking is used until index_directory "
+                "re-embeds them."
+            )
         if weights == recorded:
-            # Whoever recorded a mismatch - a search of this index, or an indexing run -
-            # cannot come back to withdraw it: weights that change back change no
-            # document, so no run follows. The query that finds them agreeing is the one
-            # in a position to say so.
-            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
-                self._db.record_weights_mismatch(None)
+            # A mismatch recorded by another process is left standing, even though these
+            # weights agree: it may be the only thing telling the next index run that a
+            # repair is pending. That run withdraws it once the whole index agrees.
             return recorded
         if recorded == WEIGHTS_REVOKED:
             # An indexing run is replacing the vectors, and has said so where
@@ -435,9 +441,15 @@ class HybridSearcher:
             "between two models' vectors measures nothing, so only keyword ranking is used "
             "until index_directory re-embeds this documentation root."
         )
-        # Persisted, because the answer this query is about to give is half of one, and
-        # the agent reading it is told the index is healthy by an `index_status` that no
-        # indexing run will correct - weights can change while no document does.
+        self._record(message)
+
+    def _record(self, message: str) -> NoReturn:
+        """Persist why vectors are not ranked, then fail the vector half of this search.
+
+        Persisted, because the answer this query is about to give is half of one, and the
+        agent reading it is told the index is healthy by an `index_status` that no
+        indexing run will correct - weights can change while no document does.
+        """
         if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:
             self._db.record_weights_mismatch(message)
         raise SearchError(message)
