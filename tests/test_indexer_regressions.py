@@ -849,6 +849,26 @@ def test_a_pending_repair_loads_the_model_at_the_start_of_the_run(
     assert db.get_meta("embedding_weights_revision") == "b" * 40
 
 
+def test_vectors_no_revision_vouches_for_are_a_pending_repair(
+    db: Database, one_document: Path
+) -> None:
+    """Vectors stored while the weights could not be read leave no revision and no
+
+    mismatch behind. A run whose model names itself only once loaded skipped every
+    unchanged document on content alone, found nothing to say, and left the index
+    unvouched-for until some search happened to notice.
+    """
+    Indexer(db, FakeEmbedder()).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") is None
+
+    embedder = _CountingWarmUp("b" * 40)
+    report = Indexer(db, embedder).index_directory(one_document)
+
+    assert embedder.warm_ups >= 1
+    assert report.files_indexed == 1
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
 def test_a_pending_repair_whose_model_will_not_load_does_not_fail_the_run(
     db: Database, one_document: Path
 ) -> None:
@@ -1495,6 +1515,20 @@ def test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too(
     assert db.get_meta("embedding_weights_revision") == "b" * 40
 
 
+class _FirstLoadFails(_RevisionAfterLoading):
+    """Named weights whose first load fails and whose second succeeds."""
+
+    def __init__(self, revision: str) -> None:
+        super().__init__(revision)
+        self._failed = False
+
+    def warm_up(self) -> None:
+        if not self._failed:
+            self._failed = True
+            raise ModelLoadError("not yet")
+        super().warm_up()
+
+
 def test_vectors_nobody_vouched_for_are_not_ranked_beside_named_ones(
     db: Database, tmp_path: Path
 ) -> None:
@@ -1511,8 +1545,10 @@ def test_vectors_nobody_vouched_for_are_not_ranked_beside_named_ones(
     Indexer(db, _LazyWeights(None)).index_directory(root)
     assert db.get_meta("embedding_weights_revision") is None
 
+    # Loaded at the start to repair them, the model would re-embed both; this one fails
+    # that first load, so b.md is skipped on content and the two really are mixed.
     (root / "a.md").write_text("# a\n\nhello again\n")
-    Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(root)  # b.md skipped
+    Indexer(db, _FirstLoadFails("b" * 40)).index_directory(root)
 
     assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
     assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))

@@ -339,6 +339,13 @@ MUTATIONS = (
         tests="test_a_pending_repair_loads_the_model_at_the_start_of_the_run",
     ),
     Mutation(
+        name="weights: leave vectors no revision vouches for to whichever search notices",
+        module="indexer.py",
+        old='            or (recorded is None and self._db.count_rows("units_vec") > 0)\n',
+        new="            or False\n",
+        tests="test_vectors_no_revision_vouches_for_are_a_pending_repair",
+    ),
+    Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
         module="indexer.py",
         old="            except ModelLoadError as exc:\n",

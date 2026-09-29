@@ -459,15 +459,18 @@ class Indexer:
 
         A model that names its weights without loading (EmbeddingGemma) always answers.
         One that learns them by loading (bge-small) is loaded here only when a repair is
-        pending - the index is being re-embedded, or disagrees with some model - because
-        such a run has embedding to do anyway; otherwise a run that changes nothing would
-        pay for a model load. None means documents are compared on content and format
-        alone, as before stamps existed; a stale one left behind that way keeps the
-        certificate withheld at the end of the run, and the next run repairs it.
+        pending - the index is being re-embedded, disagrees with some model, or holds
+        vectors no revision vouches for - because such a run has embedding to do anyway;
+        otherwise a run that changes nothing would pay for a model load. None means
+        documents are compared on content and format alone, as before stamps existed; a
+        stale one left behind that way keeps the certificate withheld at the end of the
+        run, and the next run repairs it.
         """
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if self._embedder.weights_revision is None and (
-            self._db.get_meta(WEIGHTS_META_KEY) == WEIGHTS_REVOKED
+            recorded == WEIGHTS_REVOKED
             or self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+            or (recorded is None and self._db.count_rows("units_vec") > 0)
         ):
             try:
                 self._embedder.warm_up()
