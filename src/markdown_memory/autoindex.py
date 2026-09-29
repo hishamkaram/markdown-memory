@@ -113,6 +113,7 @@ class AutoIndexer:
 
     def _work(self) -> None:
         baseline: int | None = None
+        busy = False
         before = self._mismatch()
         try:
             report = self._run(self._is_stopping)
@@ -123,6 +124,7 @@ class AutoIndexer:
             # Someone else holds the lock - maybe on another root of a shared database -
             # so nothing is learnt about this tree; the next search asks again.
             logger.info("Automatic index run skipped: %s", exc)
+            busy = True
         except Exception:
             # The whole run failed - a model that will not load, say. Retrying it for the
             # same edit every few seconds would load the model every few seconds: what
@@ -132,6 +134,13 @@ class AutoIndexer:
         after = self._mismatch()
         with self._lock:
             self._last_finished = self._clock()
+            if busy:
+                # Nothing ran, so nothing is known: ask again once the change gap has
+                # passed rather than a whole walk interval later - a root nobody has
+                # indexed has no changed files to prompt the next attempt.
+                self._last_finished -= self._walk_gap - self._change_gap
+                self._thread = None
+                return
             if baseline is not None:
                 self._baseline = baseline
             # Seen only if this run met it and could not clear it. One a search recorded

@@ -114,13 +114,8 @@ class TestWhatStartsARun:
         h.clock.now += 10
         assert h.consider(changed=1)
 
-    @pytest.mark.parametrize(
-        "interruption",
-        [IndexBusyError("another process"), IndexCancelled("stopped")],
-        ids=["busy", "cancelled"],
-    )
-    def test_a_run_that_did_not_happen_keeps_the_baseline(self, interruption: Exception) -> None:
-        h = _Harness(_report(errors=1), interruption)
+    def test_a_stopped_run_keeps_the_baseline(self) -> None:
+        h = _Harness(_report(errors=1), IndexCancelled("stopped"))
         h.after = IndexStatus(verified=False, changed_files=1)
         h.runner.request()
         h.settle()
@@ -156,6 +151,20 @@ class TestWhatStartsARun:
         h.during = lambda: None
         assert h.consider(mismatch="drift"), "news the run never acted on"
         assert not h.consider(mismatch="drift"), "met and not cleared: seen"
+
+    def test_a_run_another_process_blocked_is_retried_soon_and_learns_nothing(self) -> None:
+        """At start a shared database may be busy with another root. This root was never
+        indexed, so no changed file prompts the next attempt; waiting for the walk left it
+        unindexed for five minutes, and marked a mismatch nobody acted on as seen."""
+        h = _Harness(IndexBusyError("another process"), IndexBusyError("another process"))
+        h.after = IndexStatus(verified=False, weights_mismatch="drift")
+        h.runner.request()
+        h.settle()
+        assert h.consider(mismatch="drift"), "a mismatch nobody acted on is not seen"
+        h.clock.now += 9
+        assert not h.consider()
+        h.clock.now += 1
+        assert h.consider(), "retried after the change gap, not the walk interval"
 
     def test_the_walk_that_finds_new_files_is_due_after_the_interval(
         self, harness: _Harness
