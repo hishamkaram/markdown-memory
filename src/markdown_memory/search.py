@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TypeVar
 
-from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.models import SearchResult
@@ -421,11 +421,19 @@ class HybridSearcher:
             if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
                 self._db.record_weights_mismatch(None)
             return recorded
+        if recorded == WEIGHTS_REVOKED:
+            # An indexing run is replacing the vectors, and has said so where
+            # `index_status` reads it; until it finishes, no weights - old or new - have
+            # a whole index to rank against.
+            raise SearchError(
+                "This index is being re-embedded with other weights, so only keyword "
+                "ranking is used until index_directory finishes."
+            )
         message = (
             f"This index was built by weights {short_weights(recorded)} and the model "
             f"answering now reports {short_weights(weights)}: the distance "
             "between two models' vectors measures nothing, so only keyword ranking is used "
-            "until this documentation root is re-indexed from scratch."
+            "until index_directory re-embeds this documentation root."
         )
         # Persisted, because the answer this query is about to give is half of one, and
         # the agent reading it is told the index is healthy by an `index_status` that no

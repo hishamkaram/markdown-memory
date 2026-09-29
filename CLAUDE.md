@@ -54,7 +54,7 @@ The first run downloads the embedding model (~218 MB) into
 | `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
-| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v5), repository methods, `integrity_problems()` |
+| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v6), repository methods, `integrity_problems()` |
 | `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, exclusions, symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
 | `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the graph file, the `.verified` stamp, `flock`, atomic writes |
 | `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds. `weights_revision` names the revision *and* the graph, because one revision publishes several |
@@ -132,8 +132,12 @@ accepted change, record the new numbers with `--update-baseline` and update the 
 `README.md`. Rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: all lowered accuracy and cost 2-12 s per query.
 
-Changing the embedding model or its dimension invalidates every stored vector: the index
-is discarded and rebuilt (`IndexReport.notes` says so).
+Changing the embedding dimension invalidates every stored vector: the index is discarded and
+rebuilt (`IndexReport.notes` says so). Changing the weights at the same dimension does not:
+each document is stamped with the weights that embedded it (`documents.weights_revision`),
+the index-wide revision is revoked while stamps disagree, and a run re-embeds the stale
+documents in place, restoring the revision once no vector-bearing row in the database is
+stale. Only a renamed model that cannot name its weights still discards the index.
 
 The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
 content, the chunking constants, the source of the modules that decide what is indexed

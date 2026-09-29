@@ -25,6 +25,8 @@ from markdown_memory import discovery
 from markdown_memory.db import (
     VECTOR_FORMAT,
     WEIGHTS_META_KEY,
+    WEIGHTS_MISMATCH_KEY,
+    WEIGHTS_REVOKED,
     Database,
 )
 from markdown_memory.embedders import Embedder, short_weights
@@ -250,10 +252,16 @@ class Indexer:
                     retracted = True
 
             previous_model = self._db.get_meta(_MODEL_META_KEY)
-            if previous_model not in {None, self._embedder.model_name}:
+            if (
+                previous_model not in {None, self._embedder.model_name}
+                and self._embedder.weights_revision is None
+            ):
                 # Vectors from different models are not comparable, and they share one
-                # vector table: every document has to go, not only those under `root`.
-                # Nothing is announced when a size change already emptied (and announced) it.
+                # vector table. A model that names its weights up front leaves this to the
+                # per-document stamps, which re-embed each document in place while keyword
+                # search keeps answering; one that cannot would leave nothing to tell old
+                # vectors from new, so every document has to go, not only those under
+                # `root`. Nothing is announced when a size change already emptied it.
                 self._db.clear(
                     notice=lambda discarded: (
                         f"Embedding model changed ({previous_model} -> "
@@ -273,6 +281,7 @@ class Indexer:
             # counts its own model-change wipe as somebody else's, then refuses to certify
             # the index it just rebuilt from scratch.
             generation = self._db.generation()
+            identity = self._run_identity()
             known_hashes = self._db.document_hashes(str(root))
             weights_settled = False
 
@@ -326,6 +335,7 @@ class Indexer:
                     mtime_ns=prepared.mtime_ns,
                     sections=prepared.sections,
                     vectors=prepared.vectors,
+                    weights_revision=self._embedder.weights_revision,
                 )
                 indexed += 1
                 sections_indexed += prepared.counts[0]
@@ -359,7 +369,10 @@ class Indexer:
                                 (
                                     file_path,
                                     pool.submit(
-                                        self._prepare_file, path, known_hashes.get(file_path)
+                                        self._prepare_file,
+                                        path,
+                                        known_hashes.get(file_path),
+                                        identity,
                                     ),
                                 )
                             )
@@ -415,6 +428,8 @@ class Indexer:
                     for failure in failures
                 },
             )
+            # Whole-database, so it cannot vouch for rows this walk never reached.
+            self._db.settle_weights(self._embedder.weights_revision)
             # The walk finished, which is all this records; what it could not read is
             # recorded separately, and `index_status` refuses to call a tree whole while
             # anything under it is still listed there. Two facts, two places, one answer.
@@ -435,27 +450,46 @@ class Indexer:
         logger.info(report.summary())
         return report
 
+    def _run_identity(self) -> str | None:
+        """The weights this run embeds with, when they can be known before it embeds.
+
+        A model that names its weights without loading (EmbeddingGemma) always answers.
+        One that learns them by loading (bge-small) is loaded here only when a repair is
+        pending - the index is being re-embedded, or disagrees with some model - because
+        such a run has embedding to do anyway; otherwise a run that changes nothing would
+        pay for a model load. None means documents are compared on content and format
+        alone, as before stamps existed; a stale one left behind that way keeps the
+        certificate withheld at the end of the run, and the next run repairs it.
+        """
+        if self._embedder.weights_revision is None and (
+            self._db.get_meta(WEIGHTS_META_KEY) == WEIGHTS_REVOKED
+            or self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+        ):
+            try:
+                self._embedder.warm_up()
+            except ModelLoadError as exc:
+                # Degrade rather than fail: a run whose files need no embedding can still
+                # finish, and the recorded message keeps saying what is wrong.
+                logger.warning("Model not loaded, stored weights not compared: %s", exc)
+        return self._embedder.weights_revision
+
     def _settle_weights(self) -> None:
-        """Stop before storing if the model is not the one whose vectors are stored.
+        """Make sure the index says it is being re-embedded before other weights write in.
 
         Called once per run, from the driver, at the first document that really has
-        vectors - so a document of headings alone, which embeds nothing, may already have
-        been stored when this refuses; what it guarantees is that no vector from another
-        model reaches the index, not that the run wrote nothing at all. That is the
-        earliest moment it can run: the only moment a lazily-loaded embedder can be asked
-        what it is without making a run that needs no model load one, and the only thread
-        allowed to write what the answer implies. Nothing is discarded; a rebuild costs a quarter of
-        an hour and is the user's to ask for. But nothing new is written either, and every
-        `index_status` says why until it is resolved.
+        vectors: the earliest moment a lazily-loaded embedder can be asked what it is
+        without making a run that needs no model load one, and on the only thread allowed
+        to write what the answer implies. Weights that differ from the recorded ones - or
+        any known weights joining vectors nobody vouched for - revoke the certificate and
+        carry on: every search, whatever model it runs, then ranks on keywords alone until
+        `settle_weights` finds every vector-bearing document stamped with one revision.
+        Nothing is discarded first, so keyword search answers throughout, and a run killed
+        partway resumes where it stopped, because each document's stamp is written with
+        its vectors.
 
-        Both facts are read here rather than carried from the start of the run. Once per
-        run is cheap - this is two queries, not two per file, which is what made the
-        per-file version a read-modify-write racing its own writes - and a value read at
-        the start can be wrong by now: a document rewritten to headings alone earlier in
-        this same run takes its passages with it, and may have been the last vectors in
-        the index.
+        Weights that cannot be named still refuse: vectors written now would be
+        indistinguishable from the ones already stored, and no stamp could repair that.
         """
-        recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if self._db.count_rows("units_vec") == 0:
             # No vector here for any of this to be about. Documents are the wrong
             # question: a file of nothing but headings is stored and embeds nothing, so an
@@ -466,17 +500,18 @@ class Indexer:
             # over no vectors, which the next one clears exactly here.
             self._claim_empty_index()
             return
-        if recorded is None:
-            return  # no provenance to contradict
-        # Already loaded: a worker embedded the document this is about to refuse. Kept
+        recorded = self._db.get_meta(WEIGHTS_META_KEY)
+        # Already loaded: a worker embedded the document this is about to store. Kept
         # anyway, because `warm_up` is what makes `weights_revision` answerable and this
         # is called from tests and from runs whose first document came from a cache.
         self._embedder.warm_up()
         weights = self._embedder.weights_revision
-        if weights == recorded:
-            self._db.record_weights_mismatch(None)
-            return
         if weights is None:
+            if recorded in {None, WEIGHTS_REVOKED}:
+                # No provenance to contradict, or none left to protect: a revoked index is
+                # already ranked by keyword alone, and only a run whose weights have a name
+                # can stamp its way back out of that.
+                return
             # The model loaded, so something answered - it just cannot say which weights
             # it is. That is not "nothing to compare": the vectors written now would be
             # unlabelled and indistinguishable from the ones already stored, which is the
@@ -489,21 +524,18 @@ class Indexer:
                 "been updated before this was reached; repair the model cache and run "
                 "index_directory again."
             )
-        else:
-            message = (
-                f"The weights behind {self._embedder.model_name} changed since this index was "
-                f"built ({short_weights(recorded)} -> {short_weights(weights)}), so its vectors "
-                "and the ones a "
-                "query would produce now come from different models. Nothing has been "
-                "discarded and no vector from the new model has been stored - a document "
-                "of headings alone, which embeds nothing, may have been updated before "
-                "this was reached; re-index this documentation "
-                f"root from scratch (delete {self._db.path} and run index_directory) to make "
-                "them comparable again."
-            )
-        self._db.record_weights_mismatch(message)
-        self._db.revoke_coverage()
-        raise ForeignWeightsError(message)
+            self._db.record_weights_mismatch(message)
+            self._db.revoke_coverage()
+            raise ForeignWeightsError(message)
+        if weights == recorded:
+            self._db.record_weights_mismatch(None)
+            return
+        self._db.revoke_weights(
+            f"{self._embedder.model_name} is re-embedding this index with other weights "
+            f"({short_weights(weights)}). Only keyword ranking is used until every "
+            "document has been re-embedded; semantic ranking resumes when index_directory "
+            "finishes."
+        )
 
     def _claim_empty_index(self) -> None:
         """Take ownership of an index that holds no vectors, and drop what described none.
@@ -591,7 +623,10 @@ class Indexer:
         return vanished
 
     def _prepare_file(
-        self, path: Path, known: tuple[str, int, int | None] | None
+        self,
+        path: Path,
+        known: tuple[str, int, int | None, str | None] | None,
+        identity: str | None,
     ) -> _Prepared | None:
         """Read, parse and embed one file. ``None`` when it is unchanged.
 
@@ -619,8 +654,14 @@ class Indexer:
         content_hash = discovery.hash_bytes(data)
         # The format counts as much as the content: a file whose bytes never changed still
         # has to be rebuilt if its vectors were pooled by an older scheme, or it would keep
-        # them forever and the table would answer one query two different ways.
-        if known is not None and known[:2] == (content_hash, VECTOR_FORMAT):
+        # them forever and the table would answer one query two different ways. So do the
+        # weights, once this run knows its own: a document stamped by other ones is
+        # re-embedded in place, which is how a changed model repairs the index file by file.
+        if (
+            known is not None
+            and known[:2] == (content_hash, VECTOR_FORMAT)
+            and (identity is None or known[3] == identity)
+        ):
             if known[2] == info.st_mtime_ns:
                 return None
             # Same bytes, a different timestamp: nothing to parse, embed or store, but the

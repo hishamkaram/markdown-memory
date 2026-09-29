@@ -467,3 +467,21 @@ class TestRankingIsActuallyTested:
             "SELECT heading_title FROM sections WHERE id = ?", (first,)
         ).fetchone()  # fmt: skip
         assert heading_match[0] == "Vacuuming"  # bm25(5.0, 3.0, 1.0) weights the heading
+
+
+def test_a_revoked_index_keeps_the_reason_the_indexer_gave(tmp_path: Path) -> None:
+    """While a run re-embeds the index, the revision matches no model, and search used to
+
+    overwrite the indexer's account - which names what is left to do - with its own guess
+    that the index needed rebuilding from scratch.
+    """
+    with Database(tmp_path / "index.db") as db:
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.revoke_weights("re-embedding under /d")
+        searcher = HybridSearcher(db, FakeEmbedder(weights="b" * 40))
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert results and all(result.vec_rank is None for result in results)
+        assert db.get_meta("embedding_weights_mismatch") == "re-embedding under /d"

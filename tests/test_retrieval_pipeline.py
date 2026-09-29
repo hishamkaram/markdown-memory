@@ -251,10 +251,11 @@ class TestUnitStorage:
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
             conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
+            conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
             conn.execute("PRAGMA user_version = 1")
         with Database(path) as migrated:
             version = migrated.connection().execute("PRAGMA user_version").fetchone()[0]
-            assert int(version) == SCHEMA_VERSION == 5
+            assert int(version) == SCHEMA_VERSION == 6
             store(migrated, fake_embedder, "/d/a.md", self.SECTIONS)
             assert migrated.count_rows("units_vec") == 3
 

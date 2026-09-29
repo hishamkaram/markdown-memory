@@ -132,6 +132,7 @@ class TestSchema:
             "last_modified",
             "vector_format",
             "mtime_ns",
+            "weights_revision",
         ]
         assert sections == [
             "id", "doc_id", "heading_title", "heading_level", "heading_path",

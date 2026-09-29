@@ -25,7 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 import markdown_memory.indexer as indexer_module
 from markdown_memory import discovery
 from markdown_memory.config import ServerConfig
-from markdown_memory.db import SCHEMA_VERSION, Database
+from markdown_memory.db import SCHEMA_VERSION, WEIGHTS_REVOKED, Database
 from markdown_memory.discovery import iter_markdown_files
 from markdown_memory.exceptions import (
     DatabaseError,
@@ -353,6 +353,7 @@ class TestMigrationInvalidatesTheIndex:
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
             conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
+            conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
             conn.execute("PRAGMA user_version = 1")
 
     def test_v1_documents_are_dropped_so_reindexing_rebuilds_them_with_passages(
@@ -386,6 +387,7 @@ class TestMigrationInvalidatesTheIndex:
             conn.execute("DROP TABLE index_coverage")
             conn.execute("ALTER TABLE documents DROP COLUMN vector_format")
             conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
+            conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
             conn.execute("PRAGMA user_version = 2")
 
     def test_a_v4_database_keeps_its_documents_and_learns_to_time_them(
@@ -406,6 +408,7 @@ class TestMigrationInvalidatesTheIndex:
         with Database(path) as database:  # rewind to what v4 left behind
             conn = database.connection()
             conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
+            conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
             conn.execute("PRAGMA user_version = 4")
 
         with Database(path) as migrated:
@@ -433,6 +436,9 @@ class TestMigrationInvalidatesTheIndex:
         answering - and every document simply carries the older format until the next run
         of its root rebuilds it.
         """
+        # Weights with a name, as every index built by EmbeddingGemma has: vectors nobody
+        # vouched for are quarantined by the v6 step, which is another test's business.
+        fake_embedder = FakeEmbedder(weights="rev-a")
         docs = tmp_path / "docs"
         docs.mkdir()
         (docs / "a.md").write_text("# A\n\nalpha body\n")
@@ -1782,3 +1788,97 @@ class TestOnlyAWholeWalkVouchesForATree:
         finally:
             indexer._run_lock.release()
             worker.join(timeout=10)
+
+
+class TestPerDocumentWeights:
+    """Schema v6: each document names the weights that embedded it."""
+
+    @staticmethod
+    def build_v5(path: Path, docs: Path, embedder: FakeEmbedder) -> None:
+        """An index as the release before this one left it: no stamp on any document."""
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n")
+        with Database(path) as database:
+            Indexer(database, embedder).index_directory(docs)
+        with Database(path) as database:
+            conn = database.connection()
+            conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
+            conn.execute("PRAGMA user_version = 5")
+
+    @staticmethod
+    def ranks_by_vector(database: Database, embedder: FakeEmbedder) -> bool:
+        searcher = HybridSearcher(database, embedder)
+        try:
+            results = searcher.search("alpha")
+        finally:
+            searcher.close()
+        assert results, "keyword search answers whatever state the vectors are in"
+        return any(result.vec_rank is not None for result in results)
+
+    def test_an_upgrade_stamps_every_document_with_the_recorded_weights(
+        self, tmp_path: Path
+    ) -> None:
+        """The recorded revision already vouched for every vector, so copying it onto each
+
+        document is exact - and an upgrade costs no embedding at all, where leaving the
+        stamps empty would have re-embedded the whole index on the next run.
+        """
+        path, docs = tmp_path / "v5.db", tmp_path / "docs"
+        named = FakeEmbedder(weights="a" * 40)
+        self.build_v5(path, docs, named)
+
+        with Database(path) as migrated:
+            assert migrated.document_hashes(str(docs))[str(docs / "a.md")][3] == "a" * 40
+            report = Indexer(migrated, named).index_directory(docs)
+            assert (report.files_indexed, report.files_unchanged) == (0, 1)
+            assert self.ranks_by_vector(migrated, named)
+
+    def test_an_upgrade_quarantines_vectors_no_record_vouches_for(self, tmp_path: Path) -> None:
+        """Vectors stored while the weights could not be named carry no revision. Left
+
+        like that, the first named weights to search the index would rank against them;
+        they are withheld from ranking by the upgrade itself, before any run or search.
+        """
+        path, docs = tmp_path / "v5.db", tmp_path / "docs"
+        self.build_v5(path, docs, FakeEmbedder())
+
+        with Database(path) as migrated:
+            assert migrated.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+            assert migrated.get_meta("embedding_weights_mismatch") is not None
+            assert not self.ranks_by_vector(migrated, FakeEmbedder(weights="b" * 40))
+
+            Indexer(migrated, FakeEmbedder(weights="b" * 40)).index_directory(docs)
+            assert migrated.get_meta("embedding_weights_revision") == "b" * 40
+
+    def test_revoking_writes_the_revision_and_its_reason_together(self, db: Database) -> None:
+        """A revocation without its message leaves `index_status` calling a quarantined
+
+        index healthy; the message without the revocation lets search rank what it warns
+        about. Either both land or neither does.
+        """
+        db.set_meta("embedding_weights_revision", "a" * 40)
+        db.connection().execute(
+            "CREATE TRIGGER refuse BEFORE INSERT ON meta "
+            "WHEN NEW.key = 'embedding_weights_mismatch' BEGIN SELECT RAISE(ABORT, 'no'); END"
+        )
+        with pytest.raises(DatabaseError):
+            db.revoke_weights("re-embedding")
+        assert db.get_meta("embedding_weights_revision") == "a" * 40
+
+    def test_certifying_writes_the_revision_and_clears_the_reason_together(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The certificate and the warning against it are one fact: a revision restored
+
+        while the old warning survives leaves status contradicting search.
+        """
+        store(db, fake_embedder, "/d/a.md")
+        db.connection().execute("UPDATE documents SET weights_revision = ?", ("b" * 40,))
+        db.revoke_weights("re-embedding")
+        db.connection().execute(
+            "CREATE TRIGGER refuse BEFORE DELETE ON meta "
+            "WHEN OLD.key = 'embedding_weights_mismatch' BEGIN SELECT RAISE(ABORT, 'no'); END"
+        )
+        with pytest.raises(DatabaseError):
+            db.settle_weights("b" * 40)
+        assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED

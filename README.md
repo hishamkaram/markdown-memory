@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 13,914
+       alt="One question asked of four documentation files. Reading them whole costs 14,048
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,597 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,634 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 13,914 tokens in all:
+`docs/evaluation-protocol.md`, 14,048 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  626 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  663 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   588 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,597 tokens instead of 13,914**, and the section that actually answers is 403 - a
+**2,634 tokens instead of 14,048**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -224,30 +224,31 @@ For a machine with no network, copy the three files into
 first start hashes them once, writes the `.verified` stamp, and never touches the network.
 
 `bge-small` is downloaded by `fastembed`, which pins no revision: if that cache is deleted,
-it can come back with different weights under the same model name. The snapshot the index
-was built from is recorded, and both halves of the server check it where they would
-otherwise act on it:
+it can come back with different weights under the same model name. EmbeddingGemma's
+weights change on purpose, when a release moves its pin or graph. Either way, every document
+records the weights that embedded it, and the index records the one revision that vouches
+for all of its vectors:
 
-- **Indexing** compares at the first document it is about to store that really has vectors
-  - the moment the model has had to load, and one a run with nothing to embed never
-  reaches. On a difference it **stops before storing a single vector**, because carrying
-  on would leave two models' vectors in one index. A document that embeds nothing - all
-  headings, no passages - may already have been written when the refusal lands: it is
-  checked at the first document that really has vectors, which is the first moment the
-  model has had to load.
-  Nothing is discarded - re-indexing from scratch is yours to decide - and until you do,
-  `index_status.coverage` reads `"unknown"` with a message saying why, so an agent is never
-  told the index is healthy while it is not.
+- **Indexing repairs in place.** A document stamped by other weights is re-embedded like a
+  changed file, even when its bytes are the same. Before the first new vector is written the
+  index is marked as being re-embedded; nothing is deleted first, so keyword search answers
+  throughout, and a run that is killed resumes where it stopped, because each stamp is
+  written with its vectors. At the end of a run the revision is restored only once no
+  vector-bearing document in the whole database - every root's, and one indexed on its own
+  inside a pruned directory such as `.venv` - is stamped by anything else. Until then
+  `index_status.coverage` reads `"unknown"` and its message names the directories still to
+  be indexed.
 - **Searching** compares for itself, after embedding the query, and falls back to keyword
-  ranking alone when the answer differs. It does not wait to be told: weights can change
-  while no Markdown file does, and then there is no indexing run to notice. Ranking a
-  query's vector against vectors another model wrote measures nothing, so that half is
-  switched off until the index is rebuilt.
+  ranking alone when the answer differs - for the old weights and the new alike while a
+  repair is under way. It does not wait to be told: weights can change while no Markdown
+  file does, and then there is no indexing run to notice. The search that notices records
+  it, and the next `index_directory` loads the model first and re-embeds what it finds.
 
-A model that loads but cannot say which weights it is counts as a difference, for the same
-reason: unlabelled vectors beside labelled ones are exactly what this prevents. An index
-with **no recorded provenance** - one built before this existed - is left alone rather than
-refused: unknown is not the same as wrong, and a rebuild is a poor answer to a suspicion.
+A model that loads but cannot say which weights it is may not write into an index that
+names its weights: its vectors could never be told apart from the ones already stored. An
+index whose vectors no revision vouches for - built while the weights could not be read -
+is withheld from vector ranking when the database is upgraded (schema v6), and the first
+run with weights that name themselves re-embeds it.
 
 ### Presets
 
