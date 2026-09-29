@@ -20,9 +20,9 @@ import logging
 import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 
-from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.models import SearchResult
@@ -390,7 +390,11 @@ class HybridSearcher:
         # Again, against what was read rather than what was checked: a model *name* change
         # in another process discards every vector and rebuilds it, and a check that
         # happened before those rows were read cannot speak for them.
-        if self._db.get_meta(WEIGHTS_META_KEY) != recorded:
+        if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (
+            # Let through only because nothing was stored to disagree with; whatever the
+            # lookup found was written since, by weights other than these.
+            best and recorded != self._embedder.weights_revision
+        ):
             raise SearchError(
                 "The index was rebuilt by another model while this search was ranking; "
                 "only keyword ranking is used"
@@ -410,28 +414,54 @@ class HybridSearcher:
         Returns what was recorded, so the caller can tell whether it still is.
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
-        if recorded is None:
-            return None  # no provenance to contradict
         weights = self._embedder.weights_revision
-        if weights == recorded:
-            # Whoever recorded a mismatch - a search of this index, or an indexing run -
-            # cannot come back to withdraw it: weights that change back change no
-            # document, so no run follows. The query that finds them agreeing is the one
-            # in a position to say so.
-            if self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None:
-                self._db.record_weights_mismatch(None)
+        if recorded is not None and weights != recorded and self._db.count_rows("units_vec") == 0:
+            # A revision over no vectors - a run died between claiming it and writing the
+            # first one - has nothing to rank against, so nothing to warn about either.
             return recorded
+        if recorded is None:
+            if weights is None or self._db.count_rows("units_vec") == 0:
+                return None  # nothing named on either side, or nothing to rank
+            # Vectors no revision vouches for, and weights that can say what they are:
+            # nothing says the two are the same model, so they are not ranked together.
+            # Recorded, so the next index run loads its model and re-embeds them.
+            self._record(
+                "No record says which weights built this index's vectors, so they are not "
+                "compared with a query: only keyword ranking is used until index_directory "
+                "re-embeds them."
+            )
+        if weights == recorded:
+            # A mismatch recorded by another process is left standing, even though these
+            # weights agree: it may be the only thing telling the next index run that a
+            # repair is pending. That run withdraws it once the whole index agrees.
+            return recorded
+        if recorded == WEIGHTS_REVOKED:
+            # An indexing run is replacing the vectors, and has said so where
+            # `index_status` reads it; until it finishes, no weights - old or new - have
+            # a whole index to rank against.
+            raise SearchError(
+                "This index is being re-embedded with other weights, so only keyword "
+                "ranking is used until index_directory finishes."
+            )
         message = (
             f"This index was built by weights {short_weights(recorded)} and the model "
             f"answering now reports {short_weights(weights)}: the distance "
             "between two models' vectors measures nothing, so only keyword ranking is used "
-            "until this documentation root is re-indexed from scratch."
+            "until index_directory re-embeds this documentation root."
         )
-        # Persisted, because the answer this query is about to give is half of one, and
-        # the agent reading it is told the index is healthy by an `index_status` that no
-        # indexing run will correct - weights can change while no document does.
-        if self._db.get_meta(WEIGHTS_MISMATCH_KEY) != message:
-            self._db.record_weights_mismatch(message)
+        self._record(message)
+
+    def _record(self, message: str) -> NoReturn:
+        """Persist why vectors are not ranked, then fail the vector half of this search.
+
+        Persisted, because the answer this query is about to give is half of one, and the
+        agent reading it is told the index is healthy by an `index_status` that no
+        indexing run will correct - weights can change while no document does.
+        """
+        # Only where nothing is recorded yet, decided in the write itself: an indexing run's
+        # account - which names the directories still to re-index - says more than this
+        # query can, and may land between a check and a write.
+        self._db.record_weights_mismatch(message, replace=False)
         raise SearchError(message)
 
     def _nearest(

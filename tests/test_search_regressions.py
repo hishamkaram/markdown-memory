@@ -187,18 +187,20 @@ class TestSearchRobustness:
         assert not status.verified
         assert "only keyword ranking is used" in (status.message() or "")
 
-    def test_weights_that_come_back_clear_the_mismatch_the_search_recorded(
-        self, db: Database
+    def test_weights_that_come_back_rank_again_and_leave_the_mismatch_to_a_run(
+        self, db: Database, tmp_path: Path
     ) -> None:
-        """Nobody else can withdraw it. Weights that change back change no document, so
+        """Weights that agree with the index rank by vector at once, but do not withdraw a
 
-        no indexing run follows to notice, and the index stayed unverified and
-        keyword-only for good over a disagreement that had ended.
+        mismatch another process recorded: it may be the only thing telling the next index
+        run that a repair is pending, and a search on the old weights used to cancel it.
+        The run withdraws it once it has checked the whole index.
         """
-        embedder = _RevisedEmbedder("b" * 40)
-        store(db, embedder, "/d/a.md")
-        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
-        searcher = HybridSearcher(db, embedder)
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# A\n\nbody number one\n")
+        Indexer(db, _RevisedEmbedder("a" * 40)).index_directory(root)
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
         try:
             searcher.search("body number")
             assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
@@ -210,9 +212,108 @@ class TestSearchRobustness:
             results = healthy.search("body number")
         finally:
             healthy.close()
-
         assert any(r.vec_rank is not None for r in results)
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None, "a repair cancelled by search"
+
+        Indexer(db, _RevisedEmbedder("a" * 40)).index_directory(root)
         assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+        assert db.index_status(str(root)).verified
+
+    def test_vectors_written_unvouched_during_the_lookup_are_not_ranked(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty index records no revision, so the check before the lookup passes. If a
+
+        model that cannot name its weights stores vectors before the lookup reads them,
+        the revision is still absent afterwards and the check after it used to pass too.
+        """
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        lookup = searcher._nearest
+
+        def racing(embedding: list[float], limit: int) -> tuple[dict[int, float], dict[int, str]]:
+            store(db, FakeEmbedder(), "/d/a.md")  # another process, weights unnamed
+            return lookup(embedding, limit)
+
+        monkeypatch.setattr(searcher, "_nearest", racing)
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert all(r.vec_rank is None for r in results)
+
+    def test_a_search_does_not_replace_the_indexers_account_of_a_mismatch(
+        self, db: Database
+    ) -> None:
+        """A run that finds stale vectors names the directories to re-index. A search by
+
+        other weights used to overwrite that with a generic sentence of its own.
+        """
+        store(db, _RevisedEmbedder("a" * 40), "/d/a.md")
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        db.record_weights_mismatch("stale vectors under /d/.venv")
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert results and all(r.vec_rank is None for r in results)
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "stale vectors under /d/.venv"
+
+    def test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that dies between claiming the revision and writing its first vector leaves
+
+        a revision over nothing. Other weights searching it used to record a mismatch and
+        mark the index unverified over vectors that do not exist - and if the claiming run
+        comes back meanwhile, what its lookup finds is still not ranked by these weights.
+        """
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        try:
+            searcher.search("body number")
+            assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+
+            lookup = searcher._nearest
+
+            def racing(
+                embedding: list[float], limit: int
+            ) -> tuple[dict[int, float], dict[int, str]]:
+                store(db, _RevisedEmbedder("a" * 40), "/d/a.md")  # the claiming run returns
+                return lookup(embedding, limit)
+
+            monkeypatch.setattr(searcher, "_nearest", racing)
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        # The keyword half ran before the write, so it may find nothing; the vector half
+        # found the new rows, and must not have ranked them.
+        assert all(r.vec_rank is None for r in results)
+
+    def test_vectors_no_revision_vouches_for_are_not_ranked_by_named_weights(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """An index built while the weights could not be named records no revision. Weights
+
+        that can name themselves have nothing saying they are the model that built it, so
+        they rank by keyword alone, say why, and the next index run re-embeds the index.
+        """
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# A\n\nbody number one\n")
+        Indexer(db, FakeEmbedder()).index_directory(root)
+        assert db.get_meta(WEIGHTS_META_KEY) is None
+
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert results and all(r.vec_rank is None for r in results)
+        assert not db.index_status(str(root)).verified
+
+        Indexer(db, _RevisedEmbedder("b" * 40)).index_directory(root)
+        assert db.get_meta(WEIGHTS_META_KEY) == "b" * 40
 
     def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
@@ -467,3 +568,24 @@ class TestRankingIsActuallyTested:
             "SELECT heading_title FROM sections WHERE id = ?", (first,)
         ).fetchone()  # fmt: skip
         assert heading_match[0] == "Vacuuming"  # bm25(5.0, 3.0, 1.0) weights the heading
+
+
+def test_a_revoked_index_keeps_the_reason_the_indexer_gave(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """While a run re-embeds the index, the revision matches no model, and search used to
+
+    overwrite the indexer's account - which names what is left to do - with its own guess
+    that the index needed rebuilding from scratch, naming the sentinel as a revision.
+    """
+    with Database(tmp_path / "index.db") as db:
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.revoke_weights("re-embedding under /d")
+        searcher = HybridSearcher(db, FakeEmbedder(weights="b" * 40))
+        try:
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        assert results and all(result.vec_rank is None for result in results)
+        assert db.get_meta("embedding_weights_mismatch") == "re-embedding under /d"
+    assert "being re-embedded" in caplog.text

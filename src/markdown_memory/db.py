@@ -47,7 +47,7 @@ from markdown_memory.models import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_DIM = 384
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: How a section's vector is built. 1 embedded the whole section text, truncated at the
 #: model's token limit; 2 is the mean of the section's passage vectors. Stored per document
@@ -62,6 +62,11 @@ WEIGHTS_META_KEY = "embedding_weights_revision"
 #: It holds the sentence an agent is shown, because the index is then answering from
 #: vectors one model built while the next query would be embedded by another.
 WEIGHTS_MISMATCH_KEY = "embedding_weights_mismatch"
+#: What `WEIGHTS_META_KEY` holds while an index is being re-embedded by other weights. It
+#: equals no revision, so every search - under the old weights or the new - finds it
+#: differs from its own and ranks by keyword alone until a run re-certifies the index. A
+#: revision is a hash, sometimes with a graph path after it; this can be neither.
+WEIGHTS_REVOKED = "(revoked: being re-embedded)"
 _LEGACY_VECTORS = 1
 
 _SECTION_ID_META_KEY = "next_section_id"
@@ -249,6 +254,20 @@ def _forget_weights_without_vectors(conn: sqlite3.Connection) -> None:
         return
     conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))
     conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
+
+
+def _revoke_weights(conn: sqlite3.Connection, message: str) -> None:
+    """Mark the index as being re-embedded, and say why, in the caller's transaction.
+
+    One transaction for both: a revocation with no message would leave `index_status`
+    calling the index healthy while search refuses its vectors, and a message with no
+    revocation would let search rank the mixture the message warns about.
+    """
+    conn.executemany(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ((WEIGHTS_META_KEY, WEIGHTS_REVOKED), (WEIGHTS_MISMATCH_KEY, message)),
+    )
 
 
 def _directory_prefix(directory: str) -> str:
@@ -483,6 +502,29 @@ class Database:
                     # rebuild would cost half an hour of embedding to learn nothing.
                     tx.execute("ALTER TABLE documents ADD COLUMN mtime_ns INTEGER")
                     applied.append(5)
+                if current < 6:
+                    # Which weights embedded each document, so a change of model repairs the
+                    # index file by file instead of discarding it. Copied from the index-wide
+                    # revision where one is recorded, and that copy is exact: the revision is
+                    # written only while no vector exists, every vector after it was checked
+                    # against it, and it is forgotten only once no vector is left. Where none
+                    # is recorded but vectors are, nobody can say what built them - they are
+                    # quarantined now, in this transaction, rather than ranked against a query
+                    # until some later run happens to notice.
+                    tx.execute("ALTER TABLE documents ADD COLUMN weights_revision TEXT")
+                    recorded = tx.execute(
+                        "SELECT value FROM meta WHERE key = ?", (WEIGHTS_META_KEY,)
+                    ).fetchone()
+                    if recorded is not None:
+                        tx.execute("UPDATE documents SET weights_revision = ?", (recorded[0],))
+                    elif tx.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None:
+                        _revoke_weights(
+                            tx,
+                            "No record says which weights built this index's vectors, so "
+                            "they are not compared with a query: only keyword ranking is used "
+                            "until index_directory re-embeds them.",
+                        )
+                    applied.append(6)
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
@@ -818,20 +860,21 @@ class Database:
             for path, content_hash, mtime_ns in rows
         }
 
-    def document_hashes(self, directory: str) -> dict[str, tuple[str, int, int | None]]:
-        """Map ``file_path -> (content_hash, vector_format, mtime_ns)`` under ``directory``.
+    def document_hashes(self, directory: str) -> dict[str, tuple[str, int, int | None, str | None]]:
+        """Map ``file_path -> (hash, vector_format, mtime_ns, weights_revision)`` under it.
 
-        The format travels with the hash because both answer the same question - may this
-        file be skipped? - and a file whose vectors predate the current pooling must be
-        rebuilt however unchanged its bytes are. The recorded modification time travels
-        with them because a file that may be skipped still has to have that time brought
-        up to date, or the freshness check reads the bytes of an unchanged file for ever.
+        The format and the weights travel with the hash because all three answer the same
+        question - may this file be skipped? - and a file whose vectors predate the current
+        pooling, or came from other weights, must be rebuilt however unchanged its bytes
+        are. The recorded modification time travels with them because a file that may be
+        skipped still has to have that time brought up to date, or the freshness check reads
+        the bytes of an unchanged file for ever.
         """
         prefix = _directory_prefix(directory)
         with self._reading() as conn:
             rows = conn.execute(
-                "SELECT file_path, content_hash, vector_format, mtime_ns FROM documents "
-                "WHERE substr(file_path, 1, length(?)) = ?",
+                "SELECT file_path, content_hash, vector_format, mtime_ns, weights_revision "
+                "FROM documents WHERE substr(file_path, 1, length(?)) = ?",
                 (prefix, prefix),
             ).fetchall()
         return {
@@ -839,8 +882,9 @@ class Database:
                 str(content_hash),
                 int(vector_format),
                 None if mtime_ns is None else int(mtime_ns),
+                None if weights is None else str(weights),
             )
-            for path, content_hash, vector_format, mtime_ns in rows
+            for path, content_hash, vector_format, mtime_ns, weights in rows
         }
 
     def record_modification_time(
@@ -904,8 +948,14 @@ class Database:
         mtime_ns: int,
         sections: Sequence[SectionDraft],
         vectors: Sequence[SectionVectors],
+        weights_revision: str | None = None,
     ) -> Document:
-        """Atomically insert or fully replace one document, its sections and vectors."""
+        """Atomically insert or fully replace one document, its sections and vectors.
+
+        ``weights_revision`` names the weights that produced ``vectors``, and is written in
+        the same transaction as them: it is the one moment the two are known to belong
+        together. None means unknown, which no known revision will match.
+        """
         if len(sections) != len(vectors):
             raise DatabaseError(
                 f"Got {len(sections)} sections but {len(vectors)} vector sets for {file_path}"
@@ -934,10 +984,17 @@ class Database:
             ).fetchone()
             if row is None:
                 cursor = conn.execute(
-                    "INSERT INTO documents"
-                    "(file_path, title, content_hash, last_modified, mtime_ns, vector_format) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (file_path, title, content_hash, last_modified, mtime_ns, VECTOR_FORMAT),
+                    "INSERT INTO documents(file_path, title, content_hash, last_modified, "
+                    "mtime_ns, vector_format, weights_revision) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        file_path,
+                        title,
+                        content_hash,
+                        last_modified,
+                        mtime_ns,
+                        VECTOR_FORMAT,
+                        weights_revision,
+                    ),
                 )
                 if cursor.lastrowid is None:  # pragma: no cover - sqlite always sets it
                     raise DatabaseError("INSERT INTO documents returned no rowid")
@@ -946,8 +1003,16 @@ class Database:
                 doc_id = int(row[0])
                 conn.execute(
                     "UPDATE documents SET title = ?, content_hash = ?, last_modified = ?, "
-                    "mtime_ns = ?, vector_format = ? WHERE id = ?",
-                    (title, content_hash, last_modified, mtime_ns, VECTOR_FORMAT, doc_id),
+                    "mtime_ns = ?, vector_format = ?, weights_revision = ? WHERE id = ?",
+                    (
+                        title,
+                        content_hash,
+                        last_modified,
+                        mtime_ns,
+                        VECTOR_FORMAT,
+                        weights_revision,
+                        doc_id,
+                    ),
                 )
                 conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
             for section, vector in zip(sections, vectors, strict=True):
@@ -1039,22 +1104,98 @@ class Database:
 
     # ------------------------------------------------------------------ sections
 
-    def record_weights_mismatch(self, message: str | None) -> None:
+    def record_weights_mismatch(self, message: str | None, *, replace: bool = True) -> None:
         """Remember (or clear) that the index and the loaded model disagree.
 
         Persisted rather than held in memory: every `search_docs` and `list_documents`
         answer carries an `index_status`, and a fact this serious may not depend on
-        which process, or which run, happens to have noticed it.
+        which process, or which run, happens to have noticed it. ``replace=False`` keeps a
+        message already recorded, in the same statement that would have written this one.
         """
         with self.transaction() as conn:
             if message is None:
                 conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
             else:
                 conn.execute(
-                    "INSERT INTO meta (key, value) VALUES (?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) "
+                    + ("DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"),
                     (WEIGHTS_MISMATCH_KEY, message),
                 )
+
+    def revoke_weights(self, message: str) -> None:
+        """Withdraw the index's revision before other weights write into it.
+
+        From here until `settle_weights` re-certifies it, the index holds - or may hold -
+        vectors from two models, and no search may rank them against one query.
+        """
+        with self.transaction() as conn:
+            _revoke_weights(conn, message)
+
+    def settle_weights(self, weights: str | None) -> None:
+        """Close a run: vouch for the vectors again, or say what still stands in the way.
+
+        The revision may be written back only once every vector in the database - every
+        root's, and rows no walk reaches, such as a document indexed inside `.venv` - came
+        from ``weights``. Checking only what this run visited would re-certify an index
+        still holding another model's vectors, which is the failure a certificate exists
+        to rule out. An index holding no vector is never certified: there is nothing to
+        vouch for, and a revision over nothing would turn the next model away. None means
+        this run could not tell which weights it ran, and so vouches for nothing.
+        """
+        recorded = self.get_meta(WEIGHTS_META_KEY)
+        mismatch = self.get_meta(WEIGHTS_MISMATCH_KEY)
+        if (recorded, mismatch) != (None, None) and self.count_rows("units_vec") == 0:
+            # A revision claimed for vectors that never arrived - the run died between
+            # the claim and the write - describes nothing, whoever is asking.
+            with self.transaction() as conn:
+                _forget_weights_without_vectors(conn)
+            return
+        # Unknown weights vouch for nothing. Known and already certified, with nothing
+        # said against it: the invariant holds by construction, so the whole-database
+        # check would find nothing, and a no-op run need not take the write lock to learn
+        # that.
+        if weights is None or (recorded == weights and mismatch is None):
+            return
+        with self.transaction() as conn:
+            if conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is None:
+                _forget_weights_without_vectors(conn)
+                return
+            stale = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT d.file_path FROM documents AS d "
+                    "WHERE (d.weights_revision IS NULL OR d.weights_revision != ?) "
+                    "AND EXISTS (SELECT 1 FROM sections AS s JOIN units AS u "
+                    "ON u.section_id = s.id WHERE s.doc_id = d.id) "
+                    "ORDER BY d.file_path",
+                    (weights,),
+                )
+            ]
+            if not stale:
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (WEIGHTS_META_KEY, weights),
+                )
+                conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_MISMATCH_KEY,))
+                return
+            # Named by directory, because a row this run could not reach - one indexed
+            # deliberately inside a pruned directory - is repaired only by indexing that
+            # directory itself, and a count alone would not say where to point it.
+            folders = sorted({os.path.dirname(path) for path in stale})
+            shown = ", ".join(folders[:3]) + (
+                f" and {len(folders) - 3} more" if len(folders) > 3 else ""
+            )
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    WEIGHTS_MISMATCH_KEY,
+                    f"{len(stale)} document(s) still hold vectors from other weights than "
+                    f"the ones answering now, under {shown}. Only keyword ranking is used "
+                    "until index_directory re-embeds them - run it on those directories.",
+                ),
+            )
 
     def forget_weights_revision(self) -> None:
         """Drop the recorded weights revision: no documents, so nothing it can describe.

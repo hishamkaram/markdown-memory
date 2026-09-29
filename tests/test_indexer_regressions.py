@@ -5,6 +5,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import multiprocessing
 import os
@@ -16,12 +17,14 @@ from typing import Any
 
 import pytest
 from fakes import FakeEmbedder
+from helpers import draft
 
-from markdown_memory.db import Database
+from markdown_memory.db import WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import EmbeddingGemmaEmbedder, FastEmbedEmbedder
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
 from markdown_memory.indexer import Indexer
 from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
+from markdown_memory.models import SectionVectors
 
 _SPIN_KEY = "session.intra_op.allow_spinning"
 
@@ -447,54 +450,77 @@ def one_document(tmp_path: Path) -> Path:
     return root
 
 
-def test_a_model_whose_weights_changed_may_not_write_into_the_index(
+def _ranks_by_vector(db: Database, embedder: FakeEmbedder, query: str = "hello") -> bool:
+    """Whether a search with ``embedder`` ranked any hit by vector."""
+    from markdown_memory.search import HybridSearcher
+
+    searcher = HybridSearcher(db, embedder)
+    try:
+        results = searcher.search(query)
+    finally:
+        searcher.close()
+    assert results, "keyword search answers whatever state the vectors are in"
+    return any(result.vec_rank is not None for result in results)
+
+
+def test_a_model_whose_weights_changed_re_embeds_the_index_in_place(
     db: Database, one_document: Path
 ) -> None:
-    """fastembed pins no revision, so a re-download can bring different weights under the
+    """Weights that change - a new EmbeddingGemma pin, a fastembed re-download - used to
 
-    same model name. Noticing that after the run is noticing it too late: the files that
-    changed have already been re-embedded, and the index holds two models' vectors with
-    nothing saying so. The run stops before writing anything instead.
+    stop the run and send the user to delete the database, and keyword search went with
+    it. Each document carries the weights that embedded it, so the run re-embeds every
+    document stamped by others, file by file, and vouches for the index once none is left.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") == "a" * 40
     (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
 
-    with pytest.raises(IndexingError, match="changed since this index was built") as refused:
-        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    report = Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
 
-    # What the refusal promises, exactly: no vector from the new model, not "no writes".
-    # A document of headings alone embeds nothing and may already have been stored.
-    assert "no vector from the new model has been stored" in str(refused.value)
-    assert "headings alone" in str(refused.value)
-
-    # Nothing discarded, nothing added, and the record still describes what is stored.
-    assert db.count_rows("documents") == 1
-    assert db.get_meta("embedding_weights_revision") == "a" * 40
-
-
-def test_an_index_answering_from_another_models_vectors_says_so_in_its_status(
-    db: Database, one_document: Path
-) -> None:
-    """Every search and listing carries `index_status`, and until this it could read
-
-    `verified` while the stored vectors and the query's came from different models.
-    """
-    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    assert (report.files_indexed, report.files_unchanged) == (2, 0)  # README re-embedded
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+    assert db.get_meta("embedding_weights_mismatch") is None
     assert db.index_status(str(one_document)).verified
+    assert _ranks_by_vector(db, _PinnedWeights("b" * 40))
+    assert not _ranks_by_vector(db, _PinnedWeights("a" * 40))
 
-    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
-    with pytest.raises(IndexingError):
-        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    again = Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    assert (again.files_indexed, again.files_unchanged) == (0, 2), "repaired twice"
 
-    status = db.index_status(str(one_document))
+
+def test_vectors_from_other_weights_left_in_another_root_keep_the_index_revoked(
+    db: Database, tmp_path: Path
+) -> None:
+    """The certificate speaks for every vector in the database, not for one root.
+
+    Re-certifying once the root just walked was repaired would have ranked a query
+    against the other root's vectors from the old model. It stays revoked, every search -
+    old weights or new - ranks by keyword alone, the status names the directory still to
+    be done, and indexing that directory restores the certificate.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    for root in (first, second):
+        root.mkdir()
+        (root / "README.md").write_text("# Readme\n\nhello\n")
+        Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(first)
+
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    status = db.index_status(str(first))
     assert not status.verified
-    assert status.to_dict()["coverage"] == "unknown"
-    assert "different models" in (status.message() or "")
+    assert str(second) in (status.message() or "")
+    assert str(first) not in (status.message() or "")
+    assert not _ranks_by_vector(db, _PinnedWeights("a" * 40))
+    assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))
 
-    # Back on the weights it was built with, the warning goes away on its own.
-    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
-    assert db.index_status(str(one_document)).verified
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(second)
+
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+    assert db.index_status(str(first)).verified
+    assert _ranks_by_vector(db, _PinnedWeights("b" * 40))
+    assert not _ranks_by_vector(db, _PinnedWeights("a" * 40))
 
 
 class _UnreadableWeights(FakeEmbedder):
@@ -596,14 +622,27 @@ def test_the_model_is_loaded_before_it_is_asked_which_weights_it_is(
     a revision that cannot be read. Asking before loading turns every ordinary change of
     weights into "could not be read" - true of nothing, and it sends the user to repair a
     cache that is perfectly healthy.
+
+    Such a model is not loaded at the start of a run that has nothing pending, so the
+    unchanged README is skipped before the change is known. The run that finds it
+    therefore leaves the index revoked, and the next one - which loads first, because a
+    repair is pending - finishes the job.
     """
     first = _RevisionAfterLoading("a" * 40)
     first.warm_up()
     Indexer(db, first).index_directory(one_document)
     (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
 
-    with pytest.raises(IndexingError, match="changed since this index was built"):
-        Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
+    Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    message = db.get_meta("embedding_weights_mismatch") or ""
+    assert "could not be read" not in message
+    assert str(one_document) in message
+
+    report = Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
+    assert (report.files_indexed, report.files_unchanged) == (1, 1)
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+    assert db.get_meta("embedding_weights_mismatch") is None
 
 
 def test_a_document_that_embeds_nothing_records_no_provenance(db: Database, tmp_path: Path) -> None:
@@ -648,6 +687,48 @@ def test_a_revision_left_over_a_vectorless_index_does_not_refuse_the_next_model(
     # run not to have built, whatever the document rows above them said.
     assert db.count_rows("units_vec") > 0
     assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_a_revision_left_over_a_vectorless_index_does_not_refuse_unnamed_weights(
+    db: Database, tmp_path: Path
+) -> None:
+    """The same leftover revision, met by a model that cannot say which weights it is.
+
+    Unnamed weights are refused only where named vectors exist to be mixed with; here
+    there are none, so the run writes, and the revision that described nothing is gone.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.set_meta("embedding_weights_revision", "a" * 40)  # as an older version would leave it
+
+    (root / "GUIDE.md").write_text("# Guide\n\nreal prose that embeds\n")
+    Indexer(db, _UnreadableWeights()).index_directory(root)
+
+    assert db.count_rows("units_vec") > 0
+    assert db.get_meta("embedding_weights_revision") is None
+
+
+def test_a_revision_claimed_for_vectors_that_never_arrived_is_dropped_by_the_next_run(
+    db: Database, tmp_path: Path
+) -> None:
+    """The revision is claimed before the first vector is written, so a run that dies in
+
+    between leaves it over an empty index. A later run with the same weights and nothing
+    to embed returned early - the revision agreed with it - and kept it for good.
+    """
+    root = tmp_path / "headings"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.set_meta("embedding_weights_revision", "a" * 40)  # the claim, and then the crash
+
+    report = Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    assert report.files_unchanged == 1, "a run that writes nothing"
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
 
 
 def test_the_revision_is_written_before_the_vectors_it_describes(
@@ -716,6 +797,22 @@ def test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind(
     assert db.count_rows("units_vec") == 0
     assert db.get_meta("embedding_weights_revision") is None
 
+    # In the write itself, not only when the run ends: a search in between would find a
+    # revision describing vectors that are gone.
+    page.write_text("# Readme\n\nprose that embeds\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.replace_document(
+        file_path=str(page),
+        title="Readme",
+        content_hash="headings",
+        last_modified=1,
+        mtime_ns=1,
+        sections=[dataclasses.replace(draft("Only headings", "## Only headings"), units=())],
+        vectors=[SectionVectors(section=None, units=())],
+    )
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
+
 
 def test_purging_the_last_document_forgets_what_its_vectors_came_from(
     db: Database, one_document: Path
@@ -741,29 +838,27 @@ def test_a_cache_that_changes_while_no_document_does_still_stops_semantic_rankin
 
     weights; no Markdown file has changed, so indexing is a clean no-op and nothing marks
     the index. Every query was then embedded by the new model and ranked against the old
-    model's vectors, and the answer came back looking semantic.
+    model's vectors, and the answer came back looking semantic. The search that notices
+    records it, and that record is what makes the next run load the model and repair.
     """
-    from markdown_memory.search import HybridSearcher
-
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
-    Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)  # nothing to embed
+    Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)  # no-op
 
-    searcher = HybridSearcher(db, _PinnedWeights("b" * 40))
-    try:
-        results = searcher.search("hello")
-    finally:
-        searcher.close()
-    assert all(result.vec_rank is None for result in results)
+    assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))
+
+    report = Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(one_document)
+    assert report.files_indexed == 1
+    assert _ranks_by_vector(db, _PinnedWeights("b" * 40))
 
 
 def test_a_run_with_nothing_to_embed_does_not_refuse_and_does_not_load_the_model(
     db: Database, one_document: Path
 ) -> None:
-    """The check runs where a vector is about to be produced, so a run over unchanged
+    """With nothing pending and weights that cannot be named without loading, a run over
 
-    files never reaches it - and never loads a model it does not need. Search is what
-    protects the reader in that case, by asking for itself rather than trusting a flag
-    this run would have had to write.
+    unchanged files never loads a model it does not need. Search is what protects the
+    reader in that case, by asking for itself rather than trusting a flag this run would
+    have had to write.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
 
@@ -775,8 +870,66 @@ def test_a_run_with_nothing_to_embed_does_not_refuse_and_does_not_load_the_model
     assert db.get_meta("embedding_weights_revision") == "a" * 40
 
 
-class _CountingWarmUp(_PinnedWeights):
-    """A pinned embedder that counts how often it was asked to load."""
+def test_a_pending_repair_loads_the_model_at_the_start_of_the_run(
+    db: Database, one_document: Path
+) -> None:
+    """Only a run that knows its weights can tell a stamped document from a stale one,
+
+    and a run with a repair pending has embedding to do anyway - so it loads first,
+    rather than skipping every unchanged document on content alone and repairing nothing.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    db.record_weights_mismatch("a search found other weights")
+
+    embedder = _CountingWarmUp("b" * 40)
+    report = Indexer(db, embedder).index_directory(one_document)
+
+    assert embedder.warm_ups >= 1
+    assert report.files_indexed == 1
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_vectors_no_revision_vouches_for_are_a_pending_repair(
+    db: Database, one_document: Path
+) -> None:
+    """Vectors stored while the weights could not be read leave no revision and no
+
+    mismatch behind. A run whose model names itself only once loaded skipped every
+    unchanged document on content alone, found nothing to say, and left the index
+    unvouched-for until some search happened to notice.
+    """
+    Indexer(db, FakeEmbedder()).index_directory(one_document)
+    assert db.get_meta("embedding_weights_revision") is None
+
+    embedder = _CountingWarmUp("b" * 40)
+    report = Indexer(db, embedder).index_directory(one_document)
+
+    assert embedder.warm_ups >= 1
+    assert report.files_indexed == 1
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_a_pending_repair_whose_model_will_not_load_does_not_fail_the_run(
+    db: Database, one_document: Path
+) -> None:
+    """The load at the start is an optimisation of the repair, not a condition of the
+
+    run: a model that will not load leaves a run with nothing to embed to finish as it
+    always could, writing nothing about the weights and keeping the message that says
+    what is wrong.
+    """
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
+    db.record_weights_mismatch("a search found other weights")
+
+    report = Indexer(db, _UnloadableModel()).index_directory(one_document)
+
+    assert report.files_unchanged == 1
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+    assert db.get_meta("embedding_weights_mismatch") == "a search found other weights"
+
+
+class _CountingWarmUp(_RevisionAfterLoading):
+    """An embedder that names its weights once loaded, and counts how often it loaded."""
 
     def __init__(self, revision: str) -> None:
         super().__init__(revision)
@@ -784,6 +937,7 @@ class _CountingWarmUp(_PinnedWeights):
 
     def warm_up(self) -> None:
         self.warm_ups += 1
+        super().warm_up()
 
 
 def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
@@ -795,9 +949,7 @@ def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
     the index unverified and holding semantic ranking off for good.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
-    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
-    with pytest.raises(IndexingError):
-        Indexer(db, _PinnedWeights("b" * 40)).index_directory(one_document)
+    assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))
     assert db.get_meta("embedding_weights_mismatch") is not None
 
     # Every path that empties the index without going through `clear()` - a purge of the
@@ -946,24 +1098,21 @@ def test_a_directory_where_a_model_file_belongs_is_repaired(cache: _Cache) -> No
     assert (cache.model_dir / "model.onnx").read_bytes() == _FILES["model.onnx"]
 
 
-def test_the_weights_are_recorded_only_for_an_index_this_run_built_whole(
+def test_the_weights_are_recorded_only_for_vectors_every_one_of_which_they_embedded(
     db: Database, one_document: Path
 ) -> None:
     """The embedder loads lazily, so the first run of a fresh install starts with no
 
-    revision to report. Recording one later - when the vectors were embedded blind, or by
-    somebody else - would put a revision on them that may simply be wrong.
+    revision to report. Recording one later is right only once every vector-bearing
+    document carries it: vectors embedded blind stay unvouched-for until re-embedded.
     """
     Indexer(db, _LazyWeights(None)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") is None
 
-    # The index is no longer empty, so this run cannot vouch for what is in it.
+    # Vectors nobody vouched for, joined by named weights: the index is revoked before
+    # the two are mixed, and the README - its only document - is re-embedded by them.
+    (one_document / "GUIDE.md").write_text("# Guide\n\nnew file\n")
     (one_document / "README.md").write_text("# Readme\n\nedited\n")
-    Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
-    assert db.get_meta("embedding_weights_revision") is None
-
-    # Built from nothing: now every vector came from these weights.
-    db.clear()
     Indexer(db, _LazyWeights("b" * 40)).index_directory(one_document)
     assert db.get_meta("embedding_weights_revision") == "b" * 40
 
@@ -1299,3 +1448,194 @@ def test_a_file_whose_bytes_did_not_change_still_has_its_timestamp_brought_up_to
     content_hash, mtime_ns = db.document_fingerprints(str(root))[str(touched)]
     assert mtime_ns == touched.stat().st_mtime_ns
     assert content_hash == hashlib.sha256(touched.read_bytes()).hexdigest()
+
+
+class _DiesAfter(_PinnedWeights):
+    """Named weights whose process is killed after embedding ``files`` documents."""
+
+    def __init__(self, revision: str, files: int) -> None:
+        super().__init__(revision)
+        self._left = files
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if self._left == 0:
+            raise ModelLoadError("killed")
+        self._left -= 1
+        return super().embed_documents(texts)
+
+
+def test_a_repair_killed_partway_resumes_where_it_stopped(db: Database, tmp_path: Path) -> None:
+    """Each document's stamp is written with its vectors, so a run that dies halfway has
+
+    already recorded which documents it repaired. The next run re-embeds only the rest,
+    and in between keyword search answers while vectors are ranked by no model at all.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in ("a", "b", "c"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+    Indexer(db, _PinnedWeights("a" * 40), workers=1).index_directory(root)
+
+    with pytest.raises(ModelLoadError):
+        Indexer(db, _DiesAfter("b" * 40, files=2), workers=1).index_directory(root)
+
+    assert db.count_rows("documents") == 3
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    assert not _ranks_by_vector(db, _PinnedWeights("a" * 40))
+    assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))
+
+    report = Indexer(db, _PinnedWeights("b" * 40), workers=1).index_directory(root)
+    assert (report.files_indexed, report.files_unchanged) == (1, 2)
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+    assert _ranks_by_vector(db, _PinnedWeights("b" * 40))
+
+
+class _NothingDiscardedFirst(FakeEmbedder):
+    """A renamed model with named weights that checks, as it embeds, what is still stored."""
+
+    def __init__(self, db: Database, expected: int, lazy: bool = False) -> None:
+        super().__init__(model_name="renamed", weights="b" * 40)
+        self._db = db
+        self._expected = expected
+        self._loaded = not lazy
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._weights if self._loaded else None
+
+    def warm_up(self) -> None:
+        self._loaded = True
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        assert self._db.count_rows("documents") == self._expected, "discarded first"
+        return super().embed_documents(texts)
+
+
+def test_a_renamed_model_with_named_weights_repairs_instead_of_discarding(
+    db: Database, tmp_path: Path
+) -> None:
+    """An EmbeddingGemma upgrade changes the model's name as well as its weights, and the
+
+    name change used to empty the whole index before a single file was re-embedded:
+    keyword search went with it for the length of the rebuild. Weights that name
+    themselves let the stamps do the work, so every document stays until it is replaced.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in ("a", "b"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+    Indexer(db, FakeEmbedder(model_name="original", weights="a" * 40)).index_directory(root)
+
+    report = Indexer(db, _NothingDiscardedFirst(db, expected=2)).index_directory(root)
+
+    assert report.files_indexed == 2
+    assert report.notes == (), "nothing was discarded, so nothing to announce"
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too(
+    db: Database, tmp_path: Path
+) -> None:
+    """A lazily loaded model cannot name its weights until it loads, and the rename was
+
+    decided before that - so it discarded the index anyway. It is loaded first: the run
+    re-embeds everything regardless, and knowing the weights is what spares the index.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in ("a", "b"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+    Indexer(db, FakeEmbedder(model_name="original", weights="a" * 40)).index_directory(root)
+
+    embedder = _NothingDiscardedFirst(db, expected=2, lazy=True)
+    report = Indexer(db, embedder).index_directory(root)
+
+    assert report.files_indexed == 2
+    assert report.notes == ()
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+class _FirstLoadFails(_RevisionAfterLoading):
+    """Named weights whose first load fails and whose second succeeds."""
+
+    def __init__(self, revision: str) -> None:
+        super().__init__(revision)
+        self._failed = False
+
+    def warm_up(self) -> None:
+        if not self._failed:
+            self._failed = True
+            raise ModelLoadError("not yet")
+        super().warm_up()
+
+
+def test_vectors_nobody_vouched_for_are_not_ranked_beside_named_ones(
+    db: Database, tmp_path: Path
+) -> None:
+    """An index built while the weights could not be named carries no revision at all.
+
+    Named weights joining it used to find "no provenance to contradict" and write beside
+    it, and search - which also saw no revision - ranked the mixture. Their first write
+    revokes the index instead, and it stays revoked while an unvouched document remains.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.md").write_text("# a\n\nhello a\n")
+    (root / "b.md").write_text("# b\n\nhello b\n")
+    Indexer(db, _LazyWeights(None)).index_directory(root)
+    assert db.get_meta("embedding_weights_revision") is None
+
+    # Loaded at the start to repair them, the model would re-embed both; this one fails
+    # that first load, so b.md is skipped on content and the two really are mixed.
+    (root / "a.md").write_text("# a\n\nhello again\n")
+    Indexer(db, _FirstLoadFails("b" * 40)).index_directory(root)
+
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    assert not _ranks_by_vector(db, _PinnedWeights("b" * 40))
+
+
+def test_a_document_of_headings_alone_never_holds_up_the_certificate(
+    db: Database, tmp_path: Path
+) -> None:
+    """A heading-only document embeds nothing, so whatever weights its row names, it has
+
+    no vector for them to be wrong about. Counting it as stale would keep an index that is
+    whole again ranked by keyword alone until somebody edited a table of contents.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    (root / "README.md").write_text("# Readme\n\nhello\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+
+    (root / "README.md").write_text("# Readme\n\nhello again\n")
+    Indexer(db, _RevisionAfterLoading("b" * 40)).index_directory(root)  # TOC.md skipped
+
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+
+
+def test_a_stale_document_no_walk_reaches_is_named_until_its_directory_is_indexed(
+    db: Database, tmp_path: Path
+) -> None:
+    """A document indexed deliberately inside a pruned directory is never visited by a
+
+    walk of its parent, so re-indexing the parent cannot repair it. The certificate stays
+    withheld - vouching for vectors from other weights is the failure it exists to rule
+    out - and the message names the directory to index instead.
+    """
+    root = tmp_path / "docs"
+    hidden = root / ".venv" / "pkg"
+    hidden.mkdir(parents=True)
+    (root / "README.md").write_text("# Readme\n\nhello\n")
+    (hidden / "NOTES.md").write_text("# Notes\n\nhello notes\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(hidden)
+
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(root)
+
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    assert str(hidden) in (db.get_meta("embedding_weights_mismatch") or "")
+
+    Indexer(db, _PinnedWeights("b" * 40)).index_directory(hidden)
+    assert db.get_meta("embedding_weights_revision") == "b" * 40
+    assert db.get_meta("embedding_weights_mismatch") is None

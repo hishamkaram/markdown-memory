@@ -20,9 +20,15 @@ class FakeEmbedder:
     indexing and fusion tests need. Semantic behaviour is tested with the real model.
     """
 
-    def __init__(self, dimension: int = DEFAULT_EMBEDDING_DIM, model_name: str = "fake") -> None:
+    def __init__(
+        self,
+        dimension: int = DEFAULT_EMBEDDING_DIM,
+        model_name: str = "fake",
+        weights: str | None = None,
+    ) -> None:
         self._dimension = dimension
         self._model_name = model_name
+        self._weights = weights
         self.document_calls: list[list[str]] = []
         self.query_calls: list[str] = []
 
@@ -36,7 +42,7 @@ class FakeEmbedder:
 
     @property
     def weights_revision(self) -> str | None:
-        return None
+        return self._weights
 
     def warm_up(self) -> None:
         """Nothing to load: the vectors are computed from the text itself."""
