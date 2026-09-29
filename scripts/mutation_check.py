@@ -348,10 +348,7 @@ MUTATIONS = (
     Mutation(
         name="search: rank vectors stored unvouched while the lookup ran",
         module="search.py",
-        old=(
-            "            recorded is None and best "
-            "and self._embedder.weights_revision is not None\n"
-        ),
+        old="            best and recorded != self._embedder.weights_revision\n",
         new="            False\n",
         tests="test_vectors_written_unvouched_during_the_lookup_are_not_ranked",
     ),
@@ -366,11 +363,14 @@ MUTATIONS = (
         tests="test_a_revision_claimed_for_vectors_that_never_arrived_is_dropped_by_the_next_run",
     ),
     Mutation(
-        name="embedder: keep a model loaded without its revision for the process's life",
-        module="embedders.py",
-        old="            if self._weights_revision is None:\n                self._model = None\n",
-        new="            if False:\n                self._model = None\n",
-        tests="test_a_model_loaded_without_its_revision_reads_it_again_when_warmed_up",
+        name="search: warn about weights recorded over an index with no vector",
+        module="search.py",
+        old=(
+            "        if recorded is not None and weights != recorded "
+            'and self._db.count_rows("units_vec") == 0:\n'
+        ),
+        new="        if False:\n",
+        tests="test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch",
     ),
     Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
@@ -657,7 +657,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7408),',
+        old='    ("README.md", 7452),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

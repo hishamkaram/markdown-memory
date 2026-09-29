@@ -5,6 +5,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import multiprocessing
 import os
@@ -16,12 +17,14 @@ from typing import Any
 
 import pytest
 from fakes import FakeEmbedder
+from helpers import draft
 
 from markdown_memory.db import WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import EmbeddingGemmaEmbedder, FastEmbedEmbedder
 from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
 from markdown_memory.indexer import Indexer
 from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
+from markdown_memory.models import SectionVectors
 
 _SPIN_KEY = "session.intra_op.allow_spinning"
 
@@ -611,40 +614,6 @@ def test_only_the_model_whose_cache_it_can_find_reports_a_revision(
     assert other._read_weights_revision() is None
 
 
-def test_a_model_loaded_without_its_revision_reads_it_again_when_warmed_up(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A service that loaded bge-small while `refs/main` was unreadable kept that None for
-
-    its whole life, so every run it served skipped unchanged documents on content alone
-    and the index was never vouched for again. Warming it up reloads it, and reads the
-    revision beside the weights it loads rather than after them.
-    """
-    import fastembed
-
-    from markdown_memory import model_cache
-    from markdown_memory.embedders import FastEmbedEmbedder
-    from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
-
-    snapshot = tmp_path / "models--qdrant--bge-small-en-v1.5-onnx-q"
-    (snapshot / "refs").mkdir(parents=True)
-    monkeypatch.setattr(model_cache, "fastembed_model_dir", lambda _cache_dir: snapshot)
-    _FakeTextEmbedding.calls = []
-    monkeypatch.setattr(fastembed, "TextEmbedding", _FakeTextEmbedding)
-
-    embedder = FastEmbedEmbedder(BGE_SMALL_MODEL_NAME)
-    embedder.warm_up()
-    assert embedder.weights_revision is None  # no refs/main yet
-
-    (snapshot / "refs" / "main").write_text("5239827812345678\n")
-    embedder.warm_up()
-    assert embedder.weights_revision == "5239827812345678"
-    assert len(_FakeTextEmbedding.calls) == 2, "the weights were loaded again"
-
-    embedder.warm_up()
-    assert len(_FakeTextEmbedding.calls) == 2, "a model that knows its revision stays loaded"
-
-
 def test_the_model_is_loaded_before_it_is_asked_which_weights_it_is(
     db: Database, one_document: Path
 ) -> None:
@@ -825,6 +794,22 @@ def test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind(
     page.write_text("# Readme\n\n## Only headings\n")
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
 
+    assert db.count_rows("units_vec") == 0
+    assert db.get_meta("embedding_weights_revision") is None
+
+    # In the write itself, not only when the run ends: a search in between would find a
+    # revision describing vectors that are gone.
+    page.write_text("# Readme\n\nprose that embeds\n")
+    Indexer(db, _PinnedWeights("a" * 40)).index_directory(root)
+    db.replace_document(
+        file_path=str(page),
+        title="Readme",
+        content_hash="headings",
+        last_modified=1,
+        mtime_ns=1,
+        sections=[dataclasses.replace(draft("Only headings", "## Only headings"), units=())],
+        vectors=[SectionVectors(section=None, units=())],
+    )
     assert db.count_rows("units_vec") == 0
     assert db.get_meta("embedding_weights_revision") is None
 

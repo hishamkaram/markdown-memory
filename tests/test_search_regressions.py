@@ -241,6 +241,37 @@ class TestSearchRobustness:
             searcher.close()
         assert all(r.vec_rank is None for r in results)
 
+    def test_a_revision_over_no_vectors_is_not_reported_as_a_mismatch(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that dies between claiming the revision and writing its first vector leaves
+
+        a revision over nothing. Other weights searching it used to record a mismatch and
+        mark the index unverified over vectors that do not exist - and if the claiming run
+        comes back meanwhile, what its lookup finds is still not ranked by these weights.
+        """
+        db.set_meta(WEIGHTS_META_KEY, "a" * 40)
+        searcher = HybridSearcher(db, _RevisedEmbedder("b" * 40))
+        try:
+            searcher.search("body number")
+            assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+
+            lookup = searcher._nearest
+
+            def racing(
+                embedding: list[float], limit: int
+            ) -> tuple[dict[int, float], dict[int, str]]:
+                store(db, _RevisedEmbedder("a" * 40), "/d/a.md")  # the claiming run returns
+                return lookup(embedding, limit)
+
+            monkeypatch.setattr(searcher, "_nearest", racing)
+            results = searcher.search("body number")
+        finally:
+            searcher.close()
+        # The keyword half ran before the write, so it may find nothing; the vector half
+        # found the new rows, and must not have ranked them.
+        assert all(r.vec_rank is None for r in results)
+
     def test_vectors_no_revision_vouches_for_are_not_ranked_by_named_weights(
         self, db: Database, tmp_path: Path
     ) -> None:

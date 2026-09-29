@@ -173,15 +173,7 @@ class FastEmbedEmbedder:
             return None
 
     def warm_up(self) -> None:
-        """Load (and if necessary download) the model now instead of on first query.
-
-        A model loaded while its revision could not be read is loaded again: the index
-        asks this when it needs to know which weights it is running, and reading the
-        revision alone, after the fact, could name files that were not the ones loaded.
-        """
-        with self._lock:
-            if self._weights_revision is None:
-                self._model = None
+        """Load (and if necessary download) the model now instead of on first query."""
         self._load()
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:

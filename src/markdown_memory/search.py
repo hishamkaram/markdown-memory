@@ -391,10 +391,9 @@ class HybridSearcher:
         # in another process discards every vector and rebuilds it, and a check that
         # happened before those rows were read cannot speak for them.
         if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (
-            # Nothing was recorded because nothing was stored; whatever the lookup found
-            # was written since, by weights that named nothing - a model that can name
-            # itself would have recorded them first.
-            recorded is None and best and self._embedder.weights_revision is not None
+            # Let through only because nothing was stored to disagree with; whatever the
+            # lookup found was written since, by weights other than these.
+            best and recorded != self._embedder.weights_revision
         ):
             raise SearchError(
                 "The index was rebuilt by another model while this search was ranking; "
@@ -416,6 +415,10 @@ class HybridSearcher:
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         weights = self._embedder.weights_revision
+        if recorded is not None and weights != recorded and self._db.count_rows("units_vec") == 0:
+            # A revision over no vectors - a run died between claiming it and writing the
+            # first one - has nothing to rank against, so nothing to warn about either.
+            return recorded
         if recorded is None:
             if weights is None or self._db.count_rows("units_vec") == 0:
                 return None  # nothing named on either side, or nothing to rank

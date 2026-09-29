@@ -12,26 +12,26 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
   <source srcset="docs/assets/how-it-works-light.svg">
   <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 14,051
+       alt="One question asked of four documentation files. Reading them whole costs 14,095
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,637 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,681 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 14,051 tokens in all:
+`docs/evaluation-protocol.md`, 14,095 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  666 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  710 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   597 tok  README.md  markdown-memory
   588 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,637 tokens instead of 14,051**, and the section that actually answers is 403 - a
+**2,681 tokens instead of 14,095**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -248,7 +248,9 @@ A model that loads but cannot say which weights it is may not write into an inde
 names its weights: its vectors could never be told apart from the ones already stored. An
 index whose vectors no revision vouches for - built while the weights could not be read -
 is not ranked against a query from weights that can name themselves - from the upgrade to
-schema v6 on - and the first run with such weights re-embeds it.
+schema v6 on - and the first run with such weights re-embeds it. A server that loaded
+`bge-small` while its revision could not be read keeps it unnamed until it restarts: the
+revision is read beside the weights it loads, never after them.
 
 ### Presets
 
