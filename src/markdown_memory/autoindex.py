@@ -53,6 +53,9 @@ class AutoIndexer:
         self._thread: threading.Thread | None = None
         self._stopping = False
         self._last_finished: float | None = None
+        #: Nothing starts before this: set when another process held the lock, so that
+        #: contention costs one attempt per change gap, not one per search.
+        self._retry_after = float("-inf")
         #: Changed files the last finished run could not clear - files it failed on. A
         #: search that still sees exactly those is not a reason to walk again; one more
         #: is. Reset to zero by a run that failed nothing, so an edit made while it ran
@@ -75,7 +78,7 @@ class AutoIndexer:
     def consider(self, status: IndexStatus) -> bool:
         """Start a run if what a search just measured says one is due."""
         with self._lock:
-            if self._stopping or self._thread is not None:
+            if self._stopping or self._thread is not None or self._clock() < self._retry_after:
                 return False
             since = (
                 float("inf") if self._last_finished is None else self._clock() - self._last_finished
@@ -139,6 +142,7 @@ class AutoIndexer:
                 # passed rather than a whole walk interval later - a root nobody has
                 # indexed has no changed files to prompt the next attempt.
                 self._last_finished -= self._walk_gap - self._change_gap
+                self._retry_after = self._last_finished + self._walk_gap
                 self._thread = None
                 return
             if baseline is not None:

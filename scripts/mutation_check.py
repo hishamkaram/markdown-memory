@@ -410,13 +410,6 @@ MUTATIONS = (
         tests="test_an_edit_made_while_a_clean_run_ran_starts_the_next_one",
     ),
     Mutation(
-        name="auto: learn from a run another process blocked as if it had run",
-        module="autoindex.py",
-        old="                self._thread = None\n                return\n",
-        new="",
-        tests="test_a_run_another_process_blocked_is_retried_soon_and_learns_nothing",
-    ),
-    Mutation(
         name="auto: let a stopped run absorb the edits it never saw",
         module="autoindex.py",
         old='            logger.info("Automatic index run stopped")\n',
@@ -448,7 +441,14 @@ MUTATIONS = (
         module="autoindex.py",
         old="                self._last_finished -= self._walk_gap - self._change_gap\n",
         new="                pass\n",
-        tests="test_a_run_another_process_blocked_is_retried_soon_and_learns_nothing",
+        tests="test_a_run_another_process_blocked_is_retried_once_per_gap",
+    ),
+    Mutation(
+        name="auto: retry a blocked run on every search while the lock is held",
+        module="autoindex.py",
+        old="                self._retry_after = self._last_finished + self._walk_gap\n",
+        new="                pass\n",
+        tests="test_a_run_another_process_blocked_is_retried_once_per_gap",
     ),
     Mutation(
         name="auto: never walk the tree for files nobody indexed yet",

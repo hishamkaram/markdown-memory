@@ -29,7 +29,7 @@ PACKAGE_DIR = ROOT / "src" / PACKAGE
 #: `HybridSearcher` already calls - not the DDL helpers.
 BUDGETS = {
     "__init__.py": 44,
-    "autoindex.py": 110,
+    "autoindex.py": 130,
     "config.py": 138,
     "db.py": 1205,  # the outlier, grandfathered
     "discovery.py": 107,

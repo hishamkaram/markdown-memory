@@ -152,15 +152,16 @@ class TestWhatStartsARun:
         assert h.consider(mismatch="drift"), "news the run never acted on"
         assert not h.consider(mismatch="drift"), "met and not cleared: seen"
 
-    def test_a_run_another_process_blocked_is_retried_soon_and_learns_nothing(self) -> None:
+    def test_a_run_another_process_blocked_is_retried_once_per_gap(self) -> None:
         """At start a shared database may be busy with another root. This root was never
         indexed, so no changed file prompts the next attempt; waiting for the walk left it
-        unindexed for five minutes, and marked a mismatch nobody acted on as seen."""
+        unindexed for five minutes - and retrying on every search while the other process
+        held the lock cost an attempt per search."""
         h = _Harness(IndexBusyError("another process"), IndexBusyError("another process"))
         h.after = IndexStatus(verified=False, weights_mismatch="drift")
         h.runner.request()
         h.settle()
-        assert h.consider(mismatch="drift"), "a mismatch nobody acted on is not seen"
+        assert not h.consider(changed=5, mismatch="drift"), "one attempt per gap, not per search"
         h.clock.now += 9
         assert not h.consider()
         h.clock.now += 1
