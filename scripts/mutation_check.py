@@ -366,6 +366,13 @@ MUTATIONS = (
         tests="test_a_revision_claimed_for_vectors_that_never_arrived_is_dropped_by_the_next_run",
     ),
     Mutation(
+        name="embedder: keep a model loaded without its revision for the process's life",
+        module="embedders.py",
+        old="            if self._weights_revision is None:\n                self._model = None\n",
+        new="            if False:\n                self._model = None\n",
+        tests="test_a_model_loaded_without_its_revision_reads_it_again_when_warmed_up",
+    ),
+    Mutation(
         name="weights: fail a run over a pending repair whose model will not load",
         module="indexer.py",
         old="            except ModelLoadError as exc:\n",
