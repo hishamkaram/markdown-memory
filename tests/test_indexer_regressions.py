@@ -11,7 +11,7 @@ import multiprocessing
 import os
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1340,23 +1340,25 @@ def test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree(
 
     64-passage section. Submitting the whole walk and collecting it afterwards would hold
     the corpus in memory; the window is what keeps the pool fed without doing that. What
-    it bounds is how far ahead the *walk* runs, not how much is embedded: embedding is
-    serial per worker either way, so counting embeddings would score an unbounded
-    submission green.
+    it bounds is how many files are handed to the pool ahead of the writer, not how much
+    is embedded: embedding is serial per worker either way, so counting embeddings would
+    score an unbounded submission green. (The walk itself runs to the end first - a list
+    of paths costs nothing - so it is the paths *taken* from it that are counted.)
     """
     from markdown_memory import discovery
 
     root = _corpus(tmp_path / "docs", 12)
-    walked = 0
-    walk = discovery.iter_markdown_files
+    taken = 0
+    dedupe = discovery.without_aliases
 
-    def counting(*args: Any, **kwargs: Any) -> Any:
-        nonlocal walked
-        for path in walk(*args, **kwargs):
-            walked += 1
-            yield path
+    class _Counted(list[Path]):
+        def __iter__(self) -> Iterator[Path]:
+            nonlocal taken
+            for path in super().__iter__():
+                taken += 1
+                yield path
 
-    monkeypatch.setattr(discovery, "iter_markdown_files", counting)
+    monkeypatch.setattr(discovery, "without_aliases", lambda paths: _Counted(dedupe(paths)))
 
     read_ahead = 0
     original = db.replace_document
@@ -1364,7 +1366,7 @@ def test_the_driver_reads_ahead_by_a_bounded_window_not_by_the_whole_tree(
     def watch(**kwargs: object) -> Any:
         nonlocal read_ahead
         if not read_ahead:
-            read_ahead = walked
+            read_ahead = taken
         return original(**kwargs)  # type: ignore[arg-type]
 
     db.replace_document = watch  # type: ignore[method-assign]

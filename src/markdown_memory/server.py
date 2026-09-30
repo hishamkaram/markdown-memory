@@ -32,6 +32,7 @@ from markdown_memory.config import (
     ENV_DOCS_DIR,
     ENV_EMBEDDER,
     ENV_EXCLUDE,
+    ENV_GITIGNORE,
     ENV_LOG_LEVEL,
     ServerConfig,
     _config_from_cli,
@@ -90,7 +91,11 @@ class MarkdownMemoryService:
         )
         self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
         self._indexer = Indexer(
-            self._db, self._embedder, workers=config.index_workers, exclude=config.exclude
+            self._db,
+            self._embedder,
+            workers=config.index_workers,
+            exclude=config.exclude,
+            gitignore=config.gitignore,
         )
         # Resolved, because indexing resolves: a document under a symlinked or relative
         # docs root is stored by its real path, and a scope spelled any other way filters
@@ -480,6 +485,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--no-auto-index",
         action="store_true",
         help=f"Do not keep the docs root indexed in the background (env {ENV_AUTO_INDEX}=0)",
+    )
+    parser.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help=f"Index what git ignores below the docs root too (env {ENV_GITIGNORE}=0)",
     )
     parser.add_argument(
         "--embedder",

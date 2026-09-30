@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 14,987
+       alt="One question asked of four documentation files. Reading them whole costs 15,377
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 14,987 tokens in all:
+`docs/evaluation-protocol.md`, 15,377 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,887 tokens instead of 14,987**, and the section that actually answers is 403 - a
+**2,887 tokens instead of 15,377**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -355,12 +355,13 @@ or just the title); an ambiguous request lists the exact candidates.
 | `MARKDOWN_MEMORY_DOCS_DIR` | `--docs-dir` | `$CLAUDE_PROJECT_DIR` if the client exports it, else the working directory |
 | `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/projects/<root>-<digest>/index.db` — one index per docs root |
 | `MARKDOWN_MEMORY_MODEL_CACHE` | - | `$XDG_CACHE_HOME/markdown-memory/models` (`~/.cache/...`) |
-| `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | nothing excluded |
+| `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | none of your own - the built-in rules below still apply |
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
 | `MARKDOWN_MEMORY_EMBEDDER` | `--embedder` | `embeddinggemma` (or `bge-small`) |
 | `MARKDOWN_MEMORY_THREADS` | - | unset: onnxruntime picks. A positive integer caps the threads one embedding pass may use |
 | `MARKDOWN_MEMORY_INDEX_WORKERS` | - | `2` - files read, parsed and embedded at the same time while indexing |
 | `MARKDOWN_MEMORY_AUTO_INDEX` | `--no-auto-index` | on - `0`, `false`, `off` or `no` stops the server indexing its root by itself |
+| `MARKDOWN_MEMORY_GITIGNORE` | `--no-gitignore` | on - `0`, `false`, `off` or `no` indexes what git ignores as well |
 
 The default preset does not spin-wait between operators, which is what makes a query cost ~0.6 s of
 CPU instead of ~5.5 s and leaves the process idle at 0 while nothing is being asked of it; the
@@ -388,6 +389,26 @@ was added are purged on the next index.
 
 Without it, a repository that keeps fixtures, vendored documentation or a test corpus
 in-tree indexes them as if they were its own docs.
+
+Three rules apply before your exclusions, so a monorepo indexes its own documentation and
+not copies of it:
+
+- **Built-in skips**: `.git`, `node_modules`, virtualenvs and tool caches are pruned (see
+  [Indexing rules](#indexing-rules)).
+- **Other checkouts**: a directory below the root that holds a `.git` entry - a file for a
+  worktree or submodule, a directory for a nested clone - is not entered. The root itself
+  always is, so pointing a server at a worktree indexes that worktree.
+- **What git ignores**: inside a git repository, paths `git ls-files --others --ignored
+  --exclude-standard` names are left out, so generated output and caches are too. Tracked
+  files are never ignored, and git's paths are matched literally (`[id]/` is a directory
+  name, not a pattern). Without git, or outside a repository, the walk is unchanged.
+  `MARKDOWN_MEMORY_GITIGNORE=0` turns this rule off for docs kept in ignored directories on
+  purpose.
+
+A Markdown symlink to a file the same run indexes is not indexed a second time; a link to
+anything else (a target outside the root, excluded, or not named `.md`) is indexed under
+its own path. Like an exclusion, each rule purges what it covers from an index built
+before it applied.
 
 Documents are stored under their absolute path, so one database *can* hold several
 projects - but **search only ever answers from the root this server was started with**,
@@ -497,8 +518,9 @@ All logging goes to **stderr**. stdout carries JSON-RPC frames only.
   followed. `.git`, `node_modules`, virtualenvs and tool caches are pruned - index such a
   tree by passing a directory *inside* it, and it is then left alone when an ancestor is
   re-indexed.
-- A document is purged only when the walk could have found it and did not. Files under a
-  directory that cannot be listed are kept and the directory is reported as an error.
+- A document is purged when the walk could have found it and did not, or when it is out of
+  scope (excluded, ignored by git, inside another checkout). Files under a directory that
+  cannot be listed are kept and the directory is reported as an error.
 
 ## Development
 

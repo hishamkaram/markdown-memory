@@ -256,6 +256,27 @@ class TestCancellation:
             Indexer(db, embedder, workers=1).index_directory(root, should_stop=lambda: True)
         assert embedder.document_calls == [], "a model's worth of work for nothing"
 
+    def test_a_stop_asked_once_the_walk_is_done_embeds_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The walk asks too, but a stop can land between the walk and the first file."""
+        from markdown_memory import discovery
+        from markdown_memory.db import Database
+
+        walked = threading.Event()
+        without_aliases = discovery.without_aliases
+
+        def walk_then_stop(paths: Sequence[Path]) -> list[Path]:
+            walked.set()
+            return without_aliases(paths)
+
+        monkeypatch.setattr(discovery, "without_aliases", walk_then_stop)
+        root = _tree(tmp_path / "docs", ("a", "b"))
+        embedder = FakeEmbedder()
+        with Database(tmp_path / "index.db") as db, pytest.raises(IndexCancelled):
+            Indexer(db, embedder, workers=1).index_directory(root, should_stop=walked.is_set)
+        assert embedder.document_calls == [], "a model's worth of work for nothing"
+
 
 class _StopWhileEmbedding(FakeEmbedder):
     def __init__(self) -> None:
