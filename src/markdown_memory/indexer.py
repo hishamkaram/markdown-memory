@@ -152,6 +152,7 @@ class Indexer:
         embedder: Embedder,
         workers: int | None = None,
         exclude: Sequence[str] = (),
+        gitignore: bool = True,
     ) -> None:
         if embedder.dimension != db.embedding_dim:
             raise IndexingError(
@@ -166,6 +167,7 @@ class Indexer:
         self._parsers = threading.local()
         self._workers = max(1, workers if workers is not None else _index_workers())
         self._exclude = tuple(exclude)
+        self._gitignore = gitignore
         self._run_lock = threading.Lock()
 
     @property
@@ -293,6 +295,8 @@ class Indexer:
             identity = self._run_identity()
             known_hashes = self._db.document_hashes(str(root))
             weights_settled = False
+            ignored = discovery.git_ignored(root) if self._gitignore else None
+            scope = discovery.Scope(root, self._exclude, ignored or frozenset())
 
             seen: set[str] = set()
             indexed = unchanged = sections_indexed = passages_indexed = 0
@@ -358,7 +362,18 @@ class Indexer:
             # handed out in some completion order would quietly reorder equal hits, and
             # no later sort can give them back. The window bounds what is held in memory:
             # a prepared file carries every vector of every passage it has.
-            files = discovery.iter_markdown_files(root, record_unreadable, self._exclude)
+            # Walked to the end before anything is embedded, which costs nothing next to
+            # embedding: a symlink is only recognised as an alias of a file once that file
+            # has been seen, and it may come first. The order is the walk's all the same.
+            files = iter(
+                discovery.without_aliases(
+                    list(
+                        discovery.iter_markdown_files(
+                            root, record_unreadable, scope=scope, should_stop=should_stop
+                        )
+                    )
+                )
+            )
             window = max(2 * self._workers, 2)
             pending: deque[tuple[str, Future[_Prepared | None]]] = deque()
             with ThreadPoolExecutor(
@@ -423,7 +438,7 @@ class Indexer:
                         queued.cancel()
                     raise
 
-            vanished = self._vanished(root, known_hashes, seen, unreadable)
+            vanished = self._vanished(scope, known_hashes, seen, unreadable)
             if vanished:
                 about_to_write()  # deleting is changing it, even if no file was read
             purged = self._db.delete_documents(vanished)
@@ -433,7 +448,13 @@ class Indexer:
             # Only what this walk could have reached: a failure inside a pruned directory
             # or one that could not be listed is not this run's to forget, however far
             # under its root it sits.
-            reachable = self._reachable(root, self._db.failure_paths(str(root)), unreadable)
+            reachable, disowned = self._reachable(
+                scope, self._db.failure_paths(str(root)), unreadable
+            )
+            if disowned:
+                # An inner root indexed on its own may have been vouching for a tree whose
+                # only fault was one of these rows; it may not go on doing so without it.
+                about_to_write()
             self._db.record_failures(
                 reachable,
                 {
@@ -572,12 +593,16 @@ class Indexer:
         if weights is not None:
             self._db.set_meta(WEIGHTS_META_KEY, weights)
 
-    def _reachable(self, root: Path, paths: Sequence[str], unreadable: Sequence[str]) -> list[str]:
-        """The subset of ``paths`` a walk of ``root`` would have visited.
+    def _reachable(
+        self, scope: discovery.Scope, paths: Sequence[str], unreadable: Sequence[str]
+    ) -> tuple[list[str], bool]:
+        """The failure rows in ``paths`` this run may clear, and whether any left its scope.
 
-        Pruned directories (`.venv`, `node_modules`), directories excluded by
-        configuration, and directories that could not be listed are never entered, so this
-        run saw nothing inside them and may not speak for what it did not see.
+        Pruned directories (`.venv`, `node_modules`) and directories that could not be
+        listed are never entered, so this run saw nothing inside them and may not speak for
+        what it did not see: their rows stay. Out-of-scope paths are the opposite - the run
+        disowns them, and a failure recorded there must not keep this root's coverage
+        "unknown" forever, since no run of it will ever look there again.
 
         Every component is tested, including the last. A recorded failure is usually a
         file, but an unreadable *directory* is recorded under its own path - and dropping
@@ -588,26 +613,32 @@ class Indexer:
         (`discovery._certainly_gone`), or its row would outlive the file and no run could ever
         retire it.
         """
+        root = scope.root
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
-        visitable = []
+        visitable: list[str] = []
+        disowned = False
         for path in paths:
-            if self._walk_would_visit(root, path, blocked) or discovery._certainly_gone(root, path):
+            if discovery._certainly_gone(root, path):
                 visitable.append(path)
-        return visitable
+            elif not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):
+                continue
+            elif scope.excludes(path):
+                visitable.append(path)
+                disowned = True
+            elif self._walk_would_visit(root, path, blocked):
+                visitable.append(path)
+        return visitable, disowned
 
-    def _walk_would_visit(self, root: Path, path: str, blocked: tuple[str, ...]) -> bool:
+    @staticmethod
+    def _walk_would_visit(root: Path, path: str, blocked: tuple[str, ...]) -> bool:
         """Whether a walk of ``root`` reaches ``path``, given the directories it could not list."""
         if blocked and path.startswith(blocked):
             return False
-        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):
-            return False
-        if discovery._behind_symlink(root, path) or discovery._is_shadowing_symlink(path):
-            return False
-        return not (self._exclude and discovery._is_excluded(Path(path), root, self._exclude))
+        return not (discovery._behind_symlink(root, path) or discovery._is_shadowing_symlink(path))
 
     @staticmethod
     def _vanished(
-        root: Path,
+        scope: discovery.Scope,
         known: Mapping[str, object],
         seen: set[str],
         unreadable: Sequence[str],
@@ -623,17 +654,25 @@ class Indexer:
         evidence of deletion; `ENOENT` on that one name is exactly that evidence, and
         without it a deleted document under a pruned tree keeps answering searches with
         text that is not on disk any more, until someone re-indexes that tree by hand.
+
+        Out of scope (`discovery.Scope`) is decided before the unreadable and symlink cases:
+        it is a statement about the path, not about what the walk could see, so a worktree
+        that has since become a symlink still has its copies purged.
         """
+        root = scope.root
         blocked = tuple(location.rstrip(os.sep) + os.sep for location in unreadable)
         vanished: list[str] = []
         for file_path in sorted(set(known) - seen):
             if discovery._certainly_gone(root, file_path):
                 vanished.append(file_path)
                 continue
-            if blocked and file_path.startswith(blocked):
-                continue
             relative = os.path.relpath(file_path, root)
             if not discovery._is_walkable(relative.split(os.sep)[:-1]):
+                continue
+            if scope.excludes(file_path):
+                vanished.append(file_path)
+                continue
+            if blocked and file_path.startswith(blocked):
                 continue
             if discovery._behind_symlink(root, file_path):
                 continue

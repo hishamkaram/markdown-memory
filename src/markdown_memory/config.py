@@ -40,6 +40,7 @@ ENV_INDEX_WORKERS = "MARKDOWN_MEMORY_INDEX_WORKERS"
 
 
 ENV_AUTO_INDEX = "MARKDOWN_MEMORY_AUTO_INDEX"
+ENV_GITIGNORE = "MARKDOWN_MEMORY_GITIGNORE"
 
 
 # Claude Code exports this to every stdio MCP server it spawns, set to the project root.
@@ -101,6 +102,8 @@ class ServerConfig:
     index_workers: int = DEFAULT_INDEX_WORKERS
     #: Whether the stdio server keeps its own docs root indexed in the background.
     auto_index: bool = True
+    #: Whether what git ignores below the docs root is left out of the index.
+    gitignore: bool = True
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -123,8 +126,8 @@ class ServerConfig:
             ),
             exclude=parse_exclusions(os.environ.get(ENV_EXCLUDE, "")),
             index_workers=_positive_int(ENV_INDEX_WORKERS, DEFAULT_INDEX_WORKERS),
-            auto_index=os.environ.get(ENV_AUTO_INDEX, "").strip().lower()
-            not in {"0", "false", "off", "no"},
+            auto_index=_switched_on(ENV_AUTO_INDEX),
+            gitignore=_switched_on(ENV_GITIGNORE),
         )
 
 
@@ -135,6 +138,7 @@ def resolve_config(
     embedder: str | None = None,
     exclude: Sequence[str] = (),
     auto_index: bool | None = None,
+    gitignore: bool | None = None,
 ) -> ServerConfig:
     """Environment configuration with explicit overrides laid over it.
 
@@ -164,6 +168,7 @@ def resolve_config(
         exclude=tuple(exclude) or base.exclude,
         index_workers=base.index_workers,
         auto_index=base.auto_index if auto_index is None else auto_index,
+        gitignore=base.gitignore if gitignore is None else gitignore,
     )
 
 
@@ -175,7 +180,13 @@ def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:
         embedder=arguments.embedder,
         exclude=arguments.exclude,
         auto_index=False if getattr(arguments, "no_auto_index", False) else None,
+        gitignore=False if getattr(arguments, "no_gitignore", False) else None,
     )
+
+
+def _switched_on(variable: str) -> bool:
+    """On unless the variable says otherwise: `0`, `false`, `off` or `no`."""
+    return os.environ.get(variable, "").strip().lower() not in {"0", "false", "off", "no"}
 
 
 def _project_root() -> Path:

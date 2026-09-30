@@ -1513,36 +1513,16 @@ class TestOnlyAWholeWalkVouchesForATree:
         indexer.index_directory(root)
         assert len(db.list_documents(str(root))) == 2, "a symlinked directory cost its documents"
 
-    def test_a_failure_inside_an_excluded_directory_outlives_a_parent_scan(
+    def test_a_failure_inside_an_excluded_directory_is_disowned_by_a_parent_scan(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
-        """Exclusions prune the walk exactly as `.venv` does, and mean the same thing."""
-        drafts = tmp_path / "drafts"
-        drafts.mkdir()
-        (tmp_path / "good.md").write_text("# Good\n\nreadable\n")
-        broken = drafts / "bad.md"
-        broken.write_text("# Bad\n\nbody\n")
-        broken.chmod(0o000)
-        try:
-            Indexer(db, fake_embedder).index_directory(drafts)
-            assert len(db.index_status(str(drafts)).failures) == 1
+        """An exclusion is scope: the root's run retires what it covers, failures included.
 
-            Indexer(db, fake_embedder, exclude=("drafts",)).index_directory(tmp_path)
-            assert len(db.index_status(str(drafts)).failures) == 1, (
-                "a scan spoke for a tree its exclusions kept it out of"
-            )
-        finally:
-            broken.chmod(0o644)
-
-    def test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does(
-        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
-    ) -> None:
-        """Refusing to speak for what was not seen must not make a row immortal.
-
-        The row sits inside a directory this scan excludes, so no walk of the root will
-        ever look at it again. Delete the file and the root reported itself incomplete
-        forever - naming a path that no longer exists, advising a re-index that could not
-        change the answer. A walk's silence is not evidence; `ENOENT` at that one name is.
+        Kept, the row would hold the root's coverage at "unknown" for good, since no run of
+        the root will ever look inside an excluded directory again - and the documents there
+        are already purged by that same run, so keeping only their failures was never
+        consistent. An inner root that was vouching for itself loses its certificate with
+        the row: it has not been walked since, and nothing now says it is broken.
         """
         drafts = tmp_path / "drafts"
         drafts.mkdir()
@@ -1552,12 +1532,47 @@ class TestOnlyAWholeWalkVouchesForATree:
         broken.chmod(0o000)
         try:
             Indexer(db, fake_embedder).index_directory(tmp_path)
+            # Indexed on its own too, so it holds a certificate of its own - which only its
+            # recorded fault keeps from reading "verified".
+            Indexer(db, fake_embedder).index_directory(drafts)
+            assert len(db.index_status(str(drafts)).failures) == 1
+
+            # Nothing else changes, so retiring the row is this run's only write.
+            Indexer(db, fake_embedder, exclude=("drafts",)).index_directory(tmp_path)
+            assert db.index_status(str(tmp_path)).failures == ()
+            assert db.index_status(str(tmp_path)).verified, "an excluded fault held it back"
+            assert not db.index_status(str(drafts)).verified, (
+                "an inner root kept vouching for itself after its fault was forgotten"
+            )
+        finally:
+            broken.chmod(0o644)
+
+    def test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Refusing to speak for what was not seen must not make a row immortal.
+
+        The row sits inside a directory the walk prunes, so no walk of the root will ever
+        look at it again. Delete the file and the root reported itself incomplete forever -
+        naming a path that no longer exists, advising a re-index that could not change the
+        answer. A walk's silence is not evidence; `ENOENT` at that one name is. (Pruned, not
+        excluded: a root now disowns what it excludes, failures and all, without evidence.)
+        """
+        pruned = tmp_path / ".venv"
+        pruned.mkdir()
+        (tmp_path / "good.md").write_text("# Good\n\nreadable\n")
+        broken = pruned / "bad.md"
+        broken.write_text("# Bad\n\nbody\n")
+        broken.chmod(0o000)
+        try:
+            Indexer(db, fake_embedder).index_directory(pruned)
+            Indexer(db, fake_embedder).index_directory(tmp_path)
             assert not db.index_status(str(tmp_path)).verified
         finally:
             broken.chmod(0o644)
         broken.unlink()
 
-        Indexer(db, fake_embedder, exclude=("drafts",)).index_directory(tmp_path)
+        Indexer(db, fake_embedder).index_directory(tmp_path)
         status = db.index_status(str(tmp_path))
         assert status.failures == (), "a failure outlived the file it names"
         assert status.verified, "the root could never be called whole again"

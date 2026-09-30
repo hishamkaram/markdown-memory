@@ -7,12 +7,20 @@ by a symlink or blocked forever by a FIFO.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import logging
 import os
 import stat
+import subprocess
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
+
+from markdown_memory.exceptions import IndexCancelled
+
+logger = logging.getLogger(__name__)
 
 #: What ``_printable`` leaves where it could not decode a byte of a file name.
 _UNDECODABLE = "�"
@@ -59,10 +67,75 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class Scope:
+    """What a run of one documentation root owns, and so what it may index and purge.
+
+    Out of scope: what the operator excluded, what git ignores below the root, and anything
+    inside another checkout below it - a worktree, a submodule, a nested clone. Each is a
+    statement that the path is not this project's documentation, which is what an exclusion
+    already meant here: its documents leave the index, rather than being kept the way a
+    pruned `node_modules` is, where the walk merely learned nothing.
+    """
+
+    root: Path
+    exclude: tuple[str, ...] = ()
+    #: Paths git ignores, relative to the root, as `_printable` spells them, no trailing `/`.
+    ignored: frozenset[str] = frozenset()
+
+    def excludes(self, path: Path | str) -> bool:
+        target = Path(path)
+        if self.exclude and _is_excluded(target, self.root, self.exclude):
+            return True
+        try:
+            parts = target.relative_to(self.root).parts
+        except ValueError:
+            return False
+        # Every ancestor, not only the path: git reports an ignored directory that is now a
+        # symlink as a *file*, and the rows recorded under it while it was real must go too.
+        if self.ignored and any(
+            _printable("/".join(parts[:end])) in self.ignored for end in range(1, len(parts) + 1)
+        ):
+            return True
+        return _in_nested_checkout(target, self.root)
+
+
+def git_ignored(root: Path) -> frozenset[str] | None:
+    """What git ignores below ``root``, or ``None`` when git cannot say.
+
+    One `git ls-files` for the whole run: git's own ignore rules, global excludes and
+    `.git/info/exclude` included, and nothing tracked, since only untracked paths are listed.
+    Ignored directories come back collapsed (`coverage/`), so the set stays small. No git, no
+    repository, an error or a hang all mean the walk proceeds exactly as it did before git
+    was asked - never that the run fails. Its input and output are captured: stdout is the
+    JSON-RPC channel, and stdin is the client's.
+    """
+    try:
+        listed = subprocess.check_output(
+            ["git", "-C", str(root), "ls-files", "--others", "--ignored", "--exclude-standard",
+             "--directory", "-z"],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Not installed, not a work tree (exit 128), refused or hung: say so once.
+        logger.info("Not using .gitignore for %s: %s", _printable(str(root)), exc)
+        return None
+    # A root git ignores comes back as `./`, which names no path below it: whoever asked
+    # for an ignored directory asked on purpose, and its contents are indexed.
+    entries = (os.fsdecode(raw).rstrip("/") for raw in listed.split(b"\0"))
+    return frozenset(_printable(entry) for entry in entries if entry)
+
+
 def iter_markdown_files(
     directory: Path,
     on_error: Callable[[OSError], None] | None = None,
     exclude: Sequence[str] = (),
+    *,
+    scope: Scope | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Iterator[Path]:
     """Yield Markdown files beneath ``directory`` in a stable order, pruning vendored trees.
 
@@ -73,22 +146,58 @@ def iter_markdown_files(
     (``scripts/eval_data/*``, ``**/vendor/**``, ``CHANGELOG.md``). A repository that keeps
     fixtures, vendored documentation or a test corpus in-tree would otherwise index them
     as if they were its own documentation. A matching directory is pruned, so its subtree
-    costs nothing to skip.
+    costs nothing to skip. ``scope`` replaces it with everything a run owns (`Scope`).
+
+    Dot-directories come last: a project's own `docs/` should not wait behind `.claude/`.
+    ``should_stop`` is asked at every entry, so a stop is honoured during the walk too.
     """
+    owned = scope if scope is not None else Scope(directory, tuple(exclude))
     for root, dirnames, filenames in os.walk(directory, followlinks=False, onerror=on_error):
         here = Path(root)
         dirnames[:] = sorted(
-            name
-            for name in dirnames
-            if name not in _SKIPPED_DIRECTORIES
-            and not _is_excluded(here / name, directory, exclude)
+            (
+                name
+                for name in dirnames
+                if name not in _SKIPPED_DIRECTORIES and not owned.excludes(here / name)
+            ),
+            key=lambda name: (name.startswith("."), name),
         )
         for filename in sorted(filenames):
+            if should_stop is not None and should_stop():
+                raise IndexCancelled("index run stopped by its owner")
             path = here / filename
-            if path.suffix.lower() in MARKDOWN_SUFFIXES and not _is_excluded(
-                path, directory, exclude
-            ):
+            if path.suffix.lower() in MARKDOWN_SUFFIXES and not owned.excludes(path):
                 yield path
+
+
+def without_aliases(paths: Sequence[Path]) -> list[Path]:
+    """``paths`` without the symlinks that point at another file on the list, in walk order.
+
+    Identity, not spelling: a link is an alias when its target is the same file
+    (`st_dev`, `st_ino`) as a regular file this run will index - which survives `..`, chains,
+    a case-insensitive filesystem and a symlinked root, where comparing paths would not. A
+    link whose target is excluded, ignored, not Markdown, outside the root or missing stays
+    under its own name, as before: it is then the only way that text is reached, or the
+    failure a broken link deserves.
+    """
+    originals: set[tuple[int, int]] = set()
+    for path in paths:
+        with contextlib.suppress(OSError):
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode) and _encodable(str(path)):
+                originals.add((info.st_dev, info.st_ino))
+    kept = []
+    for path in paths:
+        if os.path.islink(path):
+            try:
+                target = os.stat(path)
+            except OSError:
+                kept.append(path)
+                continue
+            if (target.st_dev, target.st_ino) in originals:
+                continue
+        kept.append(path)
+    return kept
 
 
 def _behind_symlink(root: Path, path: str) -> bool:
@@ -152,10 +261,12 @@ def _is_shadowing_symlink(path: str) -> bool:
     stops there, so a failure recorded against that directory cannot be rechecked by any
     walk of the tree above it. `_behind_symlink` cannot answer this: it tests the
     components *before* the last one, which is right for a file inside a linked tree and
-    blind to the linked directory itself. A symlink to a *file* is walked and indexed like
-    any other file, so only one that does not resolve to a file is out of reach.
+    blind to the linked directory itself. A symlink to anything else - a file, or nothing at
+    all - is listed among the walk's files and reached every run, so only a linked
+    directory is out of reach. (Calling a dangling link unreachable kept its failure row
+    from ever being cleared, and the next run's insert of the same row failed the run.)
     """
-    return os.path.islink(path) and not os.path.isfile(path)
+    return os.path.islink(path) and os.path.isdir(path)
 
 
 def _is_excluded(path: Path, root: Path, patterns: Sequence[str]) -> bool:
@@ -193,3 +304,26 @@ def _printable(path: str) -> str:
 
 def _is_walkable(relative_directories: Sequence[str]) -> bool:
     return not any(name in _SKIPPED_DIRECTORIES for name in relative_directories)
+
+
+def _in_nested_checkout(path: Path, root: Path) -> bool:
+    """True when ``path``, or a directory between it and ``root``, holds its own `.git`.
+
+    A file for a worktree or submodule, a directory for a nested clone: either way another
+    checkout, whose Markdown is a copy of some other state of the project. ``root`` itself is
+    never asked, so pointing `index_directory` at a worktree still indexes it.
+    """
+    current = path
+    while current != root and current.parent != current:
+        if os.path.lexists(current / ".git"):
+            return True
+        current = current.parent
+    return False
+
+
+def _encodable(path: str) -> bool:
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True

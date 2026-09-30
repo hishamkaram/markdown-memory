@@ -574,6 +574,112 @@ MUTATIONS = (
         tests="test_the_graph_an_upgrade_left_behind_is_reported_not_hidden",
     ),
     Mutation(
+        name="scope: walk into another checkout below the root",
+        module="discovery.py",
+        old='        if os.path.lexists(current / ".git"):\n',
+        new="        if False:\n",
+        tests="test_a_worktree_and_a_nested_clone_are_left_out_and_their_copies_purged",
+    ),
+    Mutation(
+        name="scope: refuse a checkout even when it is the root asked for",
+        module="discovery.py",
+        old="    while current != root and current.parent != current:\n",
+        new="    while current.parent != current:\n",
+        tests="test_a_checkout_pointed_at_directly_is_still_indexed",
+    ),
+    Mutation(
+        name="scope: index whatever git ignores",
+        module="discovery.py",
+        old="        if self.ignored and any(\n",
+        new="        if False and any(\n",
+        tests="test_what_git_ignores_is_left_out_and_purged_but_tracked_files_stay",
+    ),
+    Mutation(
+        name="scope: look only at the path, not at the ignored directory above it",
+        module="discovery.py",
+        old=(
+            '            _printable("/".join(parts[:end])) in self.ignored for end in'
+            " range(1, len(parts) + 1)\n"
+        ),
+        new=(
+            '            _printable("/".join(parts[:end])) in self.ignored for end in'
+            " [len(parts)]\n"
+        ),
+        tests="test_a_directory_that_became_an_ignored_symlink_takes_its_rows_with_it",
+    ),
+    Mutation(
+        name="scope: keep rows behind a symlink that the root has disowned",
+        module="indexer.py",
+        old="            if scope.excludes(file_path):\n",
+        new="            if False:\n",
+        tests="test_a_directory_that_became_an_ignored_symlink_takes_its_rows_with_it",
+    ),
+    Mutation(
+        name="scope: ask git even when told not to",
+        module="indexer.py",
+        old="            ignored = discovery.git_ignored(root) if self._gitignore else None\n",
+        new="            ignored = discovery.git_ignored(root)\n",
+        tests="test_what_git_ignores_is_left_out_and_purged_but_tracked_files_stay",
+    ),
+    Mutation(
+        name="scope: ignore MARKDOWN_MEMORY_GITIGNORE",
+        module="config.py",
+        old="            gitignore=_switched_on(ENV_GITIGNORE),\n",
+        new="            gitignore=True,\n",
+        tests="test_it_can_be_switched_off",
+    ),
+    Mutation(
+        name="scope: never hand the gitignore switch to the indexer",
+        module="server.py",
+        old="            gitignore=config.gitignore,\n",
+        new="            gitignore=True,\n",
+        tests="test_the_server_passes_the_switch_to_its_indexer",
+    ),
+    Mutation(
+        name="aliases: index a symlinked file a second time under the link",
+        module="discovery.py",
+        old="            if (target.st_dev, target.st_ino) in originals:\n",
+        new="            if False:\n",
+        tests="test_a_link_to_a_file_already_indexed_is_not_indexed_again",
+    ),
+    Mutation(
+        name="aliases: drop the only link to a file that cannot be indexed itself",
+        module="discovery.py",
+        old="            if stat.S_ISREG(info.st_mode) and _encodable(str(path)):\n",
+        new="            if stat.S_ISREG(info.st_mode):\n",
+        tests="test_a_link_to_a_file_that_cannot_be_indexed_stands_in_for_it",
+    ),
+    Mutation(
+        name="walk: visit dot-directories before the project's own docs",
+        module="discovery.py",
+        old='            key=lambda name: (name.startswith("."), name),\n',
+        new="            key=lambda name: name,\n",
+        tests="test_the_projects_own_docs_come_before_dot_directories",
+    ),
+    Mutation(
+        name="walk: ignore a stop until the whole tree is walked",
+        module="discovery.py",
+        old=(
+            "            if should_stop is not None and should_stop():\n"
+            '                raise IndexCancelled("index run stopped by its owner")\n'
+            "            path = here / filename\n"
+        ),
+        new="            path = here / filename\n",
+        tests="test_a_stop_is_honoured_during_the_walk",
+    ),
+    Mutation(
+        name="failures: fail a whole run on a failure row recorded twice",
+        module="db.py",
+        old=(
+            '                    "INSERT INTO index_failures(file_path, message) VALUES (?,'
+            ' ?) "\n'
+            '                    "ON CONFLICT(file_path) DO UPDATE SET message ='
+            ' excluded.message",\n'
+        ),
+        new='                    "INSERT INTO index_failures(file_path, message) VALUES (?, ?)",\n',
+        tests="test_recording_a_failure_twice_restates_it",
+    ),
+    Mutation(
         name="auto: keep telling the agent to run what is already running",
         module="models.py",
         old="        if self.indexing:\n",
@@ -592,7 +698,7 @@ MUTATIONS = (
         module="indexer.py",
         old="                        if should_stop is not None and should_stop():\n",
         new="                        if False:\n",
-        tests="test_a_stop_asked_before_the_run_starts_embeds_nothing",
+        tests="test_a_stop_asked_once_the_walk_is_done_embeds_nothing",
     ),
     Mutation(
         name="index: write the file embedded while a stop was asked",
@@ -893,7 +999,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 8042),',
+        old='    ("README.md", 8389),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1324,22 +1430,18 @@ MUTATIONS = (
     Mutation(
         name="coverage: let a run rewrite the tree without retracting anything",
         module="indexer.py",
-        old="                about_to_write()\n",
-        new="                pass  # rewrite the tree without saying the tree changed\n",
+        old="                about_to_write()\n                self._db.replace_document(\n",
+        new=(
+            "                pass  # rewrite the tree without saying the tree changed\n"
+            "                self._db.replace_document(\n"
+        ),
         tests="test_a_run_that_dies_partway_leaves_the_tree_unvouched_for",
     ),
     Mutation(
         name="coverage: retract before knowing whether anything will be written",
         module="indexer.py",
-        old=(
-            "            files = discovery.iter_markdown_files("
-            "root, record_unreadable, self._exclude)"
-        ),
-        new=(
-            "            about_to_write()\n"
-            "            files = discovery.iter_markdown_files("
-            "root, record_unreadable, self._exclude)"
-        ),
+        old="            files = iter(\n",
+        new="            about_to_write()\n            files = iter(\n",
         tests="test_a_run_that_committed_nothing_leaves_the_certificate_alone",
     ),
     Mutation(
@@ -1395,10 +1497,10 @@ MUTATIONS = (
         name="index: speak for a pruned tree this walk never entered",
         module="indexer.py",
         old=(
-            "            reachable = self._reachable("
-            "root, self._db.failure_paths(str(root)), unreadable)"
+            "            elif not discovery._is_walkable("
+            "os.path.relpath(path, root).split(os.sep)):\n"
         ),
-        new="            reachable = self._db.failure_paths(str(root))",
+        new="            elif False:\n",
         tests="test_a_failure_inside_a_pruned_directory_outlives_a_parent_scan",
     ),
     Mutation(
@@ -1425,21 +1527,29 @@ MUTATIONS = (
     Mutation(
         name="index: ask whether a pruned directory's parent was walkable",
         module="indexer.py",
-        old="        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)):",
+        old=(
+            "            elif not discovery._is_walkable("
+            "os.path.relpath(path, root).split(os.sep)):\n"
+        ),
         new=(
-            "        if not discovery._is_walkable(os.path.relpath(path, root).split(os.sep)[:-1]):"
+            "            elif not discovery._is_walkable("
+            "os.path.relpath(path, root).split(os.sep)[:-1]):\n"
         ),
         tests="test_a_pruned_directory_that_could_not_be_listed_keeps_its_own_failure",
     ),
     Mutation(
-        name="index: speak for an excluded tree this walk never entered",
+        name="scope: keep a disowned failure holding the root's coverage back for good",
         module="indexer.py",
-        old=(
-            "        return not (self._exclude and "
-            "discovery._is_excluded(Path(path), root, self._exclude))"
-        ),
-        new="        return True",
-        tests="test_a_failure_inside_an_excluded_directory_outlives_a_parent_scan",
+        old="            elif scope.excludes(path):\n",
+        new="            elif False:\n",
+        tests="test_a_failure_inside_an_excluded_directory_is_disowned_by_a_parent_scan",
+    ),
+    Mutation(
+        name="scope: let an inner root vouch for itself after losing its recorded fault",
+        module="indexer.py",
+        old="            if disowned:\n",
+        new="            if False:\n",
+        tests="test_a_failure_inside_an_excluded_directory_is_disowned_by_a_parent_scan",
     ),
     Mutation(
         name="answers: report the root's stale vectors as a subdirectory's own",
@@ -1472,10 +1582,10 @@ MUTATIONS = (
         name="index: clear failures behind a symlink this walk never followed",
         module="indexer.py",
         old=(
-            "        if discovery._behind_symlink(root, path) "
-            "or discovery._is_shadowing_symlink(path):"
+            "        return not (discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path))\n"
         ),
-        new="        if discovery._is_shadowing_symlink(path):",
+        new="        return not discovery._is_shadowing_symlink(path)\n",
         tests="test_a_failure_behind_a_symlinked_directory_outlives_a_parent_scan",
     ),
     Mutation(
@@ -1495,11 +1605,8 @@ MUTATIONS = (
     Mutation(
         name="index: keep a failure standing for a file the walk could not see and that is gone",
         module="indexer.py",
-        old=(
-            "            if self._walk_would_visit(root, path, blocked) "
-            "or discovery._certainly_gone(root, path):"
-        ),
-        new="            if self._walk_would_visit(root, path, blocked):",
+        old="            if discovery._certainly_gone(root, path):\n",
+        new="            if False:\n",
         tests="test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does",
     ),
     Mutation(
@@ -1533,10 +1640,10 @@ MUTATIONS = (
         name="index: clear a failure on a directory the walk only saw the name of",
         module="indexer.py",
         old=(
-            "        if discovery._behind_symlink(root, path) "
-            "or discovery._is_shadowing_symlink(path):"
+            "        return not (discovery._behind_symlink(root, path) "
+            "or discovery._is_shadowing_symlink(path))\n"
         ),
-        new="        if discovery._behind_symlink(root, path):",
+        new="        return not discovery._behind_symlink(root, path)\n",
         tests="test_a_failure_on_a_directory_that_became_a_symlink_outlives_the_swap",
     ),
     Mutation(

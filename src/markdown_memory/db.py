@@ -646,8 +646,11 @@ class Database:
                 "DELETE FROM index_failures WHERE file_path = ?", [(path,) for path in clear]
             )
             if failures:
+                # An upsert, so a row this run could not clear - one out of its sight -
+                # is restated rather than failing the whole run on a duplicate.
                 conn.executemany(
-                    "INSERT INTO index_failures(file_path, message) VALUES (?, ?)",
+                    "INSERT INTO index_failures(file_path, message) VALUES (?, ?) "
+                    "ON CONFLICT(file_path) DO UPDATE SET message = excluded.message",
                     sorted(failures.items()),
                 )
 
