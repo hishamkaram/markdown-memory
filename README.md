@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 15,557
+       alt="One question asked of four documentation files. Reading them whole costs 15,739
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 15,557 tokens in all:
+`docs/evaluation-protocol.md`, 15,739 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,887 tokens instead of 15,557**, and the section that actually answers is 403 - a
+**2,887 tokens instead of 15,739**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -303,6 +303,15 @@ variables, error strings - are 100% Top-1 with either preset, because FTS5 answe
 Query latency is not in the table on purpose: it swings by 2-3x with what else the machine
 is doing, so the baseline records it as informational and so should you.
 
+The same run reports what the default `search_docs` call costs: the estimated tokens of the
+text block the MCP server actually sends (five full sections plus `index_status`), beside
+the section that answers each query, as a median, a p95 and a median ratio per set
+(`--show-costs` lists every query). It is informational - it never gates and never enters
+the baseline - and it depends on where the repository is checked out, since every hit
+carries its absolute path, so compare two runs from the same checkout. On this corpus the
+default call costs a median of about 1,300-1,400 tokens against answering sections of
+roughly 50-80.
+
 Switching preset **discards the whole index**: the two produce vectors of different sizes,
 which cannot be compared, so every documentation root has to be indexed again.
 `index_directory` reports that when it happens.
@@ -540,6 +549,7 @@ uv run pytest -v                      # unit + integration (real ONNX model for 
 uv run python scripts/live_test.py    # spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/eval_retrieval.py --show-misses   # retrieval accuracy; fails on regression
 uv run python scripts/eval_retrieval.py --rebuild       # ... after discarding the cached index
+uv run python scripts/eval_retrieval.py --show-costs    # ... and what each default call costs
 uv run python scripts/reindex_docs.py DIR --force       # forced re-index + integrity verification
 scripts/check.sh                                        # the whole pre-commit gate, fail-fast
 ```

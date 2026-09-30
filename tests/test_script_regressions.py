@@ -6,14 +6,16 @@ One test per defect found in code review; each fails when its fix is reverted.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import json
 import logging
 import os
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes import FakeEmbedder
@@ -26,8 +28,9 @@ from markdown_memory.models import (
     FileFailure,
     IndexReport,
     SearchResult,
+    estimate_tokens,
 )
-from markdown_memory.server import MarkdownMemoryService
+from markdown_memory.server import MarkdownMemoryService, create_server
 
 
 class TestEvalScript:
@@ -78,6 +81,7 @@ class _EvalStubService:
         self.embedder = FakeEmbedder(model_name="stub")
         self.db = None  # only ever handed to the cache probes, which the tests stub out
         self.closed = False
+        self.searched: list[str] = []
         self.report = IndexReport(
             directory="stub", files_scanned=0, files_indexed=0, files_unchanged=0, files_purged=0,
             sections_indexed=0, passages_indexed=0, elapsed_seconds=0.0,
@@ -87,6 +91,7 @@ class _EvalStubService:
         return self.report
 
     def search_docs(self, query: str, limit: int) -> list[SearchResult]:
+        self.searched.append(query)
         return []
 
     def close(self) -> None:
@@ -114,6 +119,9 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
         stub = _EvalStubService(ServerConfig(db_path=tmp_path / "x.db", docs_dir=tmp_path))
         monkeypatch.setattr(evaluation, "open_service", lambda *_args: (stub, False))
+        # The stub holds no corpus to resolve labels in or to cost; both have their own tests.
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+        monkeypatch.setattr(evaluation, "measure_costs", lambda *_args: {})
         try:
             code = evaluation.main()  # type: ignore[attr-defined]
         finally:
@@ -135,6 +143,204 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
         code, recorded = self.run_main(evaluation, tmp_path, monkeypatch, top1=1.0)
         assert code == 0
         assert recorded["held_out/paraphrase"]["top1"] == 1.0
+
+
+_COST_CORPUS = {
+    "a.md": "# Guide\n\nintro words\n\n## Setup\n\ninstall the tool first\n\n"
+    "### Nested\n\nnested setup detail\n\n## Big\n\n"
+    + "\n\n".join(f"capacity paragraph {n} " + "sizing words " * 30 for n in range(12))
+    + "\n",
+    "b.md": "# Guide\n\n## Setup\n\nanother setup entirely\n",
+}
+
+
+def _queries(*labels: str) -> dict[str, dict[str, list[dict[str, object]]]]:
+    cases: list[dict[str, object]] = [{"query": label, "expected": label} for label in labels]
+    return {
+        "dev": {"paraphrase": cases, "identifier": []},
+        "held_out": {"paraphrase": [], "identifier": []},
+    }
+
+
+def _passing_scores(evaluation: object) -> Any:
+    return evaluation.Scores(  # type: ignore[attr-defined]
+        top1=1.0, top3=1.0, top5=1.0, any_valid_top1=1.0, ndcg5=1.0,
+        median_ms=1.0, p95_ms=1.0, misses=(),
+    )  # fmt: skip
+
+
+class TestTheCostReport:
+    """#40: what the default call costs beside the section that answers - reported, never gated."""
+
+    @pytest.fixture
+    def evaluation(self) -> object:
+        # By name, not by path: the mutation check points `pythonpath` at its mutated copy.
+        import eval_retrieval
+
+        return eval_retrieval
+
+    @pytest.fixture
+    def service(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> Iterator[MarkdownMemoryService]:
+        root = tmp_path / "docs"
+        root.mkdir()
+        for name, text in _COST_CORPUS.items():
+            (root / name).write_text(text, encoding="utf-8")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "c.db", docs_dir=root), embedder=fake_embedder
+        )
+        service.index_directory()
+        yield service
+        service.close()
+
+    @staticmethod
+    def resolve(evaluation: object, service: MarkdownMemoryService, *labels: str) -> dict[str, Any]:
+        try:
+            return evaluation.resolve_answers(service, _queries(*labels))  # type: ignore[attr-defined,no-any-return]
+        except SystemExit as exc:
+            raise AssertionError(f"a sound label was refused: {exc}") from exc
+
+    def test_the_payload_is_the_text_block_the_default_call_sends(
+        self, evaluation: object, service: MarkdownMemoryService
+    ) -> None:
+        label = "Guide > Big"
+        answers = self.resolve(evaluation, service, label)
+        cost = evaluation.measure_costs(service, _queries(label), answers)["dev/paraphrase"]  # type: ignore[attr-defined]
+        outcome = asyncio.run(
+            create_server(service=service).call_tool("search_docs", {"query": label})
+        )
+        assert cost.payloads == (estimate_tokens(outcome.content[0].text),)  # type: ignore[union-attr]
+        assert cost.ratios == [cost.payloads[0] / answers[label].tokens]
+
+    def test_a_split_section_answers_with_its_parts_together(
+        self, evaluation: object, service: MarkdownMemoryService
+    ) -> None:
+        answer = self.resolve(evaluation, service, "Guide > Big")["Guide > Big"]
+        (big,) = [
+            node
+            for node in service.get_document_outline(answer.file_path)[0].children
+            if node.heading_path == "Guide > Big"
+        ]
+        assert big.part_count > 1, "the fixture no longer splits, so this proves nothing"
+        whole = service.read_section(answer.file_path, "Guide > Big")
+        assert "(Part" not in answer.heading_path
+        assert answer.tokens == estimate_tokens(whole)
+
+    def test_a_qualified_label_resolves_in_the_file_it_names(
+        self, evaluation: object, service: MarkdownMemoryService
+    ) -> None:
+        answer = self.resolve(evaluation, service, "b.md::Guide > Setup")["b.md::Guide > Setup"]
+        assert Path(answer.file_path).name == "b.md"
+
+    def test_a_nested_heading_resolves(
+        self, evaluation: object, service: MarkdownMemoryService
+    ) -> None:
+        answer = self.resolve(evaluation, service, "Guide > Setup > Nested")[
+            "Guide > Setup > Nested"
+        ]
+        assert Path(answer.file_path).name == "a.md"
+
+    @pytest.mark.parametrize("label", ["Guide > Nowhere", "Guide > Setup", "c.md::Guide > Setup"])
+    def test_a_label_naming_no_section_or_two_is_a_broken_fixture(
+        self, evaluation: object, service: MarkdownMemoryService, label: str
+    ) -> None:
+        try:
+            evaluation.resolve_answers(service, _queries(label))  # type: ignore[attr-defined]
+        except SystemExit as exc:
+            assert "fixture" in str(exc)
+        else:
+            raise AssertionError(f"{label!r} was taken for one section")
+
+    @staticmethod
+    def isolate(evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """main() on a stub service and a one-case fixture of its own: no checkout data read."""
+        data = tmp_path / "eval_data"
+        data.mkdir()
+        (data / "queries.json").write_text(json.dumps(_queries("q")), encoding="utf-8")
+        monkeypatch.setattr(evaluation, "DATA", data)
+        monkeypatch.setattr(evaluation, "BASELINE", data / "baseline.json")
+        monkeypatch.setattr(evaluation, "_probes", lambda corpus: ())
+        monkeypatch.setattr(sys, "argv", ["eval_retrieval.py"])
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        stub = _EvalStubService(ServerConfig(db_path=tmp_path / "x.db", docs_dir=tmp_path))
+        monkeypatch.setattr(evaluation, "open_service", lambda *_args: (stub, False))
+        return stub
+
+    def test_a_broken_fixture_stops_the_run_before_any_search(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = self.isolate(evaluation, tmp_path, monkeypatch)
+        passing = _passing_scores(evaluation)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+
+        def broken(*_args: object) -> dict[str, object]:
+            raise SystemExit("fixture: 'X' names 0 sections, not one")
+
+        monkeypatch.setattr(evaluation, "resolve_answers", broken)
+        try:
+            evaluation.main()  # type: ignore[attr-defined]
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("a broken fixture was scored")
+        finally:
+            logging.disable(logging.NOTSET)
+        assert stub.searched == [], "the fixture was checked only after searching"
+
+    def test_a_cost_pass_that_fails_does_not_decide_the_exit_code(
+        self,
+        evaluation: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        passing = _passing_scores(evaluation)
+        self.isolate(evaluation, tmp_path, monkeypatch)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+
+        def failing(*_args: object) -> dict[str, object]:
+            raise RuntimeError("search_docs failed for 'q'")
+
+        monkeypatch.setattr(evaluation, "measure_costs", failing)
+        try:
+            code = evaluation.main()  # type: ignore[attr-defined]
+        except RuntimeError as exc:
+            raise AssertionError("an informational table took the run down") from exc
+        finally:
+            logging.disable(logging.NOTSET)
+        assert code == 0
+        assert "cost: not measured (search_docs failed for 'q')" in capsys.readouterr().out
+
+    def test_show_costs_lists_every_query(
+        self, evaluation: object, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cost = evaluation.Cost(queries=("q1", "q2"), payloads=(300, 90), answers=(30, 45))  # type: ignore[attr-defined]
+        evaluation.print_costs({"dev/paraphrase": cost}, per_query=True)  # type: ignore[attr-defined]
+        listed = [line for line in capsys.readouterr().out.splitlines() if "cost [" in line]
+        assert len(listed) == 2 and listed[0].endswith("q1") and "10.0x" in listed[0]
+
+    def test_a_recorded_baseline_holds_no_cost(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.isolate(evaluation, tmp_path, monkeypatch)
+        passing = _passing_scores(evaluation)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+        cost = evaluation.Cost(queries=("q",), payloads=(300,), answers=(30,))  # type: ignore[attr-defined]
+        monkeypatch.setattr(evaluation, "measure_costs", lambda *_args: {"dev/paraphrase": cost})
+        monkeypatch.setattr(sys, "argv", ["eval_retrieval.py", "--update-baseline"])
+        try:
+            assert evaluation.main() == 0  # type: ignore[attr-defined]
+        finally:
+            logging.disable(logging.NOTSET)
+        recorded = json.loads((tmp_path / "eval_data" / "baseline.json").read_text())
+        fields = set(recorded["embeddinggemma"]["dev/paraphrase"])
+        assert fields == {"top1", "top3", "top5", "any_valid_top1", "ndcg5", "median_ms", "p95_ms"}
+
+    def test_p95_is_the_same_rule_for_latency_and_cost(self, evaluation: object) -> None:
+        assert evaluation._p95([float(n) for n in range(1, 21)]) == 19.0  # type: ignore[attr-defined]
 
 
 class TestEvalIndexCache:
