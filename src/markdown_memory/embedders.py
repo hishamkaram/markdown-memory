@@ -451,9 +451,13 @@ class EmbeddingGemmaEmbedder:
                 )
         with contextlib.suppress(OSError):
             wanted = {self._model_dir / name for name in model_cache.GEMMA_FILES}
+            # `snapshot_download(local_dir=...)` keeps its own locks and metadata under
+            # `.cache/`: every download leaves them, and none of them is weights.
+            bookkeeping = self._model_dir / ".cache"
             for entry in sorted(self._model_dir.rglob("*")):
                 stamp = entry.name.startswith(model_cache._VERIFIED_STAMP)
-                if entry.is_file() and entry not in wanted and not stamp:
+                ours = entry.is_relative_to(bookkeeping)
+                if entry.is_file() and entry not in wanted and not stamp and not ours:
                     others[entry] = entry.stat().st_size
         if others:
             logger.info(

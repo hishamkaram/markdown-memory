@@ -22,6 +22,8 @@ from markdown_memory.models import SectionDraft
 from markdown_memory.server import MarkdownMemoryService, create_server
 
 ROOT = Path(__file__).parent.parent
+#: Where the README's images live for every renderer, GitHub's and PyPI's alike.
+RAW_MAIN = "https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/"
 AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".cursorrules")
 SKILLS = ("run-eval", "reindex-docs", "test-regression")
 # The gate, in order. `scripts/check.sh` runs it locally and `.github/workflows/gate.yml`
@@ -630,13 +632,11 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
     def test_the_readme_falls_back_to_a_raster_every_client_can_draw(self) -> None:
         """Browsers get the vector; anything that ignores <picture> gets a raster.
 
-        The GitHub mobile app draws neither today, and that is not something this markup can
-        fix. The app renders a relative image path perfectly well - hishamkaram/delegation-
-        layer does exactly that, in raw HTML, and it draws - but that repository is public
-        and this one is not. Images in a private repository need an authenticated fetch the
-        app does not make for them, which is why the format was changed twice here to no
-        effect. The fix is publishing the repository, not editing this markup; the raster
-        below stays regardless, for clients that do not implement <picture>.
+        Every address is absolute, into this public repository's `main`. The same README is
+        the PyPI project page, and PyPI resolves no relative path and drops <source>
+        altogether - only the <img> survives its sanitiser, so that one above all must be a
+        URL that works from anywhere. The raster stays for clients that do not implement
+        <picture>, the PyPI page among them.
         """
         import make_diagram
 
@@ -652,11 +652,14 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         # Follow the path the README actually gives, rather than checking a name this test
         # chose: a fallback that ends in .png and points at nothing renders as the same
         # broken-image mark it exists to prevent.
-        fallback = ROOT / img.group(1)
+        assert img.group(1).startswith(RAW_MAIN), (
+            f"the fallback {img.group(1)} is not absolute: PyPI renders it as a broken image"
+        )
+        fallback = ROOT / img.group(1).removeprefix(RAW_MAIN)
         assert fallback.is_file(), f"the README's fallback {img.group(1)} does not exist"
         for theme in ("dark", "light"):
             source = f"docs/assets/how-it-works-{theme}.svg"
-            assert f'srcset="{source}"' in block, theme
+            assert f'srcset="{RAW_MAIN}{source}"' in block, theme
             assert (ROOT / source).is_file(), f"{source} is offered but not committed"
         assert "prefers-color-scheme: dark" in block, "nothing selects the dark drawing"
         assert fallback == ROOT / "docs/assets/how-it-works-light.png", (

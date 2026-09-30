@@ -9,29 +9,29 @@ with it. markdown-memory indexes your documentation by heading, so the same ques
 back as a few sections, each addressable by its breadcrumb and quoted verbatim.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <source srcset="docs/assets/how-it-works-light.svg">
-  <img src="docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 14,537
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
+  <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
+  <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
+       alt="One question asked of four documentation files. Reading them whole costs 14,987
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,681 tokens - the
+            vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 14,537 tokens in all:
+`docs/evaluation-protocol.md`, 14,987 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
-  403 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-  710 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  597 tok  README.md  markdown-memory
-  588 tok  CLAUDE.md  markdown-memory > Commands
+  407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+  712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  647 tok  README.md  markdown-memory
+  738 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,681 tokens instead of 14,537**, and the section that actually answers is 403 - a
+**2,887 tokens instead of 14,987**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -67,63 +67,74 @@ first model download, nothing leaves the machine.
 ### Get it
 
 ```bash
-git clone https://github.com/hishamkaram/markdown-memory
-cd markdown-memory
-uv sync
-uv run markdown-memory            # serves MCP over stdio; Ctrl-C to stop
+uv tool install markdown-memory        # or: pipx install markdown-memory
+markdown-memory --download-model       # optional: fetch the ~218 MB model now
 ```
 
-The server speaks JSON-RPC on stdin/stdout, so running it by hand only proves it starts.
-Register it with a client to actually use it.
+`uv tool install` puts the `markdown-memory` command in `~/.local/bin`; if your shell cannot
+find it, `uv tool update-shell` adds that directory to your PATH. Fetching the model up
+front is optional - the first search does it otherwise - but it keeps a 218 MB download
+out of your first question.
 
 ### Register it with your client
 
-Claude Code / Cursor (`.mcp.json` or `~/.cursor/mcp.json`) - `--project` keeps the
-client's working directory, which becomes the default documentation root:
+One registration serves every project. The server indexes the project the client was
+started in - Claude Code tells it (`CLAUDE_PROJECT_DIR`), Codex starts it there - and each
+project gets its own index.
 
-```json
-{
-  "mcpServers": {
-    "markdown-memory": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"]
-    }
-  }
-}
+```bash
+claude mcp add --scope user markdown-memory -- markdown-memory    # Claude Code
+codex mcp add markdown-memory -- markdown-memory                  # Codex
 ```
 
-Claude Desktop has no meaningful working directory, so set the root explicitly:
+`claude mcp list` and `codex mcp list` should show it. Upgrade with
+`uv tool upgrade markdown-memory` (or `pipx upgrade markdown-memory`); remove it with
+`claude mcp remove --scope user markdown-memory`, `codex mcp remove markdown-memory` and
+`uv tool uninstall markdown-memory` (or `pipx uninstall markdown-memory`).
+
+Desktop apps (Claude Desktop, Cursor) usually do not see `~/.local/bin`, so give them the
+absolute path that `command -v markdown-memory` prints. Claude Desktop has no project
+either, so name the documentation root:
 
 ```json
 {
   "mcpServers": {
     "markdown-memory": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
+      "command": "/home/you/.local/bin/markdown-memory",
       "env": { "MARKDOWN_MEMORY_DOCS_DIR": "/absolute/path/to/your/docs" }
     }
   }
 }
 ```
 
-**A fresh clone needs one edit.** The `.mcp.json` committed here names an absolute path on
-the machine it was written on; change it to where you cloned. It cannot be
-`${workspaceFolder}` or `${CLAUDE_PROJECT_DIR}` - see below for why - and there is a
-`.mcp.json.example` beside it to copy.
+`uvx markdown-memory` works in place of the installed command too, with one catch: its
+first launch downloads about 250 MB of dependencies before the server can answer, longer
+than Codex waits by default - set `startup_timeout_sec = 60` under
+`[mcp_servers.markdown-memory]` in `~/.codex/config.toml` if you go that way.
 
-Claude Code can write the entry for you instead:
+### From source
+
+For working on markdown-memory itself:
 
 ```bash
-claude mcp add markdown-memory -- uv run --project "$PWD" markdown-memory
-claude mcp list                    # markdown-memory should be listed and connected
+git clone https://github.com/hishamkaram/markdown-memory
+cd markdown-memory
+uv sync
+uv run markdown-memory --version
 ```
+
+The `.mcp.json` in the clone runs that checkout (`uv run markdown-memory`) whenever Claude
+Code is opened in it, with no edit.
 
 ### Index once, then search
 
-The server keeps its documentation root indexed by itself. It indexes once when it starts,
-in the background - catching whatever changed while no server ran, new files included - and
-after that each `search_docs` (and `list_documents` without a directory) decides whether
-another run is due:
+The server keeps its documentation root indexed by itself. The first `search_docs` (or
+`list_documents` without a directory) after it starts begins a catch-up run in the
+background - whatever changed while no server ran, new files included - and answers from
+the index as it stood, with `index_status.indexing` set. Nothing runs before that first
+call: loading the model holds the interpreter for seconds, and a client waiting on the
+handshake gives up quickly. After that, each of those calls decides whether another run is
+due:
 
 - a file it sees edited, deleted or unreadable starts one, at most every 10 seconds;
 - a weights mismatch a search has just recorded starts one at once;
@@ -169,7 +180,7 @@ is the tree, and the message says so.
 
 ### What downloads, when, and where
 
-The server starts a background thread that fetches three files from
+The first search (or `markdown-memory --download-model`) fetches three files from
 [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)
 at a pinned revision: the 4-bit ONNX graph, its external weights, and the tokenizer.
 About **218 MB**, once per machine, into:
@@ -227,17 +238,16 @@ weighs about 310 MB - and removing them is yours to do.
 To fetch the model deliberately rather than on the first query:
 
 ```bash
-uv run python -c "
-from markdown_memory.embedders import DEFAULT_EMBEDDER, create_embedder
-from markdown_memory.config import ServerConfig
-create_embedder(DEFAULT_EMBEDDER, cache_dir=ServerConfig.from_env().model_cache_dir).warm_up()
-"
+markdown-memory --download-model                          # the default, EmbeddingGemma
+markdown-memory --download-model --embedder bge-small     # or the light preset
 ```
+
+It downloads and loads the configured model, then exits; it touches no index.
 
 For a machine with no network, copy the three files into
 `$XDG_CACHE_HOME/markdown-memory/models/embeddinggemma-300m-onnx-5090578d9565/`, keeping
 `onnx/model_q4.onnx`, `onnx/model_q4.onnx_data` and `tokenizer.json` where they are. The
-first start hashes them once, writes the `.verified` stamp, and never touches the network.
+first load hashes them once, writes the `.verified` stamp, and never touches the network.
 
 `bge-small` is downloaded by `fastembed`, which pins no revision: if that cache is deleted,
 it can come back with different weights under the same model name. EmbeddingGemma's
@@ -305,11 +315,10 @@ the revision is pinned. See [License](#license) for what that means for you.
 
 ### When it goes wrong
 
-- **The server starts even when the model cannot load.** Warm-up runs on a background
-  thread and only logs `Embedding model warm-up failed; it will be retried on first use`.
-  The failure surfaces on the first tool call instead, as
+- **The server starts even when the model cannot load.** Nothing loads it until the
+  first search, so the failure surfaces there, as
   `Cannot load embedding model onnx-community/embeddinggemma-300m-ONNX: ...`. So "the server
-  is running" is not evidence the model is there.
+  is running" is not evidence the model is there; `markdown-memory --download-model` is.
 - **The first `search_docs` can block for the length of a 218 MB download.** Pre-download it
   (above) if that matters.
 - **All logging goes to stderr.** stdout carries JSON-RPC frames only, so a client that
@@ -388,7 +397,9 @@ second is then indexed, invisible, and paying for itself in disk.
 
 ### One index per project
 
-Drop a `.mcp.json` like this into any repository whose documentation you want searchable.
+The user-level registration above already gives every project its own index. To set
+exclusions for one repository, drop a `.mcp.json` like this into it (it takes precedence
+there):
 Each project owns its index without being told to: the database is keyed on the
 documentation root it serves, so a project gets its own exclusions and no chance of
 another project's sections - or another project's documents, which stay resolvable by
@@ -398,8 +409,7 @@ path across any database they share - appearing in its results.
 {
   "mcpServers": {
     "markdown-memory": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/markdown-memory", "markdown-memory"],
+      "command": "markdown-memory",
       "env": {
         "MARKDOWN_MEMORY_EXCLUDE": "vendor,third_party,tests/fixtures"
       }

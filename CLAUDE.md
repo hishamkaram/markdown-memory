@@ -43,6 +43,14 @@ The hook is the one to satisfy - it is what you can run - but `git push
 two step lists in the same order. The retrieval gate stays out of CI: it holds an exclusive
 lock and asserts on latency, which a shared runner cannot hold still.
 
+Releasing: bump the version in a PR (`uv version --bump patch`), merge it through the gate,
+then `git tag vX.Y.Z && git push origin vX.Y.Z`. `.github/workflows/release.yml` refuses a
+tag that is not on `main` or does not match `pyproject.toml`, builds, checks the PyPI render
+and the installed wheel's handshake (`scripts/handshake_check.py`), publishes through PyPI
+Trusted Publishing (environment `pypi`, no stored token), then creates the GitHub release.
+The version is written once, in `pyproject.toml`; `__version__`, `--version` and the MCP
+`serverInfo` read it back from the installed metadata.
+
 The first run downloads the embedding model (~218 MB) into
 `$XDG_CACHE_HOME/markdown-memory/models`. Tests that need the real model are marked
 `embedding` and skip (not fail) when it cannot be loaded.
@@ -62,7 +70,7 @@ The first run downloads the embedding model (~218 MB) into
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
 | `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
-| `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, at start and when a search's `index_status` says one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
+| `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, started by a search's `index_status` - the first after the server starts, then whenever one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
 | `src/markdown_memory/headings.py` | Breadcrumb resolution (`Root > Child`), section selection, the outline tree |
 | `src/markdown_memory/server.py` | `MarkdownMemoryService`, MCP tool wiring, `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
@@ -193,9 +201,9 @@ Work in this order:
 Supporting tools: `list_documents(directory="")` returns
 `{"documents": [...], "index_status": {...}}` - what is indexed, and whether anything
 vouches for it; `index_directory(directory=None)` (re)indexes. The stdio server keeps its
-own docs root indexed in the background (at start, and when a search sees change), so
-call it only when `index_status.message` asks for it - never while `index_status.indexing`
-is true. It is incremental (SHA-256 per file), so re-running is cheap.
+own docs root indexed in the background (from the first search, and whenever a search sees
+change), so call it only when `index_status.message` asks for it - never while
+`index_status.indexing` is true. It is incremental (SHA-256 per file), so re-running is cheap.
 `file_path` may be absolute, relative to the docs root, or any unique path suffix. An
 error from `read_section` lists the valid heading paths - retry with one of them rather
 than falling back to reading the file.

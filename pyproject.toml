@@ -10,7 +10,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # Kept in step with the repository's GitHub topics, which are what anyone actually
-# searches. Nothing indexes these while "Private :: Do Not Upload" is below.
+# searches.
 keywords = [
     "mcp",
     "mcp-server",
@@ -46,16 +46,13 @@ classifiers = [
     "Topic :: Software Development :: Documentation",
     "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
-    # The repository is private and nothing here is meant for an index. Remove this line
-    # deliberately, with the rest of the release decision, rather than by accident.
-    "Private :: Do Not Upload",
 ]
 
 dependencies = [
     "fastembed>=0.8.0",
     "huggingface-hub>=0.26",
     "markdown-it-py>=4.2.0",
-    "mcp[cli]>=2.2.0",
+    "mcp[cli]>=2.2.0,<3",
     "numpy>=1.26",
     "onnxruntime>=1.20",
     "pydantic>=2.0",

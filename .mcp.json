@@ -2,12 +2,7 @@
   "mcpServers": {
     "markdown-memory": {
       "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/home/hesham/Active-Projects/markdown-memory",
-        "markdown-memory"
-      ],
+      "args": ["run", "markdown-memory"],
       "env": {
         "MARKDOWN_MEMORY_EXCLUDE": "scripts/eval_data,tests/fixtures"
       }

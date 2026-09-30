@@ -375,6 +375,22 @@ class TestTheService:
         finally:
             service.close()
 
+    def test_an_armed_runner_catches_up_at_the_first_search(self, tmp_path: Path) -> None:
+        root = _tree(tmp_path / "docs", ("a",))
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "index.db", docs_dir=root), embedder=FakeEmbedder()
+        )
+        try:
+            service.start_auto_index(request=False)
+            auto = service._auto
+            assert auto is not None and not auto.active
+            assert service.list_documents() == [], "arming alone indexed something"
+            service.index_status()  # what the first search_docs asks
+            _wait(auto)
+            assert [d.title for d in service.list_documents()] == ["a"]
+        finally:
+            service.close()
+
 
 def _wait(runner: AutoIndexer) -> None:
     deadline = time.monotonic() + 5
@@ -402,7 +418,7 @@ class TestConfiguration:
         [([], None, True), (["--no-auto-index"], None, False), ([], "0", False)],
         ids=["default", "flag", "environment"],
     )
-    def test_only_the_stdio_server_starts_it_and_only_when_asked_to(
+    def test_only_the_stdio_server_arms_it_and_only_when_asked_to(
         self,
         argv: list[str],
         env: str | None,
@@ -410,18 +426,22 @@ class TestConfiguration:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        calls: list[MarkdownMemoryService] = []
+        seen: dict[str, object] = {}
 
         class _FakeServer:
+            def __init__(self, service: MarkdownMemoryService) -> None:
+                self.service = service
+
             def run(self, transport: str) -> None:
                 assert transport == "stdio"
+                # What is running while the client waits on the handshake: nothing of ours.
+                seen["threads"] = {t.name for t in threading.enumerate() if "mdmem" in t.name}
+                seen["auto"] = self.service._auto
 
-        monkeypatch.setattr(server_module, "create_server", lambda config, service: _FakeServer())
-        monkeypatch.setattr(server_module, "_warm_up", lambda embedder: None)
-        monkeypatch.setattr(server_module, "configure_logging", lambda level=None: None)
         monkeypatch.setattr(
-            MarkdownMemoryService, "start_auto_index", lambda self: calls.append(self)
+            server_module, "create_server", lambda config, service: _FakeServer(service)
         )
+        monkeypatch.setattr(server_module, "configure_logging", lambda level=None: None)
         monkeypatch.setenv("MARKDOWN_MEMORY_DB", str(tmp_path / "env.db"))
         monkeypatch.setenv("MARKDOWN_MEMORY_DOCS_DIR", str(tmp_path))
         if env is None:
@@ -429,4 +449,7 @@ class TestConfiguration:
         else:
             monkeypatch.setenv("MARKDOWN_MEMORY_AUTO_INDEX", env)
         server_module.main(argv)
-        assert bool(calls) is started
+        assert seen["threads"] == set(), "a thread started before the handshake"
+        auto = seen["auto"]
+        assert (auto is not None) is started
+        assert auto is None or auto._last_finished is None, "a run happened before any search"

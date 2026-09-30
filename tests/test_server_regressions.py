@@ -9,6 +9,7 @@ import argparse
 import os
 import threading
 from collections.abc import Iterator, Sequence
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from markdown_memory.exceptions import (
     DatabaseError,
     DocumentNotFoundError,
     IndexingError,
+    ModelLoadError,
     SearchError,
 )
 from markdown_memory.models import (
@@ -191,7 +193,6 @@ class TestMainEntrypoint:
             return FakeServer()
 
         monkeypatch.setattr(server_module, "create_server", fake_create_server)
-        monkeypatch.setattr(server_module, "_warm_up", lambda embedder: None)
         monkeypatch.setattr(
             server_module, "configure_logging", lambda level=None: seen.update(level=level)
         )
@@ -238,6 +239,68 @@ class TestMainEntrypoint:
             server_module.main(["--db", str(blocker / "nested" / "index.db")])
         assert raised.value.code == 1
         assert "service" not in harness
+
+    def test_version_is_the_installed_one_and_builds_nothing(
+        self,
+        harness: dict[str, object],
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(SystemExit) as raised:
+            server_module.main(["--version"])
+        assert raised.value.code == 0
+        assert capsys.readouterr().out.strip() == f"markdown-memory {version('markdown-memory')}"
+        assert "service" not in harness
+        assert not (tmp_path / "env.db").exists()
+
+    async def test_the_handshake_names_the_version(self, tmp_path: Path) -> None:
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "v.db", docs_dir=tmp_path), embedder=FakeEmbedder()
+        )
+        try:
+            config = ServerConfig(db_path=tmp_path / "v.db", docs_dir=tmp_path)
+            async with Client(create_server(config, service=service)) as client:
+                assert client.server_info is not None
+                assert client.server_info.version == version("markdown-memory")
+        finally:
+            service.close()
+
+    def test_download_model_loads_the_configured_embedder_and_nothing_else(
+        self, harness: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loaded: list[str] = []
+
+        class Loader(FakeEmbedder):
+            def warm_up(self) -> None:
+                loaded.append("warm")
+
+        monkeypatch.setattr(
+            server_module,
+            "create_embedder",
+            lambda preset, cache_dir=None: loaded.append(preset) or Loader(),
+        )
+        server_module.main(["--download-model", "--embedder", "bge-small"])
+        assert loaded == ["bge-small", "warm"]
+        assert "service" not in harness
+        assert not (tmp_path / "env.db").exists()
+
+    def test_a_download_that_fails_exits_non_zero(
+        self,
+        harness: dict[str, object],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class Broken(FakeEmbedder):
+            def warm_up(self) -> None:
+                raise ModelLoadError("no network")
+
+        monkeypatch.setattr(
+            server_module, "create_embedder", lambda preset, cache_dir=None: Broken()
+        )
+        with pytest.raises(SystemExit) as raised:
+            server_module.main(["--download-model"])
+        assert raised.value.code == 1
+        assert "no network" in caplog.text
 
 
 class TestServerLifecycleRound2:
@@ -389,7 +452,11 @@ class TestProjectScopedConfiguration:
         import json
 
         config = json.loads((Path(__file__).parent.parent / ".mcp.json").read_text())
-        environment = config["mcpServers"]["markdown-memory"]["env"]
+        server = config["mcpServers"]["markdown-memory"]
+        environment = server["env"]
+        # Claude Code starts it in the clone, so `uv run` finds the project without being
+        # told where: a path in the arguments is one machine's, and the repository is public.
+        assert not any(Path(argument).is_absolute() for argument in server.get("args", []))
         assert not any("${" in value for value in environment.values())
         # The database is keyed on the docs root now, so the shipped config sets no path at
         # all. Any path it does set must stay relative: the server resolves one against the

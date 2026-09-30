@@ -910,7 +910,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=2.2.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=2.2.0,<3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnxruntime", specifier = ">=1.20" },
     { name = "pydantic", specifier = ">=2.0" },

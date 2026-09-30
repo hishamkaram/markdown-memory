@@ -24,7 +24,7 @@ from typing import ParamSpec, TypeVar
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from markdown_memory import headings
+from markdown_memory import __version__, headings
 from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import (
     ENV_AUTO_INDEX,
@@ -40,8 +40,6 @@ from markdown_memory.db import Database
 from markdown_memory.embedders import (
     DEFAULT_EMBEDDER,
     Embedder,
-    EmbeddingGemmaEmbedder,
-    FastEmbedEmbedder,
     create_embedder,
 )
 from markdown_memory.exceptions import (
@@ -122,14 +120,20 @@ class MarkdownMemoryService:
         self._searcher.close()
         self._db.close()
 
-    def start_auto_index(self) -> None:
-        """Keep the docs root indexed from now on: one run now, more as searches see change."""
+    def start_auto_index(self, *, request: bool = True) -> None:
+        """Keep the docs root indexed from now on, as searches see change.
+
+        `request=False` arms the runner without starting a run: the first search then finds
+        it has never run and starts the catch-up itself. That is what the stdio server does,
+        so nothing loads the model before the client's handshake has been answered.
+        """
         if self._auto is None:
             self._auto = AutoIndexer(
                 lambda should_stop: self.index_directory(None, should_stop=should_stop),
                 self._root_status,
             )
-        self._auto.request()
+        if request:
+            self._auto.request()
 
     # ------------------------------------------------------------------ operations
 
@@ -362,7 +366,7 @@ def create_server(
             services.session_ended()
 
     server: MCPServer[None] = MCPServer(
-        "markdown-memory", instructions=SERVER_INSTRUCTIONS, lifespan=lifespan
+        "markdown-memory", version=__version__, instructions=SERVER_INSTRUCTIONS, lifespan=lifespan
     )
 
     @server.tool()
@@ -446,13 +450,14 @@ def configure_logging(level: str | None = None) -> None:
     )
 
 
-def _warm_up(embedder: Embedder) -> None:
-    if not isinstance(embedder, EmbeddingGemmaEmbedder | FastEmbedEmbedder):
-        return
+def _download_model(config: ServerConfig) -> None:
+    """Fetch and load the configured embedder, so no client waits on the first download."""
     try:
-        embedder.warm_up()
+        create_embedder(config.embedder, cache_dir=config.model_cache_dir).warm_up()
     except MarkdownMemoryError:
-        logger.warning("Embedding model warm-up failed; it will be retried on first use")
+        logger.exception("Cannot download the embedding model")
+        raise SystemExit(1) from None
+    logger.info("Embedding model %s is ready in %s", config.embedder, config.model_cache_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -481,21 +486,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=("embeddinggemma", "bge-small"),
         help=f"Embedding model preset (env {ENV_EMBEDDER}; default {DEFAULT_EMBEDDER})",
     )
+    parser.add_argument(
+        "--download-model",
+        action="store_true",
+        help="Download and load the configured embedding model, then exit",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     arguments = parser.parse_args(argv)
 
     configure_logging(arguments.log_level)
     config = _config_from_cli(arguments)
+    if arguments.download_model:
+        _download_model(config)
+        return
     try:
         service = MarkdownMemoryService(config)
     except MarkdownMemoryError:
         logger.exception("Cannot start markdown-memory")
         raise SystemExit(1) from None
     logger.info("markdown-memory serving; db=%s docs_dir=%s", config.db_path, config.docs_dir)
-    threading.Thread(
-        target=_warm_up, args=(service.embedder,), name="mdmem-warmup", daemon=True
-    ).start()
+    # Nothing heavy starts here. Loading the model holds the GIL for seconds, and a client
+    # waits on the handshake with a short timeout - Codex's is 10 s. The first search loads
+    # it instead, and starts the catch-up index run on its way out.
     if config.auto_index:
-        service.start_auto_index()
+        service.start_auto_index(request=False)
     try:
         create_server(config, service=service).run("stdio")
     finally:
