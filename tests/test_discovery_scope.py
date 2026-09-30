@@ -79,7 +79,19 @@ class TestOtherCheckouts:
         assert db.index_status(str(tmp_path)).verified, "the upgrade did not converge"
 
     @pytest.mark.parametrize(
-        "shape", ["submodule", "clone", "garbled", "empty", "dangling", "commondir-directory"]
+        "shape",
+        [
+            "submodule",
+            "clone",
+            "garbled",
+            "empty",
+            "dangling",
+            "commondir-directory",
+            "no-path",
+            "no-space",
+            "bare-path",
+            "leading-space",
+        ],
     )
     def test_a_checkout_not_known_to_be_a_copy_is_indexed(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, shape: str
@@ -97,6 +109,17 @@ class TestOtherCheckouts:
             (nested / ".git").write_bytes(b"\xff\x00 not a gitfile\n")
         elif shape == "empty":
             (nested / ".git").write_bytes(b"")
+        elif shape in ("no-path", "no-space", "bare-path", "leading-space"):  # not a gitfile
+            (nested / "commondir").write_text("..\n", encoding="utf-8")
+            (modules / "commondir").parent.mkdir(parents=True)
+            (modules / "commondir").write_text("../..\n", encoding="utf-8")
+            named = {
+                "no-path": "gitdir: ",
+                "no-space": f"gitdir:{modules}",
+                "leading-space": f" gitdir: {modules}",
+            }.get(shape, str(modules))
+            named += "\n"
+            (nested / ".git").write_text(named, encoding="utf-8")
         elif shape == "dangling":  # a worktree whose gitdir was pruned away
             (nested / ".git").write_text(f"gitdir: {tmp_path / 'gone'}\n", encoding="utf-8")
         else:
@@ -230,8 +253,22 @@ class TestWhatGitSaid:
                 False,
                 "no_repository",
             ),
+            (
+                subprocess.CalledProcessError(
+                    128, "git", stderr=b"fatal: not a git repository: /r/.git/worktrees/gone\n"
+                ),
+                True,
+                "unavailable",
+            ),
         ],
-        ids=["not-installed", "not-installed-no-repo", "hung", "refused", "not-a-repo"],
+        ids=[
+            "not-installed",
+            "not-installed-no-repo",
+            "hung",
+            "refused",
+            "not-a-repo",
+            "bad-gitfile",
+        ],
     )
     def test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository(
         self,

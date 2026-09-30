@@ -148,7 +148,8 @@ def git_ignored(root: Path) -> GitIgnore:
         return _unavailable(root, "git is not installed or not on PATH")
     except subprocess.CalledProcessError as exc:
         reason = os.fsdecode(exc.stderr or b"").strip()
-        if exc.returncode == 128 and "not a git repository" in reason:
+        # Not "not a git repository: <path>", which is a `.git` that names nothing usable.
+        if exc.returncode == 128 and "not a git repository (or any" in reason:
             return GitIgnore("no_repository")
         return _unavailable(root, reason.splitlines()[0] if reason else f"exit {exc.returncode}")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -378,11 +379,11 @@ def _is_linked_worktree(directory: Path) -> bool:
             head = handle.read(4096)
     except OSError:
         return False
-    first = os.fsdecode(head).splitlines()[0].strip() if head else ""
-    if not first.startswith("gitdir:"):
+    first = os.fsdecode(head).splitlines()[0] if head else ""
+    named = first.removeprefix("gitdir: ")  # as git's own reader: that prefix, nothing trimmed
+    if named == first or not named:
         return False
-    gitdir = directory / first.removeprefix("gitdir:").strip()  # an absolute one replaces
-    return os.path.isfile(gitdir / "commondir")
+    return os.path.isfile(directory / named / "commondir")  # an absolute `named` replaces
 
 
 def _encodable(path: str) -> bool:

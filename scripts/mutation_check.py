@@ -583,16 +583,37 @@ MUTATIONS = (
     Mutation(
         name="scope: take any gitdir for a worktree's, submodules and dead ones included",
         module="discovery.py",
-        old='    return os.path.isfile(gitdir / "commondir")\n',
-        new="    return os.path.exists(gitdir)\n",
+        old='    return os.path.isfile(directory / named / "commondir")',
+        new="    return os.path.exists(directory / named)",
         tests="test_a_checkout_not_known_to_be_a_copy_is_indexed",
     ),
     Mutation(
         name="scope: resolve a worktree's gitdir only one way",
         module="discovery.py",
-        old='    gitdir = directory / first.removeprefix("gitdir:").strip()',
-        new='    gitdir = directory / first.removeprefix("gitdir:").strip().lstrip("/")',
+        old='    return os.path.isfile(directory / named / "commondir")',
+        new='    return os.path.isfile(directory / named.lstrip("/") / "commondir")',
         tests="test_a_linked_worktree_is_left_out_and_its_copies_purged",
+    ),
+    Mutation(
+        name="scope: take a bare path in a `.git` file for git's gitfile format",
+        module="discovery.py",
+        old="    if named == first or not named:\n",
+        new="    if False:\n",
+        tests="test_a_checkout_not_known_to_be_a_copy_is_indexed",
+    ),
+    Mutation(
+        name="scope: take `gitdir: ` with no path for the directory's own gitdir",
+        module="discovery.py",
+        old="    if named == first or not named:\n",
+        new="    if named == first:\n",
+        tests="test_a_checkout_not_known_to_be_a_copy_is_indexed",
+    ),
+    Mutation(
+        name="scope: trim a `.git` file before asking whether it is git's format",
+        module="discovery.py",
+        old='    first = os.fsdecode(head).splitlines()[0] if head else ""\n',
+        new='    first = os.fsdecode(head).splitlines()[0].strip() if head else ""\n',
+        tests="test_a_checkout_not_known_to_be_a_copy_is_indexed",
     ),
     Mutation(
         name="git: call a folder without git a repository git could not be asked about",
@@ -604,8 +625,15 @@ MUTATIONS = (
     Mutation(
         name="git: call a folder git says is no repository one it could not be asked about",
         module="discovery.py",
-        old='        if exc.returncode == 128 and "not a git repository" in reason:\n',
+        old='        if exc.returncode == 128 and "not a git repository (or any" in reason:\n',
         new="        if False:\n",
+        tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
+    ),
+    Mutation(
+        name="git: take a `.git` that names nothing usable for no repository at all",
+        module="discovery.py",
+        old='        if exc.returncode == 128 and "not a git repository (or any" in reason:\n',
+        new='        if exc.returncode == 128 and "not a git repository" in reason:\n',
         tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
     ),
     Mutation(
