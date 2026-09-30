@@ -636,6 +636,12 @@ class LiveTest:
             self.check(top["heading_path"] == expected_path, f"top hit for {query!r} is correct")
             self.check(top["fts_rank"] == 1, "FTS5 ranked it first")
             self.check(query in top["content"], "the literal identifier is in the returned section")
+            self.check(answer["keyword_match"] == "matched", "keyword_match says it matched")
+        absent, _, _ = await self.call("search_docs", query="maxItemErrors", limit=5)
+        self.check(
+            absent["keyword_match"] == "no_match" and "keyword_message" in absent,
+            "an identifier no section contains is no_match: its hits are neighbours only",
+        )
         results = (await self.call("search_docs", query="HELIOS_WAL_SEGMENT_MB", limit=5))[0][
             "results"
         ]

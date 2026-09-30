@@ -12,6 +12,7 @@ from markdown_memory.db import Database
 from markdown_memory.embedders import Embedder
 from markdown_memory.exceptions import DatabaseError, EmbeddingError
 from markdown_memory.indexer import Indexer
+from markdown_memory.models import SearchPage
 from markdown_memory.search import (
     MAX_RESULT_LIMIT,
     RRF_K,
@@ -288,6 +289,98 @@ class TestHybridSearch:
         assert names and names[0].startswith("mdmem-search")
 
 
+# ---------------------------------------------------------------------- keyword_match
+
+
+class TestKeywordMatch:
+    """#37: whether keyword search found the query's terms, told apart from why it did not."""
+
+    def test_a_present_identifier_matched(self, fake_searcher: HybridSearcher) -> None:
+        page = fake_searcher.search_page("ORBIT_UPSTREAM_TIMEOUT_MS")
+        assert page.keyword_match == "matched"
+        assert page.keyword_message() is None
+
+    def test_an_absent_identifier_is_no_match_and_its_hits_are_only_neighbours(
+        self, fake_searcher: HybridSearcher
+    ) -> None:
+        page = fake_searcher.search_page("maxItemErrors")
+        assert page.keyword_match == "no_match"
+        assert page.results and all(r.fts_rank is None for r in page.results)
+
+    def test_candidates_the_gate_refuses_are_filtered_not_no_match(
+        self, fake_searcher: HybridSearcher
+    ) -> None:
+        # "quota" is in one section; "zebra" and "giraffe" in none, and carry most of the IDF.
+        assert fake_searcher.search_page("quota zebra giraffe").keyword_match == "filtered"
+
+    def test_a_query_with_no_searchable_terms(self, fake_searcher: HybridSearcher) -> None:
+        assert fake_searcher.search_page("???").keyword_match == "no_terms"
+        blank = fake_searcher.search_page("   \n")
+        assert blank == SearchPage((), "no_terms")
+
+    def test_a_failed_keyword_index_is_unavailable_while_vectors_answer(
+        self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+            raise DatabaseError("fts index unavailable")
+
+        monkeypatch.setattr(db, "fts_search", broken)
+        page = fake_searcher.search_page("ORBIT_UPSTREAM_TIMEOUT_MS")
+        assert page.keyword_match == "unavailable"
+        assert page.results, "the vector half still answers"
+
+    def test_a_term_found_only_under_another_root_is_no_match_here(
+        self, db: Database, fake_embedder: FakeEmbedder, corpus_dir: Path, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "z.md").write_text("# Zanzibar\n\nzanzibar lives here\n", encoding="utf-8")
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(corpus_dir)
+        indexer.index_directory(other)
+        scoped = HybridSearcher(db, fake_embedder, scope=str(corpus_dir))
+        everywhere = HybridSearcher(db, fake_embedder)
+        try:
+            assert scoped.search_page("zanzibar").keyword_match == "no_match"
+            assert everywhere.search_page("zanzibar").keyword_match == "matched"
+        finally:
+            scoped.close()
+            everywhere.close()
+
+    def test_matched_speaks_of_the_ranking_even_when_limit_one_shows_a_neighbour(
+        self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The best vector-only hit ties the best keyword hit at 1/61 and wins on section id.
+        first = min(int(row[0]) for row in db.connection().execute("SELECT id FROM sections"))
+        monkeypatch.setattr(fake_searcher, "_vector_ranking", lambda query, limit: ([first], {}))
+        page = fake_searcher.search_page("--drain-seconds", limit=1)
+        assert [r.fts_rank for r in page.results] == [None]
+        assert page.keyword_match == "matched", "a keyword hit exists: no_match would be false"
+
+    def test_a_stopword_only_query_is_searched_by_its_stopwords(
+        self, fake_searcher: HybridSearcher
+    ) -> None:
+        assert fake_searcher.search_page("the").keyword_match == "matched"
+
+    def test_terms_past_the_searched_32_are_not_searched(
+        self, fake_searcher: HybridSearcher
+    ) -> None:
+        # Only the 33rd term is in the corpus: "searched terms" is what keeps no_match true.
+        filler = " ".join(f"absentword{n}" for n in range(32))
+        assert fake_searcher.search_page(f"{filler} compaction").keyword_match == "no_match"
+
+    def test_search_is_the_page_without_its_state(self, fake_searcher: HybridSearcher) -> None:
+        for query in ("compaction", "maxItemErrors", "quota zebra giraffe"):
+            assert fake_searcher.search_page(query).results == tuple(fake_searcher.search(query))
+
+    def test_only_no_match_says_nothing_contains_the_terms(self) -> None:
+        states = ("no_match", "filtered", "no_terms", "unavailable")
+        messages = {state: SearchPage((), state).keyword_message() for state in states}
+        assert all(messages.values()), "every state but matched explains itself"
+        assert [s for s, m in messages.items() if "contains" in (m or "")] == ["no_match"]
+        assert all("neighbours" in (m or "") for m in messages.values())
+
+
 # ---------------------------------------------------------------------- real embeddings
 
 
@@ -315,7 +408,7 @@ class TestKeywordVersusSemantic:
         self, real_searcher: HybridSearcher
     ) -> None:
         query = "rate limiting"
-        assert real_searcher._keyword_ranking(query, 20) == []  # no lexical match anywhere
+        assert real_searcher._keyword_ranking(query, 20)[0] == []  # no lexical match anywhere
         results = real_searcher.search(query)
         assert results[0].heading_path == "Orbit Gateway > Throttling"
         assert results[0].fts_rank is None
@@ -323,7 +416,7 @@ class TestKeywordVersusSemantic:
 
     def test_semantic_synonyms_for_credentials(self, real_searcher: HybridSearcher) -> None:
         query = "password security policy"
-        assert real_searcher._keyword_ranking(query, 20) == []
+        assert real_searcher._keyword_ranking(query, 20)[0] == []
         results = real_searcher.search(query)
         assert results[0].heading_path == "Orbit Gateway > Credentials"
         assert results[0].fts_rank is None

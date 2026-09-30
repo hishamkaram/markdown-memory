@@ -316,20 +316,22 @@ class TestKeywordGate:
         # only "deploy" occurs in the corpus; "undo" and "bad" carry most of the IDF mass
         assert fts_terms("how do I undo a bad deploy") == ['"undo"', '"bad"', '"deploy"']
         assert titles(db, db.fts_search('"undo" OR "bad" OR "deploy"', 20)) == ["Kubernetes"]
-        assert searcher._keyword_ranking("how do I undo a bad deploy", 20) == []
+        # BM25 found a candidate and the gate refused it: `filtered`, never `no_match`.
+        assert searcher._keyword_ranking("how do I undo a bad deploy", 20) == ([], "filtered")
 
     def test_hit_covering_most_of_the_query_passes(
         self, db: Database, searcher: HybridSearcher
     ) -> None:
-        ranking = searcher._keyword_ranking("previous image tag", 20)
+        ranking, state = searcher._keyword_ranking("previous image tag", 20)
+        assert state == "matched"
         assert titles(db, ranking) == ["Rolling Back"]
 
     def test_single_term_and_identifier_queries_always_pass(
         self, db: Database, searcher: HybridSearcher
     ) -> None:
-        assert titles(db, searcher._keyword_ranking("deploy", 20)) == ["Kubernetes"]
-        assert titles(db, searcher._keyword_ranking("--replay-from-offset", 20)) == ["Flags"]
-        assert titles(db, searcher._keyword_ranking("/healthz", 20)) == ["Health"]
+        assert titles(db, searcher._keyword_ranking("deploy", 20)[0]) == ["Kubernetes"]
+        assert titles(db, searcher._keyword_ranking("--replay-from-offset", 20)[0]) == ["Flags"]
+        assert titles(db, searcher._keyword_ranking("/healthz", 20)[0]) == ["Health"]
 
     @pytest.mark.parametrize(
         ("term", "expected"),
@@ -346,7 +348,7 @@ class TestKeywordGate:
     def test_rare_identifier_outweighs_common_words_around_it(
         self, db: Database, searcher: HybridSearcher
     ) -> None:
-        ranking = searcher._keyword_ranking("what does --replay-from-offset mean exactly", 20)
+        ranking, _ = searcher._keyword_ranking("what does --replay-from-offset mean exactly", 20)
         assert titles(db, ranking) == ["Flags"]
 
 
@@ -362,7 +364,7 @@ class TestHeadingOnlySections:
         self, db: Database, searcher: HybridSearcher
     ) -> None:
         # "operations" matches the heading-only parent and (via its breadcrumb) the child
-        assert titles(db, searcher._keyword_ranking("operations", 20)) == ["Health"]
+        assert titles(db, searcher._keyword_ranking("operations", 20)[0]) == ["Health"]
 
     def test_a_heading_only_section_is_still_returned_when_nothing_else_matches(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -373,7 +375,9 @@ class TestHeadingOnlySections:
         Indexer(db, fake_embedder).index_directory(root)
         engine = HybridSearcher(db, fake_embedder)
         try:
-            assert titles(db, engine._keyword_ranking("zanzibar", 20)) == ["Zanzibar"]
+            ranking, state = engine._keyword_ranking("zanzibar", 20)
+            assert titles(db, ranking) == ["Zanzibar"]
+            assert state == "matched"  # the heading-only fallback kept the hit
             found = {r.heading_title: r for r in engine.search("zanzibar")}
             assert found["Zanzibar"].fts_rank == 1
             assert found["Zanzibar"].vec_rank is None  # it has no vector to be found by

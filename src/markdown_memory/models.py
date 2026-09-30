@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import JsonValue
 
@@ -213,6 +213,36 @@ class SearchResult:
         if self.matched_passage is not None:
             pointer["matched_passage"] = self.matched_passage
         return pointer
+
+
+KeywordMatch: TypeAlias = Literal["matched", "no_match", "filtered", "no_terms", "unavailable"]
+
+# Only `no_match` may say that nothing contains the terms: `filtered` saw candidates the gate
+# refused, `no_terms` searched nothing and `unavailable` could not look.
+_KEYWORD_MESSAGES: dict[KeywordMatch, str] = {
+    "no_match": "No section in this documentation root contains any of the searched terms: "
+    "any hits are semantic neighbours, not matches.",
+    "filtered": "The top keyword candidates each cover too little of the query to count as a "
+    "match: any hits are semantic neighbours only.",
+    "no_terms": "The query has no searchable terms: any hits are semantic neighbours only.",
+    "unavailable": "Keyword search failed for this query: any hits are semantic neighbours only.",
+}
+
+
+@dataclass(slots=True, frozen=True)
+class SearchPage:
+    """One search's hits, and whether keyword search found the query's terms at all.
+
+    `matched` speaks of the ranking, not the page: at least one keyword candidate survived the
+    gate. With `limit >= 2` one is always on the page; at `limit = 1` it can lose a score tie
+    to the best vector-only hit, and saying `no_match` then would be false.
+    """
+
+    results: tuple[SearchResult, ...]
+    keyword_match: KeywordMatch
+
+    def keyword_message(self) -> str | None:
+        return _KEYWORD_MESSAGES.get(self.keyword_match)
 
 
 @dataclass(slots=True, frozen=True)
