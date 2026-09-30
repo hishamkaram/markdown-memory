@@ -58,6 +58,7 @@ from markdown_memory.models import (
     IndexStatus,
     JsonDict,
     OutlineNode,
+    SearchPage,
     SearchResult,
 )
 from markdown_memory.parser import join_parts
@@ -78,8 +79,10 @@ SERVER_INSTRUCTIONS = (
     "index_status says so. Use search_docs to locate relevant sections, or "
     "get_document_outline followed by read_section to fetch one heading's text. search_docs "
     "returns the best section in full and pointers to the rest: follow a pointer with "
-    "read_section, heading_path verbatim, only when the first is not enough. Prefer these tools "
-    "over reading whole Markdown files."
+    "read_section, heading_path verbatim, only when the first is not enough. When its "
+    "keyword_match is no_match, no section contains the searched terms: report an identifier "
+    "looked up that way as undocumented instead of answering from the semantic neighbours. "
+    "Prefer these tools over reading whole Markdown files."
 )
 
 
@@ -182,6 +185,9 @@ class MarkdownMemoryService:
 
     def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
         return self._searcher.search(query, limit)
+
+    def search_page(self, query: str, limit: int = 5) -> SearchPage:
+        return self._searcher.search_page(query, limit)
 
     def index_status(self, directory: str | None = None) -> IndexStatus:
         """What can honestly be said about answers drawn from this server's documents.
@@ -428,13 +434,18 @@ def create_server(
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
-        Returns `{"results": [...], "index_status": {...}}`, `results` holding at most
-        `limit` hits, best first. The first carries the section's full `content`; the rest are
-        pointers - `file_path`, `heading_path`, `lines`, `tokens` (what reading it costs) and,
-        when a passage won the vector ranking, the `matched_passage` that did. Follow one with
+        Returns `{"results": [...], "keyword_match": ..., "index_status": {...}}`, `results`
+        holding at most `limit` hits, best first. The first carries the section's full
+        `content`; the rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` (what
+        reading it costs) and, when a passage won the vector ranking, the `matched_passage`
+        that did. Follow one with
         `read_section(file_path, heading_path)` only when the first hit does not answer,
         passing `heading_path` verbatim: for a `(Part n)` of a split section the base path
-        returns every part. `index_status.changed_files` counts indexed documents that no
+        returns every part. `keyword_match` says whether keyword search found the query's
+        terms: anything but "matched" comes with a `keyword_message`, and the hits are
+        semantic neighbours only. Only "no_match" means no section contains the searched
+        terms - an identifier looked up that way is undocumented, whatever its neighbours say.
+        `index_status.changed_files` counts indexed documents that no
         longer match the index - a hit may quote text that is no longer there - and is
         independent of coverage: it can be non-zero while coverage reads "verified", so
         read `index_status.message` whenever either is set.
@@ -443,13 +454,19 @@ def create_server(
         from it may be confidently incomplete, and `index_status.message` says what to run.
         """
         service = services.get()
-        return {
+        page = service.search_page(query, limit)
+        payload: JsonDict = {
             "results": [
                 hit.to_dict() if rank == 0 else hit.to_pointer()
-                for rank, hit in enumerate(service.search_docs(query, limit))
+                for rank, hit in enumerate(page.results)
             ],
-            "index_status": service.index_status().to_dict(),
+            "keyword_match": page.keyword_match,
         }
+        message = page.keyword_message()
+        if message is not None:
+            payload["keyword_message"] = message
+        payload["index_status"] = service.index_status().to_dict()
+        return payload
 
     return server
 

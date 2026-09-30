@@ -334,7 +334,8 @@ async def test_invalid_arguments_are_rejected_by_the_schema(server: MCPServer[No
 async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[None]) -> None:
     await call(server, "index_directory")
     answer = await call(server, "search_docs", query="ORBIT_UPSTREAM_TIMEOUT_MS", limit=3)
-    assert set(answer) == {"results", "index_status"}
+    assert set(answer) == {"results", "keyword_match", "index_status"}
+    assert answer["keyword_match"] == "matched"  # and so no keyword_message
     # A clean index says so quietly: a caveat on every answer is a caveat nobody reads.
     assert answer["index_status"] == {
         "coverage": "verified",
@@ -387,6 +388,18 @@ async def test_hits_after_the_first_are_pointers_that_read_section_follows(
         assert estimate_tokens(text) == pointer["tokens"], (
             "a pointer mis-states what following it costs"
         )
+
+
+async def test_an_absent_identifier_says_its_hits_are_only_neighbours(
+    server: MCPServer[None], docs_dir: Path
+) -> None:
+    """#37 (#33's `maxItemErrors`): hits for a term no section contains must not read as matches."""
+    await call(server, "index_directory", directory=str(docs_dir))
+    answer = await call(server, "search_docs", query="maxItemErrors")
+    assert answer["results"], "the semantic neighbours still come back"
+    assert answer["keyword_match"] == "no_match"
+    assert "contains any of the searched terms" in answer["keyword_message"]
+    assert list(answer) == ["results", "keyword_match", "keyword_message", "index_status"]
 
 
 async def test_a_pointer_to_a_split_part_reads_that_part_not_the_whole(

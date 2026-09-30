@@ -42,7 +42,7 @@ BUDGETS = {
     "models.py": 254,
     "parser.py": 722,
     "search.py": 399,
-    "server.py": 342,
+    "server.py": 355,
 }
 
 #: Where a heavy dependency may be imported **at module scope**, which is what puts it in

@@ -143,9 +143,9 @@ MUTATIONS = (
         name="search: hand back a short page when a re-index removes ranked sections",
         module="search.py",
         old="""        for _ in range(_STALE_RETRIES):
-            results, stale = self._search_once(query, limit)
+            page, stale = self._search_once(query, limit)
             if not stale:
-                return results
+                return page
             logger.info("Sections changed during the search; ranking again")
         return self._search_once(query, limit)[0]""",
         new="        return self._search_once(query, limit)[0]",
@@ -1096,7 +1096,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 8824),',
+        old='    ("README.md", 8876),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1912,6 +1912,70 @@ MUTATIONS = (
         old="                    mtime_ns=prepared.mtime_ns,",
         new="                    mtime_ns=0,",
         tests="test_indexing_records_the_modification_time_it_read",
+    ),
+    Mutation(
+        name="keyword_match: call a query with no searchable terms a miss",
+        module="search.py",
+        old='            return [], "no_terms"',
+        new='            return [], "no_match"',
+        tests="test_a_query_with_no_searchable_terms",
+    ),
+    Mutation(
+        name="keyword_match: call a blank query a miss",
+        module="search.py",
+        old='            return SearchPage((), "no_terms")',
+        new='            return SearchPage((), "no_match")',
+        tests="test_a_query_with_no_searchable_terms",
+    ),
+    Mutation(
+        name="keyword_match: hide that no section contains the terms",
+        module="search.py",
+        old='            return [], "no_match"',
+        new='            return [], "filtered"',
+        tests="test_an_absent_identifier_is_no_match_and_its_hits_are_only_neighbours",
+    ),
+    Mutation(
+        name="keyword_match: say nothing contains terms the gate merely refused",
+        module="search.py",
+        old='            return [], "filtered"',
+        new='            return [], "no_match"',
+        tests="test_candidates_the_gate_refuses_are_filtered_not_no_match",
+    ),
+    Mutation(
+        name="keyword_match: report a matched keyword search as a miss",
+        module="search.py",
+        old='        return [hit for hit in hits if hit in with_body] or hits, "matched"',
+        new='        return [hit for hit in hits if hit in with_body] or hits, "no_match"',
+        tests="test_a_present_identifier_matched",
+    ),
+    Mutation(
+        name="keyword_match: pass off a failed keyword index as a match",
+        module="search.py",
+        old='_settle(fts_future, ([], "unavailable"))',
+        new='_settle(fts_future, ([], "matched"))',
+        tests="test_a_failed_keyword_index_is_unavailable_while_vectors_answer",
+    ),
+    Mutation(
+        name="keyword_match: let a refused candidate claim nothing contains the terms",
+        module="models.py",
+        old='    "filtered": "The top keyword',
+        new='    "filtered": "No section contains the terms. The top keyword',
+        tests="test_only_no_match_says_nothing_contains_the_terms",
+    ),
+    Mutation(
+        name="keyword_match: leave the state out of the response",
+        module="server.py",
+        old='            "keyword_match": page.keyword_match,',
+        new="",
+        tests="test_search_docs_returns_sections_and_breadcrumbs",
+    ),
+    Mutation(
+        name="keyword_match: leave the explanation out of the response",
+        module="server.py",
+        old='            payload["keyword_message"] = message',
+        new="            pass",
+        tests="test_an_absent_identifier_says_its_hits_are_only_neighbours",
+        fails_with="KeyError",
     ),
     Mutation(
         name="pointers: pay for the matched passage twice in the full result",

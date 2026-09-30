@@ -25,7 +25,7 @@ from typing import NoReturn, TypeVar
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
-from markdown_memory.models import SearchResult
+from markdown_memory.models import KeywordMatch, SearchPage, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -265,29 +265,34 @@ class HybridSearcher:
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
         """Top ``limit`` sections by descending RRF score."""
+        return list(self.search_page(query, limit).results)
+
+    def search_page(self, query: str, limit: int = 5) -> SearchPage:
+        """The top ``limit`` sections, and whether keyword search found the query's terms."""
         query = _sanitize(query).strip()
         if not query:
-            return []
+            return SearchPage((), "no_terms")
         limit = max(1, min(limit, MAX_RESULT_LIMIT))
         # Re-indexing a document replaces its section rows, so ids ranked a moment ago can
         # be gone by the time they are fetched. The new rows are already committed: rank
         # again rather than hand back a short (or empty) page with no explanation.
         for _ in range(_STALE_RETRIES):
-            results, stale = self._search_once(query, limit)
+            page, stale = self._search_once(query, limit)
             if not stale:
-                return results
+                return page
             logger.info("Sections changed during the search; ranking again")
         return self._search_once(query, limit)[0]
 
-    def _search_once(self, query: str, limit: int) -> tuple[list[SearchResult], bool]:
-        """One ranking pass: the results, and whether a better-ranked section had vanished."""
+    def _search_once(self, query: str, limit: int) -> tuple[SearchPage, bool]:
+        """One ranking pass: the page, and whether a better-ranked section had vanished."""
         candidates = max(self._candidates, limit)
         try:
             fts_future = self._pool.submit(self._keyword_ranking, query, candidates)
             vec_future = self._pool.submit(self._vector_ranking, query, candidates)
         except RuntimeError as exc:  # the executor refuses work after close()
             raise SearchError("The search engine has been shut down") from exc
-        fts_ranking, fts_error = _settle(fts_future, [])
+        # A failed keyword index says so in the state it hands back instead of a ranking.
+        (fts_ranking, keyword_match), fts_error = _settle(fts_future, ([], "unavailable"))
         (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
         if fts_error is not None and vec_error is not None:
             raise fts_error
@@ -331,18 +336,25 @@ class HybridSearcher:
                     matched_passage=passages.get(section_id),
                 )
             )
-        return results, stale
+        return SearchPage(tuple(results), keyword_match), stale
 
-    def _keyword_ranking(self, query: str, limit: int) -> list[int]:
+    def _keyword_ranking(self, query: str, limit: int) -> tuple[list[int], KeywordMatch]:
+        """BM25 ranking after the gate, and which of the ways to find nothing this was."""
         terms = fts_terms(query)
         if not terms:
-            return []
-        hits = self._db.fts_search(" OR ".join(terms), limit, self._scope)
-        hits = self._gate(terms, hits)
+            return [], "no_terms"
+        # Scoped inside the query, before its LIMIT: no rows means no section in this root
+        # contains any searched term - the one state that may say so.
+        raw = self._db.fts_search(" OR ".join(terms), limit, self._scope)
+        if not raw:
+            return [], "no_match"
+        hits = self._gate(terms, raw)
+        if not hits:
+            return [], "filtered"
         # Heading-only sections are signposts: their children carry the same breadcrumb
         # words plus the actual text. They stay only when nothing else matched.
         with_body = self._db.sections_with_passages(hits)
-        return [hit for hit in hits if hit in with_body] or hits
+        return [hit for hit in hits if hit in with_body] or hits, "matched"
 
     def _gate(self, terms: Sequence[str], hits: list[int]) -> list[int]:
         """Keep the hits whose matched terms carry >= ``KEYWORD_GATE`` of the query's IDF."""
