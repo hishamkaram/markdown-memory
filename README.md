@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 15,358
+       alt="One question asked of four documentation files. Reading them whole costs 15,377
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 15,358 tokens in all:
+`docs/evaluation-protocol.md`, 15,377 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,887 tokens instead of 15,358**, and the section that actually answers is 403 - a
+**2,887 tokens instead of 15,377**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -518,8 +518,9 @@ All logging goes to **stderr**. stdout carries JSON-RPC frames only.
   followed. `.git`, `node_modules`, virtualenvs and tool caches are pruned - index such a
   tree by passing a directory *inside* it, and it is then left alone when an ancestor is
   re-indexed.
-- A document is purged only when the walk could have found it and did not. Files under a
-  directory that cannot be listed are kept and the directory is reported as an error.
+- A document is purged when the walk could have found it and did not, or when it is out of
+  scope (excluded, ignored by git, inside another checkout). Files under a directory that
+  cannot be listed are kept and the directory is reported as an error.
 
 ## Development
 

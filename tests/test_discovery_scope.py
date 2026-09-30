@@ -120,14 +120,6 @@ class TestGitIgnore:
         Indexer(db, fake_embedder).index_directory(generated)
         assert _indexed(db, generated) == ["api.md"]
 
-    def test_outside_a_repository_nothing_changes(
-        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
-    ) -> None:
-        assert discovery.git_ignored(tmp_path) is None
-        _write(tmp_path / "gen" / "api.md")
-        Indexer(db, fake_embedder).index_directory(tmp_path)
-        assert _indexed(db, tmp_path) == ["gen/api.md"]
-
     def test_explicitly_indexed_dependency_docs_survive_a_root_run(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
@@ -138,6 +130,43 @@ class TestGitIgnore:
         Indexer(db, fake_embedder).index_directory(package)
         Indexer(db, fake_embedder).index_directory(root)
         assert _indexed(db, root) == ["docs/a.md", "node_modules/pkg/README.md"]
+
+
+class TestWithoutGit:
+    """The fallback: whatever keeps git from answering, the walk is what it was before."""
+
+    def test_outside_a_repository_nothing_changes(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        assert discovery.git_ignored(tmp_path) is None
+        _write(tmp_path / "gen" / "api.md")
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        assert _indexed(db, tmp_path) == ["gen/api.md"]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [FileNotFoundError("git"), subprocess.TimeoutExpired("git", 10)],
+        ids=["not-installed", "hung"],
+    )
+    def test_git_missing_or_hung_is_no_answer_not_a_failed_run(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: Exception,
+    ) -> None:
+        def refuse(*args: object, **kwargs: object) -> bytes:
+            raise failure
+
+        monkeypatch.setattr(subprocess, "check_output", refuse)
+        _write(tmp_path / "a.md")
+        try:
+            report = Indexer(db, fake_embedder).index_directory(tmp_path)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AssertionError("asking git took the whole run down") from exc
+        assert report.errors == ()
+        assert _indexed(db, tmp_path) == ["a.md"]
 
     def test_the_server_passes_the_switch_to_its_indexer(self, tmp_path: Path) -> None:
         config = ServerConfig(db_path=tmp_path / "i.db", docs_dir=tmp_path, gitignore=False)

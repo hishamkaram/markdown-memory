@@ -588,6 +588,13 @@ MUTATIONS = (
         tests="test_a_checkout_pointed_at_directly_is_still_indexed",
     ),
     Mutation(
+        name="scope: let a git that hangs fail the whole run",
+        module="discovery.py",
+        old="    except (OSError, subprocess.SubprocessError) as exc:\n",
+        new="    except OSError as exc:\n",
+        tests="test_git_missing_or_hung_is_no_answer_not_a_failed_run",
+    ),
+    Mutation(
         name="scope: index whatever git ignores",
         module="discovery.py",
         old="        if self.ignored and any(\n",
@@ -999,7 +1006,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 8389),',
+        old='    ("README.md", 8408),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
