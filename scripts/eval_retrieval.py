@@ -6,6 +6,7 @@ against the labelled queries in ``scripts/eval_data/queries.json``:
     uv run python scripts/eval_retrieval.py                 # default embedder
     uv run python scripts/eval_retrieval.py --embedder bge-small
     uv run python scripts/eval_retrieval.py --show-misses   # list queries missed at Top-1
+    uv run python scripts/eval_retrieval.py --show-costs    # what each default call costs
     uv run python scripts/eval_retrieval.py --update-baseline   # after an ACCEPTED change
 
 Scores are compared with the frozen baseline in ``scripts/eval_data/baseline.json``
@@ -13,20 +14,23 @@ Scores are compared with the frozen baseline in ``scripts/eval_data/baseline.jso
 the machine - and never gates).
 
 Exits non-zero when the held-out set regresses below the documented floor, so it can
-gate a change to the parser, the embedder or the ranking. The held-out queries were
+gate a change to the parser, the embedder or the ranking. Beside accuracy it reports what the
+default `search_docs` call costs in estimated tokens against the section that answers it;
+that is informational and never gates, never enters the baseline. The held-out queries were
 written before any tuning: tune on ``dev`` only, never on ``held_out``.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import math
 import statistics
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -34,8 +38,8 @@ import eval_cache
 
 from markdown_memory.config import ServerConfig
 from markdown_memory.embedders import DEFAULT_EMBEDDER, Embedder, create_embedder
-from markdown_memory.models import SearchResult
-from markdown_memory.server import MarkdownMemoryService
+from markdown_memory.models import OutlineNode, SearchResult, estimate_tokens
+from markdown_memory.server import MarkdownMemoryService, create_server
 
 DATA = Path(__file__).parent / "eval_data"
 CORPUS = DATA / "corpus"
@@ -60,9 +64,135 @@ class Scores:
     misses: tuple[tuple[str, int | None], ...]
 
 
+@dataclass(slots=True, frozen=True)
+class Answer:
+    """The section a case's `expected` label names, and what reading it costs."""
+
+    file_path: str
+    heading_path: str
+    tokens: int
+
+
+@dataclass(slots=True, frozen=True)
+class Cost:
+    """What the default `search_docs` call cost for each case of one set, in order."""
+
+    queries: tuple[str, ...]
+    payloads: tuple[int, ...]
+    answers: tuple[int, ...]
+
+    @property
+    def ratios(self) -> list[float]:
+        return [
+            payload / answer for payload, answer in zip(self.payloads, self.answers, strict=True)
+        ]
+
+
+def _base(heading_path: str) -> str:
+    return heading_path.split(" (Part ")[0]
+
+
 def _labels(result: SearchResult) -> set[str]:
-    base = result.heading_path.split(" (Part ")[0]
+    base = _base(result.heading_path)
     return {base, f"{Path(result.file_path).name}::{base}"}
+
+
+def _p95(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+
+
+def _outline_paths(nodes: Sequence[OutlineNode]) -> Iterator[str]:
+    for node in nodes:
+        yield _base(node.heading_path)
+        yield from _outline_paths(node.children)
+
+
+def resolve_answers(
+    service: MarkdownMemoryService, queries: dict[str, dict[str, list[dict[str, object]]]]
+) -> dict[str, Answer]:
+    """Every `expected` label, resolved to the one section it names - before anything is searched.
+
+    Part of loading the fixture, like parsing it: a label that names no section, or more than
+    one, is a broken fixture, and scoring it would score nothing.
+    `file.md::path` names the file; a bare path must be unique across the corpus.
+    """
+    owners: dict[str, list[str]] = {}
+    for document in service.list_documents():
+        for path in _outline_paths(service.get_document_outline(document.file_path)):
+            owners.setdefault(path, []).append(document.file_path)
+    answers: dict[str, Answer] = {}
+    for split in ("dev", "held_out"):
+        for cases in queries[split].values():
+            for case in cases:
+                label = str(case["expected"])
+                if label in answers:
+                    continue
+                name, qualified, path = label.rpartition("::")
+                found = [
+                    file_path
+                    for file_path in owners.get(path, [])
+                    if not qualified or Path(file_path).name == name
+                ]
+                if len(found) != 1:
+                    raise SystemExit(f"fixture: {label!r} names {len(found)} sections, not one")
+                # Never zero: a section's text starts with its own heading line.
+                tokens = estimate_tokens(service.read_section(found[0], path))
+                answers[label] = Answer(found[0], path, tokens)
+    return answers
+
+
+def measure_costs(
+    service: MarkdownMemoryService,
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    answers: dict[str, Answer],
+) -> dict[str, Cost]:
+    """The default call's estimated cost, measured on the text block the MCP SDK sends.
+
+    That block is what a client puts in the model's context, so it is measured as the SDK
+    writes it - indentation and escaping included - rather than re-serialised here. Calls go
+    one at a time: they share one service and one SQLite connection.
+    """
+    server = create_server(service=service)
+
+    async def measure() -> dict[str, Cost]:
+        costs: dict[str, Cost] = {}
+        for split in ("dev", "held_out"):
+            for kind in ("paraphrase", "identifier"):
+                cases = queries[split][kind]
+                payloads: list[int] = []
+                for case in cases:
+                    outcome = await server.call_tool("search_docs", {"query": str(case["query"])})
+                    text = getattr(outcome.content[0], "text", None)
+                    if outcome.is_error or not isinstance(text, str):
+                        raise RuntimeError(f"search_docs failed for {case['query']!r}")
+                    payloads.append(estimate_tokens(text))
+                costs[f"{split}/{kind}"] = Cost(
+                    queries=tuple(str(case["query"]) for case in cases),
+                    payloads=tuple(payloads),
+                    answers=tuple(answers[str(case["expected"])].tokens for case in cases),
+                )
+        return costs
+
+    return asyncio.run(measure())
+
+
+def print_costs(costs: dict[str, Cost], *, per_query: bool) -> None:
+    print("\ndefault search_docs call, estimated text-payload tokens (informational)")
+    header = f"{'set':<22} {'n':>3}  payload    p95  answer  payload/answer"
+    print(header + "\n" + "-" * len(header))
+    for name, cost in costs.items():
+        print(
+            f"{name.replace('/', ' '):<22} {len(cost.payloads):>3}  "
+            f"{statistics.median(cost.payloads):7.0f}  {_p95(cost.payloads):5.0f}  "
+            f"{statistics.median(cost.answers):6.0f}  {statistics.median(cost.ratios):13.1f}x"
+        )
+    if per_query:
+        for name, cost in costs.items():
+            for query, payload, answer, ratio in zip(
+                cost.queries, cost.payloads, cost.answers, cost.ratios, strict=True
+            ):
+                print(f"  cost [{name}] {payload:5d} / {answer:4d} = {ratio:5.1f}x  {query}")
 
 
 def _dcg(grades: list[int]) -> float:
@@ -98,7 +228,6 @@ def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> 
     def within(k: int) -> float:
         return sum(rank is not None and rank <= k for rank in ranks) / total
 
-    ordered = sorted(latencies)
     return Scores(
         top1=within(1),
         top3=within(3),
@@ -106,7 +235,7 @@ def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> 
         any_valid_top1=valid_first / total,
         ndcg5=statistics.mean(ndcg),
         median_ms=statistics.median(latencies),
-        p95_ms=ordered[max(0, math.ceil(total * 0.95) - 1)],
+        p95_ms=_p95(latencies),
         misses=tuple(
             (str(case["query"]), rank) for case, rank in zip(cases, ranks, strict=True) if rank != 1
         ),
@@ -236,6 +365,7 @@ def run(
 ) -> dict[str, Scores]:
     service, built = open_service(arguments, base, probes)
     try:
+        answers = resolve_answers(service, queries)
         print(f"embedder: {service.embedder.model_name}")
         if not built:
             print("index: reused from cache (fingerprint, integrity and vectors verified)")
@@ -256,6 +386,10 @@ def run(
             for name, result in scores.items():
                 for query, rank in result.misses:
                     print(f"  miss [{name}] rank={rank}: {query}")
+        try:
+            print_costs(measure_costs(service, queries, answers), per_query=arguments.show_costs)
+        except Exception as exc:  # informational: it must never decide how the run ends
+            print(f"\ncost: not measured ({exc})")
         return scores
     finally:
         service.close()
@@ -271,6 +405,9 @@ def main() -> int:
         "gate always judges the default model unless this flag says otherwise",
     )
     parser.add_argument("--show-misses", action="store_true", help="list queries missed at Top-1")
+    parser.add_argument(
+        "--show-costs", action="store_true", help="list what each query's default call costs"
+    )
     parser.add_argument(
         "--rebuild",
         action="store_true",
