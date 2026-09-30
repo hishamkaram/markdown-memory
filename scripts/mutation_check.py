@@ -1291,6 +1291,14 @@ MUTATIONS = (
         tests="test_a_cost_pass_that_fails_does_not_decide_the_exit_code",
     ),
     Mutation(
+        name="cost: accept --show-costs and list nothing",
+        module="eval_retrieval.py",
+        area="scripts",
+        old="    if per_query:",
+        new="    if False:",
+        tests="test_show_costs_lists_every_query",
+    ),
+    Mutation(
         name="eval: take the slowest query for the p95",
         module="eval_retrieval.py",
         area="scripts",

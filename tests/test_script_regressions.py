@@ -217,6 +217,12 @@ class TestTheCostReport:
         self, evaluation: object, service: MarkdownMemoryService
     ) -> None:
         answer = self.resolve(evaluation, service, "Guide > Big")["Guide > Big"]
+        (big,) = [
+            node
+            for node in service.get_document_outline(answer.file_path)[0].children
+            if node.heading_path == "Guide > Big"
+        ]
+        assert big.part_count > 1, "the fixture no longer splits, so this proves nothing"
         whole = service.read_section(answer.file_path, "Guide > Big")
         assert "(Part" not in answer.heading_path
         assert answer.tokens == estimate_tokens(whole)
@@ -306,6 +312,32 @@ class TestTheCostReport:
             logging.disable(logging.NOTSET)
         assert code == 0
         assert "cost: not measured (search_docs failed for 'q')" in capsys.readouterr().out
+
+    def test_show_costs_lists_every_query(
+        self, evaluation: object, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cost = evaluation.Cost(queries=("q1", "q2"), payloads=(300, 90), answers=(30, 45))  # type: ignore[attr-defined]
+        evaluation.print_costs({"dev/paraphrase": cost}, per_query=True)  # type: ignore[attr-defined]
+        listed = [line for line in capsys.readouterr().out.splitlines() if "cost [" in line]
+        assert len(listed) == 2 and listed[0].endswith("q1") and "10.0x" in listed[0]
+
+    def test_a_recorded_baseline_holds_no_cost(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.isolate(evaluation, tmp_path, monkeypatch)
+        passing = _passing_scores(evaluation)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+        cost = evaluation.Cost(queries=("q",), payloads=(300,), answers=(30,))  # type: ignore[attr-defined]
+        monkeypatch.setattr(evaluation, "measure_costs", lambda *_args: {"dev/paraphrase": cost})
+        monkeypatch.setattr(sys, "argv", ["eval_retrieval.py", "--update-baseline"])
+        try:
+            assert evaluation.main() == 0  # type: ignore[attr-defined]
+        finally:
+            logging.disable(logging.NOTSET)
+        recorded = json.loads((tmp_path / "eval_data" / "baseline.json").read_text())
+        fields = set(recorded["embeddinggemma"]["dev/paraphrase"])
+        assert fields == {"top1", "top3", "top5", "any_valid_top1", "ndcg5", "median_ms", "p95_ms"}
 
     def test_p95_is_the_same_rule_for_latency_and_cost(self, evaluation: object) -> None:
         assert evaluation._p95([float(n) for n in range(1, 21)]) == 19.0  # type: ignore[attr-defined]
