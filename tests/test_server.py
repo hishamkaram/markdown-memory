@@ -17,7 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from markdown_memory.config import ServerConfig
 from markdown_memory.exceptions import SectionNotFoundError
 from markdown_memory.headings import build_outline, normalize_heading_path, select_sections
-from markdown_memory.models import PREAMBLE_TITLE, Section
+from markdown_memory.models import PREAMBLE_TITLE, Section, estimate_tokens
 from markdown_memory.server import MarkdownMemoryService, configure_logging, create_server
 
 
@@ -350,12 +350,76 @@ async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[No
     assert top["heading_path"] == "Orbit Gateway > Configuration > Environment Variables"
     assert top["fts_rank"] == 1
     assert "ORBIT_UPSTREAM_TIMEOUT_MS" in top["content"]
-    assert set(top) - {"matched_passage"} == {
-        "file_path", "document_title", "heading_path", "heading_title", "lines",
-        "score", "fts_rank", "vec_rank", "tokens", "content",
-    }  # fmt: skip
-    assert [r["score"] for r in results] == sorted((r["score"] for r in results), reverse=True)
+    assert set(top) == {
+        "file_path",
+        "document_title",
+        "heading_path",
+        "heading_title",
+        "lines",
+        "score",
+        "fts_rank",
+        "vec_rank",
+        "tokens",
+        "content",
+    }  # fmt: skip - and no matched_passage: it would repeat a sentence of `content`
     assert (await call(server, "search_docs", query="   "))["results"] == []
+
+
+async def test_hits_after_the_first_are_pointers_that_read_section_follows(
+    server: MCPServer[None], docs_dir: Path
+) -> None:
+    """#36: the first hit is the text; the rest say where, how big and why - and nothing else."""
+    await call(server, "index_directory", directory=str(docs_dir))
+    results = (await call(server, "search_docs", query="upstream timeout retries"))["results"]
+    assert len(results) > 1
+    assert "content" in results[0]
+    assert any("matched_passage" in p for p in results[1:]), "no pointer says why it matched"
+    for pointer in results[1:]:
+        assert {"file_path", "heading_path", "lines", "tokens"} <= set(pointer)
+        dropped = {"content", "document_title", "heading_title", "score", "fts_rank", "vec_rank"}
+        assert not dropped & set(pointer), f"a pointer carries {dropped & set(pointer)}"
+        text = await call(
+            server,
+            "read_section",
+            file_path=pointer["file_path"],
+            heading_path=pointer["heading_path"],
+        )
+        assert estimate_tokens(text) == pointer["tokens"], (
+            "a pointer mis-states what following it costs"
+        )
+
+
+async def test_a_pointer_to_a_split_part_reads_that_part_not_the_whole(
+    server: MCPServer[None], docs_dir: Path
+) -> None:
+    """`X (Part n)` passed verbatim is the part it priced; the base path reassembles every part."""
+    body = "\n\n".join(f"Paragraph {n} of the wombat burrow survey." * 8 for n in range(40))
+    (docs_dir / "survey.md").write_text(f"# Survey\n\n{body}\n", encoding="utf-8")
+    await call(server, "index_directory", directory=str(docs_dir))
+    results = (await call(server, "search_docs", query="wombat burrow survey"))["results"]
+    parts = [p for p in results[1:] if "(Part " in p["heading_path"]]
+    assert parts, "the survey is oversized: its parts should fill the pointers"
+    whole = await call(server, "read_section", file_path="survey.md", heading_path="Survey")
+    for pointer in parts:
+        text = await call(
+            server,
+            "read_section",
+            file_path=pointer["file_path"],
+            heading_path=pointer["heading_path"],
+        )
+        assert estimate_tokens(text) == pointer["tokens"] < estimate_tokens(whole)
+
+
+async def test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it(
+    server: MCPServer[None], service: MarkdownMemoryService, docs_dir: Path
+) -> None:
+    """Pointers are a serialisation: ranking and `limit` stay the service's."""
+    await call(server, "index_directory", directory=str(docs_dir))
+    expected = [(h.file_path, h.heading_path) for h in service.search_docs("gateway timeout", 5)]
+    shown = (await call(server, "search_docs", query="gateway timeout"))["results"]
+    assert [(r["file_path"], r["heading_path"]) for r in shown] == expected
+    only = (await call(server, "search_docs", query="gateway timeout", limit=1))["results"]
+    assert len(only) == 1 and "content" in only[0], "limit=1 must still answer in full"
 
 
 async def test_a_search_over_a_damaged_index_says_so_in_its_answer(

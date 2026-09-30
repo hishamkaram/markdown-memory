@@ -30,6 +30,7 @@ from mcp.types import CallToolResult, TextContent
 from markdown_memory.config import ServerConfig
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.embedders import DEFAULT_EMBEDDER, GEMMA_DIMENSION
+from markdown_memory.models import estimate_tokens
 
 # How long [9] leaves the server idle before measuring what that idleness costs and what
 # the query after it costs. Long enough that any onnxruntime spin window has closed.
@@ -638,15 +639,28 @@ class LiveTest:
         results = (await self.call("search_docs", query="HELIOS_WAL_SEGMENT_MB", limit=5))[0][
             "results"
         ]
+        top, pointers = results[0], results[1:]
         self.check(
-            [r["fts_rank"] for r in results].count(None) == len(results) - 1,
-            "identifier occurs in one section only: every other hit came from vectors",
-        )
-        scores = [r["score"] for r in results]
-        self.check(scores == sorted(scores, reverse=True), "results sorted by descending RRF score")
-        self.check(
-            abs(scores[0] - (1 / 61 + 1 / (60 + results[0]["vec_rank"]))) < 1e-6,
+            abs(top["score"] - (1 / (60 + top["fts_rank"]) + 1 / (60 + top["vec_rank"]))) < 1e-6,
             "score equals 1/(60+fts_rank) + 1/(60+vec_rank)",
+        )
+        self.check(
+            bool(pointers)
+            and all(
+                {"file_path", "heading_path", "lines", "tokens"} <= set(p)
+                and not {"content", "score", "fts_rank", "vec_rank"} & set(p)
+                for p in pointers
+            ),
+            "every hit after the first is a pointer: where, how big, why - no text, no ranks",
+        )
+        followed, _, _ = await self.call(
+            "read_section",
+            file_path=pointers[0]["file_path"],
+            heading_path=pointers[0]["heading_path"],
+        )
+        self.check(
+            isinstance(followed, str) and estimate_tokens(followed) == pointers[0]["tokens"],
+            "a pointer followed verbatim with read_section costs what it said",
         )
         for hostile in ('"unbalanced', "NEAR(", "a AND", "*", "col:umn", "--", "'; DROP TABLE x;"):
             outcome = await self.client.call_tool("search_docs", {"query": hostile})
@@ -677,7 +691,7 @@ class LiveTest:
             position = results.index(hit) + 1 if hit else None
             print(
                 f"        {query!r} -> #{position} {expected_path} "
-                f"(fts_rank={hit and hit['fts_rank']}, vec_rank={hit and hit['vec_rank']}, "
+                f"(fts_rank={hit and hit.get('fts_rank')}, vec_rank={hit and hit.get('vec_rank')}, "
                 f"{elapsed:.1f} ms)"
             )
             self.check(
@@ -685,8 +699,11 @@ class LiveTest:
                 f"target section ranked within the top {worst_position}",
             )
             assert hit is not None
-            self.check(hit["fts_rank"] is None, "FTS5 did not match it: keywords alone would miss")
-            self.check(hit["vec_rank"] == 1, "vector index ranked it first")
+            if position == 1:  # only the first hit carries its ranks; a pointer has none
+                self.check(hit["fts_rank"] is None, "FTS5 did not match it: keywords alone miss")
+                self.check(hit["vec_rank"] == 1, "vector index ranked it first")
+            else:
+                self.check("content" not in hit and "tokens" in hit, "found as a pointer")
 
     async def error_reporting(self) -> None:
         print("\n[7] errors are actionable for the agent")
@@ -777,7 +794,9 @@ async def _search_finds(probe: LiveTest, token: str, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         payload, _, _ = await probe.call("search_docs", query=token)
-        if payload and any(token in hit["content"] for hit in payload["results"]):
+        hits = payload["results"] if payload else []
+        # Only the first hit carries `content`; a pointer shows why it matched.
+        if any(token in (hit.get("content") or hit.get("matched_passage") or "") for hit in hits):
             return True
         await asyncio.sleep(1)
     return False

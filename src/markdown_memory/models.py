@@ -193,9 +193,26 @@ class SearchResult:
             "tokens": estimate_tokens(self.content),
             "content": self.content,
         }
-        if self.matched_passage is not None:
-            payload["matched_passage"] = self.matched_passage
+        # No `matched_passage` here: it restates a passage of `content`; it would be paid twice.
         return payload
+
+    def to_pointer(self) -> JsonDict:
+        """Where a lower-ranked hit is, what reading it costs, and why it matched - not its text.
+
+        `heading_path` is what `read_section` takes, verbatim: for one part of a split section it
+        names that part, while the base path would reassemble every part and cost more than
+        `tokens` says. Nothing that ranks it (`score`, `fts_rank`, `vec_rank`) - its position in
+        the list is its rank.
+        """
+        pointer: JsonDict = {
+            "file_path": self.file_path,
+            "heading_path": self.heading_path,
+            "lines": f"{self.start_line}-{self.end_line}",
+            "tokens": estimate_tokens(self.content),
+        }
+        if self.matched_passage is not None:
+            pointer["matched_passage"] = self.matched_passage
+        return pointer
 
 
 @dataclass(slots=True, frozen=True)

@@ -386,7 +386,9 @@ class TestPassageRanking:
         top = searcher.search("Reference Operations Health healthz answers traffic")[0]
         assert top.heading_path == "Reference > Operations > Health"
         assert top.matched_passage == "GET /healthz answers while the process accepts traffic."
-        assert top.to_dict()["matched_passage"] == top.matched_passage
+        assert top.to_pointer()["matched_passage"] == top.matched_passage
+        # The full shape already carries the passage inside `content`; it is not paid for twice.
+        assert "matched_passage" not in top.to_dict()
 
     def test_result_without_a_winning_passage_omits_the_field(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -405,7 +407,7 @@ class TestPassageRanking:
         finally:
             engine.close()
         assert result.matched_passage is None
-        assert "matched_passage" not in result.to_dict()
+        assert "matched_passage" not in result.to_pointer()
 
     def test_indexer_reports_sections_and_passages(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path

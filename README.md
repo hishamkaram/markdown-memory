@@ -6,34 +6,35 @@ section that answers it.**
 Ask an agent a question about your docs and it opens the files that might answer it, whole.
 Most of what lands in its context is about something else, and the part you wanted competes
 with it. markdown-memory indexes your documentation by heading, so the same question comes
-back as a few sections, each addressable by its breadcrumb and quoted verbatim.
+back as the section that answers it, quoted verbatim, with pointers to the next few.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 15,739
+       alt="One question asked of four documentation files. Reading them whole costs 15,956
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
-            one that answers is 403.">
+            vectors, fuses the two, and returns the section that answers in full, 407
+            tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 15,739 tokens in all:
+`docs/evaluation-protocol.md`, 15,956 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
   712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  647 tok  README.md  markdown-memory
+  666 tok  README.md  markdown-memory
   738 tok  CLAUDE.md  markdown-memory > Commands
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,887 tokens instead of 15,739**, and the section that actually answers is 403 - a
-thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
-answer usually needs no follow-up call at all.
+**One section in full - 407 tokens - instead of 15,956**: the one that answers, first. The
+other four come back as pointers - where each section is, what reading it costs, and the
+passage that matched - so when the first is not the answer, one `read_section` fetches the
+one that is.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
 protocol agents use to call tools - and it runs entirely on your machine: parsing with
@@ -304,12 +305,13 @@ Query latency is not in the table on purpose: it swings by 2-3x with what else t
 is doing, so the baseline records it as informational and so should you.
 
 The same run reports what the default `search_docs` call costs: the estimated tokens of the
-text block the MCP server actually sends (five full sections plus `index_status`), beside
+text block the MCP server actually sends (one section in full, pointers to the rest and
+`index_status`), beside
 the section that answers each query, as a median, a p95 and a median ratio per set
 (`--show-costs` lists every query). It is informational - it never gates and never enters
 the baseline - and it depends on where the repository is checked out, since every hit
 carries its absolute path, so compare two runs from the same checkout. On this corpus the
-default call costs a median of about 1,300-1,400 tokens against answering sections of
+default call costs a median of about 600-700 tokens against answering sections of
 roughly 50-80.
 
 Switching preset **discards the whole index**: the two produce vectors of different sizes,
@@ -355,7 +357,7 @@ the revision is pinned. See [License](#license) for what that means for you.
 | `list_documents(directory="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
 | `get_document_outline(file_path)` | Hierarchical TOC with line ranges and token estimates |
 | `read_section(file_path, heading_path, include_subsections=False)` | Verbatim text of one section |
-| `search_docs(query, limit=5)` | `{results, index_status}`: BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); each hit reports the `matched_passage`, and `index_status` says whether the tree searched is known to be whole |
+| `search_docs(query, limit=5)` | `{results, index_status}`: BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, and `matched_passage` when a passage won) for `read_section`, and `index_status` says whether the tree searched is known to be whole |
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base
