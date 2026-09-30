@@ -2,8 +2,9 @@
 
 Nothing watches the filesystem. The server already looks at it on every search - the
 freshness sweep counts indexed files that moved on - so that look is what decides when to
-re-index, and one run at start catches whatever changed while no server was running. A
-run is the ordinary incremental `index_directory`, in one background thread at a time.
+re-index. The first search after a start finds the runner has never run, and that
+catch-up run picks up whatever changed while no server was running. A run is the ordinary
+incremental `index_directory`, in one background thread at a time.
 """
 
 from __future__ import annotations

@@ -1,5 +1,7 @@
 """markdown-memory: AST-aware Markdown indexing and hybrid retrieval over MCP."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from markdown_memory.exceptions import (
     ASTParseError,
     DatabaseError,
@@ -19,7 +21,12 @@ from markdown_memory.models import (
     SectionDraft,
 )
 
-__version__ = "0.1.0"
+try:
+    # pyproject.toml is the one place the version is written; this reads it back from the
+    # installed metadata rather than repeating it.
+    __version__ = version("markdown-memory")
+except PackageNotFoundError:  # a bare source tree nobody installed
+    __version__ = "0+unknown"
 
 __all__ = [
     "ASTParseError",

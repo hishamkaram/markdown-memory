@@ -141,11 +141,17 @@ def test_the_graph_an_upgrade_left_behind_is_reported_not_hidden(
     (model_dir / model_cache._VERIFIED_STAMP).write_text("{}", encoding="utf-8")
     orphan = model_dir / "onnx" / "model_quantized.onnx_data"
     orphan.write_bytes(b"y" * 4096)
+    # What every download leaves beside the weights: huggingface_hub's own bookkeeping.
+    bookkeeping = model_dir / ".cache" / "huggingface" / "download" / "onnx"
+    bookkeeping.mkdir(parents=True)
+    (bookkeeping / "model_q4.onnx.metadata").write_text("sha\n", encoding="utf-8")
+    (bookkeeping / "model_q4.onnx.lock").touch()
 
     with caplog.at_level(logging.INFO, logger="markdown_memory.embedders"):
         EmbeddingGemmaEmbedder(cache_dir=tmp_path)._report_other_versions()
 
     assert str(orphan) in caplog.text, "the orphaned graph was never mentioned"
+    assert "1 copy/copies" in caplog.text, "a download's bookkeeping was called wasted weights"
     assert model_cache._VERIFIED_STAMP not in caplog.text, "the stamp is not wasted space"
     for name in model_cache.GEMMA_FILES:
         assert str(model_dir / name) not in caplog.text, f"{name} is in use, not an orphan"

@@ -193,6 +193,13 @@ jobs:
           uv venv /tmp/packaging
           VIRTUAL_ENV=/tmp/packaging uv pip install dist/*.whl
           /tmp/packaging/bin/markdown-memory --help
+          /tmp/packaging/bin/markdown-memory --version
+      # What a client sees first: the installed command answers the handshake, with its
+      # version, inside the 10 s Codex waits by default.
+      - name: The installed server answers the handshake in time
+        run: |
+          uv run --no-project python scripts/handshake_check.py /tmp/packaging/bin/markdown-memory \
+            --expect-version "$(uv version --short)"
       - name: The wheel carries its licence
         run: |
           uv run python -c "

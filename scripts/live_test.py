@@ -805,7 +805,7 @@ async def auto_index_check(test: LiveTest, root: Path, model_cache: str) -> None
             probe = LiveTest(client, docs, {})
             test.check(
                 await _search_finds(probe, "HELIOS_BATCH", timeout=180),
-                "the server indexed its root at start without being asked",
+                "the first search started the catch-up run without being asked",
             )
             guide.write_text(
                 "# Guide\n\nThe batcher now reads ZEPHYR_QUOTA instead.\n", encoding="utf-8"

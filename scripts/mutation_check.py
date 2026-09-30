@@ -507,7 +507,71 @@ MUTATIONS = (
         module="server.py",
         old="    if config.auto_index:\n",
         new="    if True:\n",
-        tests="test_only_the_stdio_server_starts_it_and_only_when_asked_to",
+        tests="test_only_the_stdio_server_arms_it_and_only_when_asked_to",
+    ),
+    Mutation(
+        name="install: start the catch-up run before the client's handshake is answered",
+        module="server.py",
+        old="        service.start_auto_index(request=False)\n",
+        new="        service.start_auto_index()\n",
+        tests="test_only_the_stdio_server_arms_it_and_only_when_asked_to",
+    ),
+    Mutation(
+        name="install: arm the runner and let no first search ever start it",
+        module="autoindex.py",
+        old=(
+            '                float("inf") if self._last_finished is None '
+            "else self._clock() - self._last_finished\n"
+        ),
+        new=(
+            "                0.0 if self._last_finished is None "
+            "else self._clock() - self._last_finished\n"
+        ),
+        tests="test_an_armed_runner_catches_up_at_the_first_search",
+    ),
+    Mutation(
+        name="install: answer the handshake with no version",
+        module="server.py",
+        old=(
+            '        "markdown-memory", version=__version__, instructions=SERVER_INSTRUCTIONS, '
+            "lifespan=lifespan\n"
+        ),
+        new='        "markdown-memory", instructions=SERVER_INSTRUCTIONS, lifespan=lifespan\n',
+        tests="test_the_handshake_names_the_version",
+    ),
+    Mutation(
+        name="install: drop the --version flag an install is checked with",
+        module="server.py",
+        old=(
+            '    parser.add_argument("--version", action="version", '
+            'version=f"%(prog)s {__version__}")\n'
+        ),
+        new="",
+        tests="test_version_is_the_installed_one_and_builds_nothing",
+    ),
+    Mutation(
+        name="install: build the whole service to download a model",
+        module="server.py",
+        old="    if arguments.download_model:\n",
+        new="    if False:\n",
+        tests="test_download_model_loads_the_configured_embedder_and_nothing_else",
+    ),
+    Mutation(
+        name="install: report a failed model download as success",
+        module="server.py",
+        old=(
+            '        logger.exception("Cannot download the embedding model")\n'
+            "        raise SystemExit(1) from None\n"
+        ),
+        new='        logger.exception("Cannot download the embedding model")\n        return\n',
+        tests="test_a_download_that_fails_exits_non_zero",
+    ),
+    Mutation(
+        name="install: call a fresh download's own bookkeeping leftover weights",
+        module="embedders.py",
+        old="                ours = entry.is_relative_to(bookkeeping)\n",
+        new="                ours = False\n",
+        tests="test_the_graph_an_upgrade_left_behind_is_reported_not_hidden",
     ),
     Mutation(
         name="auto: keep telling the agent to run what is already running",
@@ -829,7 +893,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 7761),',
+        old='    ("README.md", 8042),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
