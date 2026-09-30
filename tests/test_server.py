@@ -341,6 +341,7 @@ async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[No
         "failures": [],
         "changed_files": 0,
         "indexing": False,
+        "gitignore": "no_repository",
         "message": None,
     }
     results = answer["results"]

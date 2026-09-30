@@ -247,6 +247,10 @@ class IndexStatus:
     #: This server's own background run is indexing the tree right now. A hint about one
     #: process only: another process's run shows as coverage withdrawn, as it always did.
     indexing: bool = False
+    #: What git said about the root the last time a walk of it finished: `applied`, `off`,
+    #: `no_repository`, `unavailable` (git could not be asked, so what it ignores was indexed
+    #: too), or `unknown` when no walk has finished since the index was built.
+    gitignore: str = "unknown"
 
     def to_dict(self) -> JsonDict:
         shown = self.failures[:MAX_REPORTED_FAILURES]
@@ -255,6 +259,7 @@ class IndexStatus:
             "failures": [failure.to_dict() for failure in shown],
             "changed_files": self.changed_files,
             "indexing": self.indexing,
+            "gitignore": self.gitignore,
             "message": self.message(),
         }
 
@@ -284,6 +289,13 @@ class IndexStatus:
                     "longer there; run index_directory to refresh. The check is cheap and "
                     "best-effort: files created since that scan are not counted, and an "
                     "edit that puts a file's modification time back is not seen."
+                )
+            if self.gitignore == "unavailable":
+                # Last: the tree is whole, only perhaps larger than the project's own docs.
+                return (
+                    "git could not list the files it ignores when this root was last indexed, "
+                    "so generated or ignored Markdown may be among the results; the server "
+                    "log says why."
                 )
             return None
         if not self.failures:

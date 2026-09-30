@@ -295,8 +295,8 @@ class Indexer:
             identity = self._run_identity()
             known_hashes = self._db.document_hashes(str(root))
             weights_settled = False
-            ignored = discovery.git_ignored(root) if self._gitignore else None
-            scope = discovery.Scope(root, self._exclude, ignored or frozenset())
+            git = discovery.git_ignored(root) if self._gitignore else discovery.GitIgnore("off")
+            scope = discovery.Scope(root, self._exclude, git.ignored)
 
             seen: set[str] = set()
             indexed = unchanged = sections_indexed = passages_indexed = 0
@@ -469,7 +469,7 @@ class Indexer:
             # The walk finished, which is all this records; what it could not read is
             # recorded separately, and `index_status` refuses to call a tree whole while
             # anything under it is still listed there. Two facts, two places, one answer.
-            self._db.mark_scan_complete(str(root), generation)
+            self._db.mark_scan_complete(str(root), generation, git.state)
             report = IndexReport(
                 directory=discovery._printable(str(root)),
                 files_scanned=len(seen),
@@ -480,7 +480,7 @@ class Indexer:
                 passages_indexed=passages_indexed,
                 elapsed_seconds=time.perf_counter() - started,
                 errors=tuple(failures),
-                notes=tuple(notices.values()),
+                notes=(*notices.values(), *_git_notes(git)),
             )
             self._db.dismiss_notices(notices)
         logger.info(report.summary())
@@ -762,3 +762,12 @@ class Indexer:
             sections=tuple(parsed.sections),
             vectors=tuple(vectors),
         )
+
+
+def _git_notes(git: discovery.GitIgnore) -> tuple[str, ...]:
+    if git.state != "unavailable":
+        return ()
+    return (
+        f"git could not list what it ignores here ({git.cause}), so files it ignores were "
+        "indexed too.",
+    )

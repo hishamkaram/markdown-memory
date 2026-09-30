@@ -574,11 +574,69 @@ MUTATIONS = (
         tests="test_the_graph_an_upgrade_left_behind_is_reported_not_hidden",
     ),
     Mutation(
-        name="scope: walk into another checkout below the root",
+        name="scope: walk into a linked worktree below the root",
         module="discovery.py",
-        old='        if os.path.lexists(current / ".git"):\n',
+        old="        if _is_linked_worktree(current):\n",
         new="        if False:\n",
-        tests="test_a_worktree_and_a_nested_clone_are_left_out_and_their_copies_purged",
+        tests="test_a_linked_worktree_is_left_out_and_its_copies_purged",
+    ),
+    Mutation(
+        name="scope: take any gitdir for a worktree's, submodules and dead ones included",
+        module="discovery.py",
+        old='    return os.path.isfile(gitdir / "commondir")\n',
+        new="    return os.path.exists(gitdir)\n",
+        tests="test_a_checkout_not_known_to_be_a_copy_is_indexed",
+    ),
+    Mutation(
+        name="scope: resolve a worktree's gitdir only one way",
+        module="discovery.py",
+        old='    gitdir = directory / first.removeprefix("gitdir:").strip()',
+        new='    gitdir = directory / first.removeprefix("gitdir:").strip().lstrip("/")',
+        tests="test_a_linked_worktree_is_left_out_and_its_copies_purged",
+    ),
+    Mutation(
+        name="git: call a folder without git a repository git could not be asked about",
+        module="discovery.py",
+        old="        if not _in_repository(root):\n",
+        new="        if False:\n",
+        tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
+    ),
+    Mutation(
+        name="git: call a folder git says is no repository one it could not be asked about",
+        module="discovery.py",
+        old='        if exc.returncode == 128 and "not a git repository" in reason:\n',
+        new="        if False:\n",
+        tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
+    ),
+    Mutation(
+        name="git: let a git hook's environment choose the repository",
+        module="discovery.py",
+        old="    env = {name: value for name, value in os.environ.items() if name not in _GIT_LOCATION_VARIABLES}\n",  # noqa: E501
+        new="    env = dict(os.environ)\n",
+        tests="test_a_git_hook_s_environment_does_not_choose_the_repository",
+    ),
+    Mutation(
+        name="git: keep quiet to the agent when git could not be asked",
+        module="models.py",
+        old='            if self.gitignore == "unavailable":\n',
+        new="            if False:\n",
+        tests="test_only_a_whole_tree_mentions_git "
+        "or test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
+    ),
+    Mutation(
+        name="git: keep quiet to a manual run when git could not be asked",
+        module="indexer.py",
+        old='    if git.state != "unavailable":\n',
+        new="    if True:\n",
+        tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
+    ),
+    Mutation(
+        name="git: forget what git said once the walk is done",
+        module="db.py",
+        old="                (root, gitignore),\n",
+        new="                (root, None),\n",
+        tests="test_the_state_is_the_last_finished_walks "
+        "or test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
     ),
     Mutation(
         name="scope: refuse a checkout even when it is the root asked for",
@@ -592,7 +650,7 @@ MUTATIONS = (
         module="discovery.py",
         old="    except (OSError, subprocess.SubprocessError) as exc:\n",
         new="    except OSError as exc:\n",
-        tests="test_git_missing_or_hung_is_no_answer_not_a_failed_run",
+        tests="test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository",
     ),
     Mutation(
         name="scope: index whatever git ignores",
@@ -624,9 +682,13 @@ MUTATIONS = (
     Mutation(
         name="scope: ask git even when told not to",
         module="indexer.py",
-        old="            ignored = discovery.git_ignored(root) if self._gitignore else None\n",
-        new="            ignored = discovery.git_ignored(root)\n",
-        tests="test_what_git_ignores_is_left_out_and_purged_but_tracked_files_stay",
+        old=(
+            "            git = discovery.git_ignored(root) if self._gitignore"
+            ' else discovery.GitIgnore("off")\n'
+        ),
+        new="            git = discovery.git_ignored(root)\n",
+        tests="test_switched_off_git_is_never_asked "
+        "or test_what_git_ignores_is_left_out_and_purged_but_tracked_files_stay",
     ),
     Mutation(
         name="scope: ignore MARKDOWN_MEMORY_GITIGNORE",
@@ -1006,7 +1068,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 8408),',
+        old='    ("README.md", 8584),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
