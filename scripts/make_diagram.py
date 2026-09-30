@@ -67,15 +67,15 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 8766),
-    ("CLAUDE.md", 4184),
+    ("README.md", 8824),
+    ("CLAUDE.md", 4263),
     ("evaluation-protocol.md", 1661),
-    ("AGENTS.md", 1128),
+    ("AGENTS.md", 1208),
 ]
 RIGHT_HITS = [
     (407, "What downloads, when, and where", True),
     (712, "Pre-download it, or install offline", False),
-    (647, "markdown-memory  (preamble)", False),
+    (666, "markdown-memory  (preamble)", False),
     (738, "Commands  (CLAUDE.md)", False),
     (383, "What is checked before loading", False),
 ]
@@ -85,8 +85,10 @@ MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # the bar beside it come to disagree, which is precisely the defect this picture claims to
 # be free of.
 TOTAL_TOKENS = sum(tokens for _, tokens in LEFT_FILES)
-RETURNED_TOKENS = sum(tokens for tokens, _, _ in RIGHT_HITS)
-BEST_HIT = next(tokens for tokens, _, best in RIGHT_HITS if best)
+# search_docs returns its first hit in full and the rest as pointers, so what comes back as
+# text is the first hit; the others are drawn at what reading them would cost.
+FULL_TOKENS = RIGHT_HITS[0][0]
+POINTER_COUNT = len(RIGHT_HITS) - 1
 # Counts read as words in prose, and prose is what the captions and the aria-label are.
 _WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
@@ -130,9 +132,9 @@ def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading {spell(len(LEFT_FILES))} '
-        f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns "
-        f"{spell(len(RIGHT_HITS))} sections totalling {RETURNED_TOKENS:,}, and the one that "
-        f'answers is {BEST_HIT} tokens.">'
+        f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns the section "
+        f"that answers in full, {FULL_TOKENS} tokens, with {spell(POINTER_COUNT)} pointers "
+        f'to the rest.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
 
@@ -227,7 +229,7 @@ def draw(c: dict) -> str:
         text(
             732,
             116,
-            f"{spell(len(RIGHT_HITS)).capitalize()} sections come back",
+            f"One section in full, {spell(POINTER_COUNT)} pointers",
             fill=c["warm"],
             size=13,
             weight=600,
@@ -235,15 +237,16 @@ def draw(c: dict) -> str:
     )
     hits = RIGHT_HITS
     y = 140
-    for tokens, label, best in hits:
+    for rank, (tokens, label, best) in enumerate(hits):
+        # Solid: text that comes back. Outlined: a pointer, and what following it would cost.
         o.append(
             rect(
                 732,
                 y,
                 max(3, round(tokens * RIGHT_BAR / MAX_TOKENS)),
                 11,
-                fill=c["warm"],
-                stroke="none",
+                fill=c["warm"] if rank == 0 else "none",
+                stroke="none" if rank == 0 else c["warm"],
                 rx=2,
             )
         )
@@ -261,12 +264,12 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, f"{RETURNED_TOKENS:,} tokens", fill=c["warm"], size=14, weight=600))
+    o.append(text(732, 338, f"{FULL_TOKENS} tokens in full", fill=c["warm"], size=14, weight=600))
     o.append(
         text(
             732,
             354,
-            f"and the one that answers is {BEST_HIT}, quoted verbatim",
+            f"plus {spell(POINTER_COUNT)} pointers, read only if the first is not the answer",
             fill=c["muted"],
             size=11,
         )

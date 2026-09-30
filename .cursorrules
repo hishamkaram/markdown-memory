@@ -28,12 +28,15 @@ section you need instead; it is typically 10-50x cheaper.
 Work in this order:
 
 1. **`search_docs(query, limit=5)`** - start here. Returns
-   `{"results": [...], "index_status": {...}}`; each hit carries its breadcrumb
-   (`heading_path`), line range, token estimate, full section `content`, and the
-   `matched_passage` that matched best. Use exact identifiers verbatim (`--dry-run`,
-   `HELIOS_BATCH`, `ENOSPC`): they are matched by keyword at 100% Top-1. Plain-language
-   questions work too; read all returned hits, not just the first (Top-5 is ~97% reliable,
-   Top-1 ~88%). When `index_status.coverage` is `"unknown"`, the documentation you just
+   `{"results": [...], "index_status": {...}}`. The first hit carries the full section
+   `content` with its breadcrumb (`heading_path`), line range and token estimate; the rest
+   are pointers - `file_path`, `heading_path`, `lines`, `tokens` and, when a passage won
+   the vector ranking, the `matched_passage` that did. Use exact identifiers verbatim (`--dry-run`, `HELIOS_BATCH`, `ENOSPC`):
+   they are matched by keyword at 100% Top-1. Plain-language questions work too, but the
+   first hit is not always the answer (Top-1 ~88%; Top-5 is ~97% reliable): when it is not,
+   read the pointers' `matched_passage` and fetch the one that fits with `read_section`,
+   passing its `heading_path` verbatim - for a `(Part n)` the base path returns every part.
+   When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it. When `index_status.changed_files` is non-zero,
    that many indexed documents could not be confirmed to be what was indexed - edited,

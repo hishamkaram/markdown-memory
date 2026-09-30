@@ -558,7 +558,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         # left-hand total was pinned - so a re-measurement of RIGHT_HITS could redraw the
         # picture correctly and leave the sentence beside it describing the old one.
         assert total == make_diagram.TOTAL_TOKENS
-        for figure in (f"{make_diagram.RETURNED_TOKENS:,}", str(make_diagram.BEST_HIT)):
+        for figure in (str(make_diagram.FULL_TOKENS),):
             assert figure in readme, (
                 f"README does not print {figure!r}, which the drawing beside it does"
             )
@@ -591,9 +591,9 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
 
         expected = [f"{tokens:,}" for _, tokens in make_diagram.LEFT_FILES]
         expected += [str(tokens) for tokens, _, _ in make_diagram.RIGHT_HITS]
-        expected.append(f"answers is {make_diagram.BEST_HIT}")
         expected.append(f"{make_diagram.TOTAL_TOKENS:,} tokens")
-        expected.append(f"{make_diagram.RETURNED_TOKENS:,} tokens")
+        expected.append(f"{make_diagram.FULL_TOKENS} tokens in full")
+        expected.append(f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers")
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
             # Only what the <text> elements draw. Searching the whole file would score the
@@ -621,8 +621,8 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             assert label, f"{svg} has no aria-label"
             for figure in (
                 f"{make_diagram.TOTAL_TOKENS:,}",
-                f"{make_diagram.RETURNED_TOKENS:,}",
-                str(make_diagram.BEST_HIT),
+                f"in full, {make_diagram.FULL_TOKENS} tokens",
+                f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers",
             ):
                 assert figure in label.group(1), (
                     f"{svg}'s aria-label does not carry {figure!r}: it describes a "
@@ -746,11 +746,26 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 f"the README says {printed}"
             )
 
-    def test_the_worked_example_adds_up_to_the_total_it_prints(self) -> None:
+    def test_the_worked_example_says_what_comes_back_in_full(self) -> None:
+        """Only the first hit comes back as text; the rest are pointers (#36).
+
+        The headline used to add the five hits up, when every hit carried its full text. Adding
+        them now would claim a response four pointers never cost.
+        """
+        import make_diagram
+
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
         assert example
-        returned = sum(int(n) for n in re.findall(r"(\d+) tok", example.group(1)))
-        assert f"**{returned:,} tokens instead of" in readme, (
-            f"the five hits total {returned:,}, which is not what the README claims"
-        )
+        sizes = [int(n) for n in re.findall(r"(\d+) tok", example.group(1))]
+        total = make_diagram.TOTAL_TOKENS
+        headline = f"**One section in full - {sizes[0]} tokens - instead of {total:,}**"
+        assert headline in readme, f"the first hit is {sizes[0]} tokens; the README says otherwise"
+        assert sizes[0] == make_diagram.FULL_TOKENS and len(sizes) - 1 == make_diagram.POINTER_COUNT
+        assert make_diagram.RIGHT_HITS[0][2], "the hit drawn in full is not the one that answers"
+        for stale in (
+            "sections totalling",
+            "Every hit carries its full text",
+            "five full sections",
+        ):
+            assert stale not in readme, f"the README still says {stale!r}"

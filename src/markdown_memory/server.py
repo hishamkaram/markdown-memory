@@ -76,8 +76,10 @@ SERVER_INSTRUCTIONS = (
     "Markdown documentation memory. The server keeps its documentation root indexed by "
     "itself (unless started with --no-auto-index); call index_directory only when "
     "index_status says so. Use search_docs to locate relevant sections, or "
-    "get_document_outline followed by read_section to fetch one heading's text. Prefer "
-    "these tools over reading whole Markdown files."
+    "get_document_outline followed by read_section to fetch one heading's text. search_docs "
+    "returns the best section in full and pointers to the rest: follow a pointer with "
+    "read_section, heading_path verbatim, only when the first is not enough. Prefer these tools "
+    "over reading whole Markdown files."
 )
 
 
@@ -427,7 +429,12 @@ def create_server(
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
         Returns `{"results": [...], "index_status": {...}}`, `results` holding at most
-        `limit` sections. `index_status.changed_files` counts indexed documents that no
+        `limit` hits, best first. The first carries the section's full `content`; the rest are
+        pointers - `file_path`, `heading_path`, `lines`, `tokens` (what reading it costs) and,
+        when a passage won the vector ranking, the `matched_passage` that did. Follow one with
+        `read_section(file_path, heading_path)` only when the first hit does not answer,
+        passing `heading_path` verbatim: for a `(Part n)` of a split section the base path
+        returns every part. `index_status.changed_files` counts indexed documents that no
         longer match the index - a hit may quote text that is no longer there - and is
         independent of coverage: it can be non-zero while coverage reads "verified", so
         read `index_status.message` whenever either is set.
@@ -437,7 +444,10 @@ def create_server(
         """
         service = services.get()
         return {
-            "results": [result.to_dict() for result in service.search_docs(query, limit)],
+            "results": [
+                hit.to_dict() if rank == 0 else hit.to_pointer()
+                for rank, hit in enumerate(service.search_docs(query, limit))
+            ],
             "index_status": service.index_status().to_dict(),
         }
 
