@@ -72,10 +72,11 @@ class Scope:
     """What a run of one documentation root owns, and so what it may index and purge.
 
     Out of scope: what the operator excluded, what git ignores below the root, and anything
-    inside another checkout below it - a worktree, a submodule, a nested clone. Each is a
-    statement that the path is not this project's documentation, which is what an exclusion
-    already meant here: its documents leave the index, rather than being kept the way a
-    pruned `node_modules` is, where the walk merely learned nothing.
+    inside a linked worktree below it. Each is a statement that the path is not this
+    project's documentation, which is what an exclusion already meant here: its documents
+    leave the index, rather than being kept the way a pruned `node_modules` is, where the
+    walk merely learned nothing. A submodule or a nested clone is not a copy of anything and
+    stays, unless git ignores it.
     """
 
     root: Path
@@ -97,36 +98,77 @@ class Scope:
             _printable("/".join(parts[:end])) in self.ignored for end in range(1, len(parts) + 1)
         ):
             return True
-        return _in_nested_checkout(target, self.root)
+        return _in_linked_worktree(target, self.root)
 
 
-def git_ignored(root: Path) -> frozenset[str] | None:
-    """What git ignores below ``root``, or ``None`` when git cannot say.
+#: Variables that would point git at some other repository than the root's own: a server
+#: started from a git hook inherits them.
+_GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+
+
+@dataclass(frozen=True, slots=True)
+class GitIgnore:
+    """What git said about a root: whether its ignore rules scope this run, and what they cover.
+
+    ``state`` is `applied`, `off` (switched off), `no_repository` (nothing to ignore - the walk
+    is already right) or `unavailable` (a repository git could not be asked about, so what it
+    ignores is indexed as well; ``cause`` says why).
+    """
+
+    state: str
+    ignored: frozenset[str] = frozenset()
+    cause: str | None = None
+
+
+def git_ignored(root: Path) -> GitIgnore:
+    """What git ignores below ``root``.
 
     One `git ls-files` for the whole run: git's own ignore rules, global excludes and
     `.git/info/exclude` included, and nothing tracked, since only untracked paths are listed.
-    Ignored directories come back collapsed (`coverage/`), so the set stays small. No git, no
-    repository, an error or a hang all mean the walk proceeds exactly as it did before git
-    was asked - never that the run fails. Its input and output are captured: stdout is the
-    JSON-RPC channel, and stdin is the client's.
+    Ignored directories come back collapsed (`coverage/`), so the set stays small. When git
+    cannot answer, the walk proceeds exactly as it did before git was asked - never that the
+    run fails - but a repository git could not be asked about is said so, because its
+    generated output is then indexed. Input and output are captured: stdout is the JSON-RPC
+    channel, and stdin is the client's.
     """
+    env = {name: value for name, value in os.environ.items() if name not in _GIT_LOCATION_VARIABLES}
+    env |= {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}  # C: the message below is matched
     try:
         listed = subprocess.check_output(
             ["git", "-C", str(root), "ls-files", "--others", "--ignored", "--exclude-standard",
              "--directory", "-z"],
             stdin=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=10,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env=env,
         )  # fmt: skip
+    except FileNotFoundError:
+        if not _in_repository(root):
+            return GitIgnore("no_repository")
+        return _unavailable(root, "git is not installed or not on PATH")
+    except subprocess.CalledProcessError as exc:
+        reason = os.fsdecode(exc.stderr or b"").strip()
+        # Not "not a git repository: <path>", which is a `.git` that names nothing usable.
+        if exc.returncode == 128 and "not a git repository (or any" in reason:
+            return GitIgnore("no_repository")
+        return _unavailable(root, reason.splitlines()[0] if reason else f"exit {exc.returncode}")
     except (OSError, subprocess.SubprocessError) as exc:
-        # Not installed, not a work tree (exit 128), refused or hung: say so once.
-        logger.info("Not using .gitignore for %s: %s", _printable(str(root)), exc)
-        return None
+        return _unavailable(root, str(exc))
     # A root git ignores comes back as `./`, which names no path below it: whoever asked
     # for an ignored directory asked on purpose, and its contents are indexed.
     entries = (os.fsdecode(raw).rstrip("/") for raw in listed.split(b"\0"))
-    return frozenset(_printable(entry) for entry in entries if entry)
+    return GitIgnore("applied", frozenset(_printable(entry) for entry in entries if entry))
+
+
+def _unavailable(root: Path, cause: str) -> GitIgnore:
+    cause = _printable(cause)
+    logger.warning("Not using .gitignore for %s: %s", _printable(str(root)), cause)
+    return GitIgnore("unavailable", cause=cause)
+
+
+def _in_repository(root: Path) -> bool:
+    """Whether a `.git` sits at or above ``root`` - asked only when git itself is missing."""
+    return any(os.path.lexists(directory / ".git") for directory in (root, *root.parents))
 
 
 def iter_markdown_files(
@@ -306,19 +348,42 @@ def _is_walkable(relative_directories: Sequence[str]) -> bool:
     return not any(name in _SKIPPED_DIRECTORIES for name in relative_directories)
 
 
-def _in_nested_checkout(path: Path, root: Path) -> bool:
-    """True when ``path``, or a directory between it and ``root``, holds its own `.git`.
+def _in_linked_worktree(path: Path, root: Path) -> bool:
+    """True when ``path``, or a directory between it and ``root``, is a linked worktree.
 
-    A file for a worktree or submodule, a directory for a nested clone: either way another
-    checkout, whose Markdown is a copy of some other state of the project. ``root`` itself is
-    never asked, so pointing `index_directory` at a worktree still indexes it.
+    A worktree is always a copy of some other state of a repository - the monorepo that
+    prompted this kept 38 of them under `.claude/worktrees/`. ``root`` itself is never asked,
+    so pointing `index_directory` at a worktree still indexes it.
     """
     current = path
     while current != root and current.parent != current:
-        if os.path.lexists(current / ".git"):
+        if _is_linked_worktree(current):
             return True
         current = current.parent
     return False
+
+
+def _is_linked_worktree(directory: Path) -> bool:
+    """Git's own marker: `.git` is a file naming a gitdir, and that gitdir has a `commondir`.
+
+    Positive evidence only. A `.git` directory (a clone, an old-form submodule), a submodule's
+    `.git` file (its gitdir has no `commondir`), a `.git` file that is garbled or points
+    nowhere: none of them is known to be a copy, so none of them is left out on that account.
+    `git worktree add` writes an absolute gitdir; a relative one is relative to the directory.
+    """
+    marker = directory / ".git"
+    try:
+        if not stat.S_ISREG(os.lstat(marker).st_mode):
+            return False
+        with open(marker, "rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+    first = os.fsdecode(head).splitlines()[0] if head else ""
+    named = first.removeprefix("gitdir: ")  # as git's own reader: that prefix, nothing trimmed
+    if named == first or not named:
+        return False
+    return os.path.isfile(directory / named / "commondir")  # an absolute `named` replaces
 
 
 def _encodable(path: str) -> bool:

@@ -12,14 +12,14 @@ back as a few sections, each addressable by its breadcrumb and quoted verbatim.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 15,377
+       alt="One question asked of four documentation files. Reading them whole costs 15,557
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns five sections totalling 2,887 tokens - the
             one that answers is 403.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 15,377 tokens in all:
+`docs/evaluation-protocol.md`, 15,557 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**2,887 tokens instead of 15,377**, and the section that actually answers is 403 - a
+**2,887 tokens instead of 15,557**, and the section that actually answers is 403 - a
 thirty-fourth of what reading the files costs. Every hit carries its full text, so a good
 answer usually needs no follow-up call at all.
 
@@ -175,6 +175,13 @@ walks; what is missed is only the hint that running it is worth it. A zero means
 detected, not that every file was re-hashed. `coverage` stays `"verified"` while the count is
 non-zero: the walk really did finish and really did read every file it found. What moved on
 is the tree, and the message says so.
+
+And it carries `gitignore`: what git said the last time a walk of the root finished -
+`applied`, `off` (switched off), `no_repository` (nothing to ignore), `unknown` (no walk has
+finished since the index was built), or `unavailable`: the root is in a repository git could
+not be asked about - not installed, timed out, refused by `safe.directory` - so what it
+ignores was indexed as well. Only `unavailable` gets a message, and only on a tree that is
+otherwise whole; the server log says why.
 
 ## The embedding model
 
@@ -395,9 +402,11 @@ not copies of it:
 
 - **Built-in skips**: `.git`, `node_modules`, virtualenvs and tool caches are pruned (see
   [Indexing rules](#indexing-rules)).
-- **Other checkouts**: a directory below the root that holds a `.git` entry - a file for a
-  worktree or submodule, a directory for a nested clone - is not entered. The root itself
-  always is, so pointing a server at a worktree indexes that worktree.
+- **Linked worktrees**: a directory below the root that `git worktree add` made - its `.git`
+  file names a gitdir holding a `commondir` - is not entered: it is a copy of some state of
+  the repository. The root itself always is, so pointing a server at a worktree indexes that
+  worktree. Submodules and nested clones are not copies and are indexed, unless git ignores
+  them; their *own* `.gitignore` is not read, so exclude their generated output yourself.
 - **What git ignores**: inside a git repository, paths `git ls-files --others --ignored
   --exclude-standard` names are left out, so generated output and caches are too. Tracked
   files are never ignored, and git's paths are matched literally (`[id]/` is a directory

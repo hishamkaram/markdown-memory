@@ -390,6 +390,27 @@ class TestMigrationInvalidatesTheIndex:
             conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
             conn.execute("PRAGMA user_version = 2")
 
+    def test_a_v6_database_keeps_its_certificates_and_knows_nothing_of_git(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        """0.1.2's schema. A root it vouched for still is; what git said is `unknown` until a
+        walk finishes, rather than a guess at what 0.1.2 was told."""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("# A\n\nalpha body\n")
+        path = tmp_path / "v6.db"
+        with Database(path) as database:
+            Indexer(database, fake_embedder).index_directory(docs)
+        with Database(path) as database:  # rewind to what v6 left behind
+            conn = database.connection()
+            conn.execute("ALTER TABLE index_coverage DROP COLUMN gitignore")
+            conn.execute("PRAGMA user_version = 6")
+
+        with Database(path) as migrated:
+            assert migrated.integrity_problems() == []
+            status = migrated.index_status(str(docs))
+            assert (status.verified, status.gitignore) == (True, "unknown")
+
     def test_a_v4_database_keeps_its_documents_and_learns_to_time_them(
         self, tmp_path: Path, fake_embedder: FakeEmbedder
     ) -> None:
@@ -409,6 +430,7 @@ class TestMigrationInvalidatesTheIndex:
             conn = database.connection()
             conn.execute("ALTER TABLE documents DROP COLUMN mtime_ns")
             conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
+            conn.execute("ALTER TABLE index_coverage DROP COLUMN gitignore")
             conn.execute("PRAGMA user_version = 4")
 
         with Database(path) as migrated:
@@ -1547,6 +1569,28 @@ class TestOnlyAWholeWalkVouchesForATree:
         finally:
             broken.chmod(0o644)
 
+    def test_a_failure_inside_an_excluded_directory_goes_once_its_file_is_deleted(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """Deleted, then excluded: the row goes by evidence rather than by scope, and a
+        deleted file is the one gap the inner root recorded, so its certificate may stand."""
+        drafts = tmp_path / "drafts"
+        drafts.mkdir()
+        (tmp_path / "good.md").write_text("# Good\n\nreadable\n")
+        broken = drafts / "bad.md"
+        broken.write_text("# Bad\n\nbody\n")
+        broken.chmod(0o000)
+        try:
+            Indexer(db, fake_embedder).index_directory(drafts)
+            assert len(db.index_status(str(drafts)).failures) == 1
+        finally:
+            broken.chmod(0o644)
+        broken.unlink()
+
+        Indexer(db, fake_embedder, exclude=("drafts",)).index_directory(tmp_path)
+        assert db.index_status(str(tmp_path)).failures == ()
+        assert db.index_status(str(tmp_path)).verified
+
     def test_a_failure_out_of_the_walk_s_reach_goes_when_the_file_does(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
@@ -1750,7 +1794,7 @@ class TestOnlyAWholeWalkVouchesForATree:
         Indexer(db, fake_embedder).index_directory(tmp_path)
         generation = db.generation()
         db.clear()  # the wholesale discard, mid-scan
-        db.mark_scan_complete(str(tmp_path), generation)
+        db.mark_scan_complete(str(tmp_path), generation, "applied")
         assert not db.index_status(str(tmp_path)).verified, "it vouched for an emptied index"
 
     def test_the_scan_lock_is_exclusive_not_merely_held(
@@ -1819,6 +1863,7 @@ class TestPerDocumentWeights:
         with Database(path) as database:
             conn = database.connection()
             conn.execute("ALTER TABLE documents DROP COLUMN weights_revision")
+            conn.execute("ALTER TABLE index_coverage DROP COLUMN gitignore")
             conn.execute("PRAGMA user_version = 5")
 
     @staticmethod

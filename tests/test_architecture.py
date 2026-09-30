@@ -32,7 +32,7 @@ BUDGETS = {
     "autoindex.py": 130,
     "config.py": 138,
     "db.py": 1205,  # the outlier, grandfathered
-    "discovery.py": 180,
+    "discovery.py": 210,
     "embedders.py": 366,
     "exceptions.py": 16,
     "freshness.py": 69,

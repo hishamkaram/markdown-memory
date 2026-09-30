@@ -47,7 +47,7 @@ from markdown_memory.models import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_DIM = 384
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: How a section's vector is built. 1 embedded the whole section text, truncated at the
 #: model's token limit; 2 is the mean of the section's passage vectors. Stored per document
@@ -525,6 +525,11 @@ class Database:
                             "until index_directory re-embeds them.",
                         )
                     applied.append(6)
+                if current < 7:
+                    # What git said about a root the last time a walk of it finished. NULL is
+                    # "unknown": nothing has walked it since, so nothing is claimed.
+                    tx.execute("ALTER TABLE index_coverage ADD COLUMN gitignore TEXT")
+                    applied.append(7)
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
@@ -679,7 +684,7 @@ class Database:
                 (root,),
             )
 
-    def mark_scan_complete(self, root: str, generation: int) -> None:
+    def mark_scan_complete(self, root: str, generation: int, gitignore: str) -> None:
         """A full walk of ``root`` ran to the end.
 
         Not "and everything was readable" - that is what `index_failures` is for, and
@@ -707,9 +712,9 @@ class Database:
                 # measured describes a database that no longer exists.
                 return
             conn.execute(
-                "INSERT INTO index_coverage(root, verified) VALUES (?, 1) "
-                "ON CONFLICT(root) DO UPDATE SET verified = 1",
-                (root,),
+                "INSERT INTO index_coverage(root, verified, gitignore) VALUES (?, 1, ?) "
+                "ON CONFLICT(root) DO UPDATE SET verified = 1, gitignore = excluded.gitignore",
+                (root, gitignore),
             )
 
     def revoke_coverage(self, conn: sqlite3.Connection | None = None) -> None:
@@ -762,7 +767,7 @@ class Database:
                     (named, prefix, prefix),
                 ).fetchall()
                 certificate = conn.execute(
-                    "SELECT verified FROM index_coverage WHERE root = ?", (root,)
+                    "SELECT verified, gitignore FROM index_coverage WHERE root = ?", (root,)
                 ).fetchone()
                 # In the same snapshot as the rest: a verdict that mixes one moment's
                 # certificate with another's provenance describes no moment at all.
@@ -807,6 +812,7 @@ class Database:
             failures=failures,
             stale_vectors=stale_vectors,
             weights_mismatch=weights_mismatch,
+            gitignore=str(certificate[1]) if certificate and certificate[1] else "unknown",
         )
 
     def dismiss_notices(self, keys: Iterable[str]) -> None:

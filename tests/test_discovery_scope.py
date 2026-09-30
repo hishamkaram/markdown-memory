@@ -22,6 +22,7 @@ from markdown_memory.config import ServerConfig, resolve_config
 from markdown_memory.db import Database
 from markdown_memory.exceptions import DatabaseError, IndexCancelled
 from markdown_memory.indexer import Indexer
+from markdown_memory.models import IndexStatus
 from markdown_memory.server import MarkdownMemoryService
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
@@ -52,30 +53,101 @@ def _indexed(db: Database, root: Path) -> list[str]:
     return sorted(os.path.relpath(path, root) for path in db.document_hashes(str(root)))
 
 
+def _linked_worktree(directory: Path, repository: Path, *, relative: bool = False) -> None:
+    """What `git worktree add` leaves: a `.git` file naming a gitdir that has a `commondir`."""
+    gitdir = repository / ".git" / "worktrees" / directory.name
+    gitdir.mkdir(parents=True)
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    named = os.path.relpath(gitdir, directory) if relative else str(gitdir)
+    (directory / ".git").write_text(f"gitdir: {named}\n", encoding="utf-8")
+
+
 class TestOtherCheckouts:
-    def test_a_worktree_and_a_nested_clone_are_left_out_and_their_copies_purged(
-        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    @pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+    def test_a_linked_worktree_is_left_out_and_its_copies_purged(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, relative: bool
     ) -> None:
         _write(tmp_path / "docs" / "a.md")
         worktree = _write(tmp_path / ".claude" / "worktrees" / "wt" / "docs" / "a.md").parents[1]
-        clone = _write(tmp_path / "vendor-clone" / "README.md").parent
         Indexer(db, fake_embedder).index_directory(tmp_path)
-        assert len(_indexed(db, tmp_path)) == 3  # what 0.1.1 left behind
+        assert len(_indexed(db, tmp_path)) == 2  # what 0.1.1 left behind
 
-        (worktree / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")  # a file
-        (clone / ".git").mkdir()  # a directory
+        _linked_worktree(worktree, tmp_path / "elsewhere", relative=relative)
         report = Indexer(db, fake_embedder).index_directory(tmp_path)
         assert _indexed(db, tmp_path) == ["docs/a.md"]
-        assert report.files_purged == 2
+        assert report.files_purged == 1
+        assert db.index_status(str(tmp_path)).verified, "the upgrade did not converge"
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "submodule",
+            "clone",
+            "garbled",
+            "empty",
+            "dangling",
+            "commondir-directory",
+            "no-path",
+            "no-space",
+            "bare-path",
+            "leading-space",
+        ],
+    )
+    def test_a_checkout_not_known_to_be_a_copy_is_indexed(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, shape: str
+    ) -> None:
+        """A `docs/` submodule or a hub of clones is content; 0.1.2 dropped it without a word."""
+        _write(tmp_path / "docs" / "a.md")
+        nested = _write(tmp_path / "sub" / "guide.md").parent
+        modules = tmp_path / ".git" / "modules" / "sub"
+        if shape == "submodule":  # its gitdir is a whole repository: no `commondir`
+            modules.mkdir(parents=True)
+            (nested / ".git").write_text("gitdir: ../.git/modules/sub\n", encoding="utf-8")
+        elif shape == "clone":
+            (nested / ".git").mkdir()
+        elif shape == "garbled":
+            (nested / ".git").write_bytes(b"\xff\x00 not a gitfile\n")
+        elif shape == "empty":
+            (nested / ".git").write_bytes(b"")
+        elif shape in ("no-path", "no-space", "bare-path", "leading-space"):  # not a gitfile
+            (nested / "commondir").write_text("..\n", encoding="utf-8")
+            (modules / "commondir").parent.mkdir(parents=True)
+            (modules / "commondir").write_text("../..\n", encoding="utf-8")
+            named = {
+                "no-path": "gitdir: ",
+                "no-space": f"gitdir:{modules}",
+                "leading-space": f" gitdir: {modules}",
+            }.get(shape, str(modules))
+            named += "\n"
+            (nested / ".git").write_text(named, encoding="utf-8")
+        elif shape == "dangling":  # a worktree whose gitdir was pruned away
+            (nested / ".git").write_text(f"gitdir: {tmp_path / 'gone'}\n", encoding="utf-8")
+        else:
+            (modules / "commondir").mkdir(parents=True)
+            (nested / ".git").write_text(f"gitdir: {modules}\n", encoding="utf-8")
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        assert _indexed(db, tmp_path) == ["docs/a.md", "sub/guide.md"]
 
     def test_a_checkout_pointed_at_directly_is_still_indexed(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
         worktree = tmp_path / "wt"
         _write(worktree / "guide.md")
-        (worktree / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+        _linked_worktree(worktree, tmp_path / "repo")
         Indexer(db, fake_embedder).index_directory(worktree)
         assert _indexed(db, worktree) == ["guide.md"]
+
+    @needs_git
+    def test_a_real_git_worktree_is_left_out(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = _repo(tmp_path / "repo", "")
+        _write(root / "docs" / "a.md")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "one")
+        _git(root, "worktree", "add", "-q", "wt", "-b", "wt")  # below the root, not ignored
+        Indexer(db, fake_embedder).index_directory(root)
+        assert _indexed(db, root) == ["docs/a.md"]
 
 
 @needs_git
@@ -132,41 +204,153 @@ class TestGitIgnore:
         assert _indexed(db, root) == ["docs/a.md", "node_modules/pkg/README.md"]
 
 
-class TestWithoutGit:
-    """The fallback: whatever keeps git from answering, the walk is what it was before."""
+def _git_answers(monkeypatch: pytest.MonkeyPatch, failure: Exception) -> list[object]:
+    calls: list[object] = []
 
+    def refuse(*args: object, **kwargs: object) -> bytes:
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(subprocess, "check_output", refuse)
+    return calls
+
+
+class TestWhatGitSaid:
+    """Whatever keeps git from answering, the walk is what it was before git was asked - and
+    a repository git could not be asked about is said to be one."""
+
+    @needs_git
     def test_outside_a_repository_nothing_changes(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
     ) -> None:
-        assert discovery.git_ignored(tmp_path) is None
+        assert discovery.git_ignored(tmp_path).state == "no_repository"
         _write(tmp_path / "gen" / "api.md")
         Indexer(db, fake_embedder).index_directory(tmp_path)
         assert _indexed(db, tmp_path) == ["gen/api.md"]
+        status = db.index_status(str(tmp_path))
+        assert (status.gitignore, status.message()) == ("no_repository", None)
 
     @pytest.mark.parametrize(
-        "failure",
-        [FileNotFoundError("git"), subprocess.TimeoutExpired("git", 10)],
-        ids=["not-installed", "hung"],
+        ("failure", "repository", "state"),
+        [
+            (FileNotFoundError("git"), True, "unavailable"),
+            (FileNotFoundError("git"), False, "no_repository"),
+            (subprocess.TimeoutExpired("git", 10), True, "unavailable"),
+            (
+                subprocess.CalledProcessError(
+                    128, "git", stderr=b"fatal: detected dubious ownership in repository at '/r'\n"
+                ),
+                True,
+                "unavailable",
+            ),
+            (
+                subprocess.CalledProcessError(
+                    128,
+                    "git",
+                    stderr=b"fatal: not a git repository (or any of the parent "
+                    b"directories): .git\n",
+                ),
+                False,
+                "no_repository",
+            ),
+            (
+                subprocess.CalledProcessError(
+                    128, "git", stderr=b"fatal: not a git repository: /r/.git/worktrees/gone\n"
+                ),
+                True,
+                "unavailable",
+            ),
+        ],
+        ids=[
+            "not-installed",
+            "not-installed-no-repo",
+            "hung",
+            "refused",
+            "not-a-repo",
+            "bad-gitfile",
+        ],
     )
-    def test_git_missing_or_hung_is_no_answer_not_a_failed_run(
+    def test_a_failed_git_is_no_answer_and_says_so_only_for_a_repository(
         self,
         db: Database,
         fake_embedder: FakeEmbedder,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         failure: Exception,
+        repository: bool,
+        state: str,
     ) -> None:
-        def refuse(*args: object, **kwargs: object) -> bytes:
-            raise failure
-
-        monkeypatch.setattr(subprocess, "check_output", refuse)
+        _git_answers(monkeypatch, failure)
+        if repository:
+            (tmp_path / ".git").mkdir()
+        else:  # whatever lies above the test's temporary directory is not the test's
+            monkeypatch.setattr(discovery, "_in_repository", lambda root: False)
         _write(tmp_path / "a.md")
         try:
             report = Indexer(db, fake_embedder).index_directory(tmp_path)
         except (OSError, subprocess.SubprocessError) as exc:
             raise AssertionError("asking git took the whole run down") from exc
-        assert report.errors == ()
-        assert _indexed(db, tmp_path) == ["a.md"]
+        assert (report.errors, _indexed(db, tmp_path)) == ((), ["a.md"])
+        status = db.index_status(str(tmp_path))
+        assert status.verified
+        assert status.gitignore == state
+        said = [note for note in report.notes if "git could not list" in note]
+        message = status.message() or ""
+        if state == "unavailable":
+            assert len(said) == 1, "a manual run was not told"
+            assert "git could not list" in message, "the agent was not told"
+        else:
+            assert said == [], "a folder that is no repository was warned about"
+            assert message == ""
+
+    def test_switched_off_git_is_never_asked(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = _git_answers(monkeypatch, FileNotFoundError("git"))
+        (tmp_path / ".git").mkdir()
+        _write(tmp_path / "a.md")
+        Indexer(db, fake_embedder, gitignore=False).index_directory(tmp_path)
+        assert calls == []
+        assert db.index_status(str(tmp_path)).gitignore == "off"
+
+    def test_the_state_is_the_last_finished_walks(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _git_answers(monkeypatch, subprocess.TimeoutExpired("git", 10))
+        (tmp_path / ".git").mkdir()
+        _write(tmp_path / "a.md")
+        assert db.index_status(str(tmp_path)).gitignore == "unknown"
+        Indexer(db, fake_embedder).index_directory(tmp_path)
+        assert db.index_status(str(tmp_path)).gitignore == "unavailable"
+        db.revoke_coverage()  # the index was discarded: nothing walked what is there now
+        assert db.index_status(str(tmp_path)).gitignore == "unknown"
+
+    def test_only_a_whole_tree_mentions_git(self) -> None:
+        """Missing files outrank extra ones: the unverified messages say more that matters."""
+        assert "git could not list" in (
+            IndexStatus(verified=True, gitignore="unavailable").message() or ""
+        )
+        assert IndexStatus(verified=True, gitignore="applied").message() is None
+        assert "git" not in (IndexStatus(verified=False, gitignore="unavailable").message() or "")
+
+    @needs_git
+    def test_a_git_hook_s_environment_does_not_choose_the_repository(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _repo(tmp_path / "root", "gen/\n")
+        _write(root / "gen" / "api.md")
+        other = _repo(tmp_path / "other", "")
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(other))
+        assert discovery.git_ignored(root).ignored == frozenset({"gen"})
 
     def test_the_server_passes_the_switch_to_its_indexer(self, tmp_path: Path) -> None:
         config = ServerConfig(db_path=tmp_path / "i.db", docs_dir=tmp_path, gitignore=False)
@@ -182,6 +366,33 @@ class TestWithoutGit:
         assert resolve_config(gitignore=True).gitignore, "an explicit choice wins"
         monkeypatch.delenv("MARKDOWN_MEMORY_GITIGNORE")
         assert ServerConfig.from_env().gitignore
+
+
+@needs_git
+class TestHostileNames:
+    """git's paths come back NUL-separated and byte-exact (`-z`), so no name is special."""
+
+    def test_a_newline_in_an_ignored_name_is_still_ignored(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = _repo(tmp_path / "repo", "gen*/\nnote*.md\n")
+        _write(root / "docs" / "a.md")
+        _write(root / "gen\nout" / "api.md")
+        _write(root / "note\nb.md")
+        Indexer(db, fake_embedder).index_directory(root)
+        assert _indexed(db, root) == ["docs/a.md"]
+
+    @pytest.mark.skipif(sys.platform == "darwin", reason="APFS refuses names that are not UTF-8")
+    def test_an_ignored_name_that_is_not_utf8_is_neither_indexed_nor_a_failure(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        root = _repo(tmp_path / "repo", "*-gen.md\n")
+        _write(root / "docs" / "a.md")
+        (root / os.fsdecode(b"\xff-gen.md")).write_text("# Gen\n\nbody\n", encoding="utf-8")
+        report = Indexer(db, fake_embedder).index_directory(root)
+        assert _indexed(db, root) == ["docs/a.md"]
+        assert report.errors == ()
+        assert db.index_status(str(root)).verified
 
 
 class TestSymlinkedFiles:
