@@ -144,8 +144,8 @@ class TestDocsMatchTheCode:
         queries = json.loads((ROOT / "scripts/eval_data/queries.json").read_text())
         counts = {f"{s}/{k}": len(v) for s in ("dev", "held_out") for k, v in queries[s].items()}
         assert counts == {
-            "dev/paraphrase": 34, "dev/identifier": 10,
-            "held_out/paraphrase": 34, "held_out/identifier": 8,
+            "dev/paraphrase": 34, "dev/identifier": 10, "dev/no_answer": 4,
+            "held_out/paraphrase": 34, "held_out/identifier": 8, "held_out/no_answer": 4,
         }  # fmt: skip
         skill = all_agent_text()[".claude/skills/run-eval/SKILL.md"]
         assert f"{counts['dev/paraphrase']} paraphrase queries in each split" in skill
@@ -156,6 +156,19 @@ class TestDocsMatchTheCode:
             (counts["held_out/identifier"], "12.5pp"),
         ):
             assert f"{100 / size:g}".rstrip("0") in weight and weight in skill
+
+    def test_the_no_answer_stratum_is_the_one_the_protocol_asks_for(self) -> None:
+        """#41: 5-10% of each split, unlabelled, of both shapes (evaluation-protocol.md)."""
+        queries = json.loads((ROOT / "scripts/eval_data/queries.json").read_text())
+        for split in ("dev", "held_out"):
+            cases = queries[split]["no_answer"]
+            total = sum(len(v) for v in queries[split].values())
+            assert 0.05 <= len(cases) / total <= 0.10, (split, len(cases), total)
+            assert all("expected" not in case and case["query"].strip() for case in cases)
+            assert {case["shape"] for case in cases} == {"identifier", "question"}, split
+        skill = all_agent_text()[".claude/skills/run-eval/SKILL.md"]
+        assert f"{len(queries['dev']['no_answer'])} queries per split" in skill
+        assert len(queries["dev"]["no_answer"]) == len(queries["held_out"]["no_answer"])
 
     def test_documented_baseline_is_the_frozen_baseline(self) -> None:
         baseline = json.loads((ROOT / "scripts/eval_data/baseline.json").read_text())

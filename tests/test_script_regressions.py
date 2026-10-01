@@ -27,6 +27,7 @@ from markdown_memory.db import Database
 from markdown_memory.models import (
     FileFailure,
     IndexReport,
+    SearchPage,
     SearchResult,
     estimate_tokens,
 )
@@ -94,6 +95,10 @@ class _EvalStubService:
         self.searched.append(query)
         return []
 
+    def search_page(self, query: str, limit: int = 5) -> SearchPage:
+        self.searched.append(query)
+        return SearchPage((), "no_match")
+
     def close(self) -> None:
         self.closed = True
 
@@ -126,7 +131,18 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
             code = evaluation.main()  # type: ignore[attr-defined]
         finally:
             logging.disable(logging.NOTSET)  # main() disables logging process-wide
-        return code, json.loads(baseline.read_text())["embeddinggemma"]
+        fixture = json.loads((evaluation.DATA / "queries.json").read_text())  # type: ignore[attr-defined]
+        unanswerable = {
+            c["query"] for split in ("dev", "held_out") for c in fixture[split]["no_answer"]
+        }
+        # The no-answer pass ran rather than failing quietly inside its informational guard.
+        assert unanswerable and unanswerable <= set(stub.searched)
+        recorded = json.loads(baseline.read_text())["embeddinggemma"]
+        # ...and never reached the baseline: only the four answerable sets are recorded.
+        assert set(recorded) == {
+            "dev/paraphrase", "dev/identifier", "held_out/paraphrase", "held_out/identifier"
+        }  # fmt: skip
+        return code, recorded
 
     def test_a_regressed_run_leaves_the_frozen_baseline_alone(
         self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -157,8 +173,8 @@ _COST_CORPUS = {
 def _queries(*labels: str) -> dict[str, dict[str, list[dict[str, object]]]]:
     cases: list[dict[str, object]] = [{"query": label, "expected": label} for label in labels]
     return {
-        "dev": {"paraphrase": cases, "identifier": []},
-        "held_out": {"paraphrase": [], "identifier": []},
+        "dev": {"paraphrase": cases, "identifier": [], "no_answer": []},
+        "held_out": {"paraphrase": [], "identifier": [], "no_answer": []},
     }
 
 
@@ -341,6 +357,161 @@ class TestTheCostReport:
 
     def test_p95_is_the_same_rule_for_latency_and_cost(self, evaluation: object) -> None:
         assert evaluation._p95([float(n) for n in range(1, 21)]) == 19.0  # type: ignore[attr-defined]
+
+
+class TestTheNoAnswerStratum:
+    """#41: queries the corpus cannot answer, scored by abstention - reported, never gated."""
+
+    @pytest.fixture
+    def evaluation(self) -> object:
+        # By name, not by path: the mutation check points `pythonpath` at its mutated copy.
+        import eval_retrieval
+
+        return eval_retrieval
+
+    @staticmethod
+    def with_cases(*cases: dict[str, object]) -> dict[str, dict[str, list[dict[str, object]]]]:
+        queries = _queries()
+        queries["dev"]["no_answer"] = list(cases)
+        return queries
+
+    def test_resolving_labels_skips_cases_that_have_none(
+        self, evaluation: object, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Guide\n\n## Setup\n\ninstall it\n", encoding="utf-8")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "r.db", docs_dir=root), embedder=fake_embedder
+        )
+        try:
+            service.index_directory()
+            queries = self.with_cases({"query": "ECONNRESET", "shape": "identifier"})
+            queries["dev"]["paraphrase"] = [{"query": "setup", "expected": "Guide > Setup"}]
+            answers = evaluation.resolve_answers(service, queries)  # type: ignore[attr-defined]
+        finally:
+            service.close()
+        assert set(answers) == {"Guide > Setup"}
+
+    def test_the_default_call_is_measured_per_shape(
+        self, evaluation: object, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Guide\n\n## Setup\n\ninstall it\n", encoding="utf-8")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "m.db", docs_dir=root), embedder=fake_embedder
+        )
+        try:
+            service.index_directory()
+            measured = evaluation.measure_no_answer(  # type: ignore[attr-defined]
+                service,
+                self.with_cases(
+                    {"query": "ECONNRESET", "shape": "identifier"},
+                    {"query": "install", "shape": "question"},
+                ),
+            )
+        finally:
+            service.close()
+        identifier, question = measured["dev/identifier"], measured["dev/question"]
+        assert identifier.queries == ("ECONNRESET",) and identifier.no_match == (True,)
+        assert identifier.hits[0] > 0, "nothing abstains yet: the neighbours come back"
+        assert question.queries == ("install",) and question.no_match == (False,)
+        assert measured["held_out/identifier"].queries == ()
+
+    def test_the_report_counts_an_empty_page_as_abstaining(
+        self, evaluation: object, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        no_answer = evaluation.NoAnswer  # type: ignore[attr-defined]
+        empty = no_answer(queries=(), hits=(), no_match=())
+        measured = {
+            "dev/identifier": no_answer(queries=("A", "B"), hits=(0, 3), no_match=(True, True)),
+            "dev/question": no_answer(queries=("c d",), hits=(5,), no_match=(False,)),
+            "held_out/identifier": empty,
+            "held_out/question": empty,
+        }
+        evaluation.print_no_answer(measured, show_misses=True)  # type: ignore[attr-defined]
+        out = capsys.readouterr().out
+        assert "dev identifier           2        50%      100%" in out
+        assert "dev all                  3        33%       67%" in out
+        assert "held_out" not in out.split("miss")[0], "a set with no cases prints no rate"
+        assert "miss [dev/no_answer identifier] 3 hits: B" in out
+        assert "hits: A" not in out, "an abstention is not a miss"
+
+    def test_the_fixture_guard_finds_a_query_the_corpus_contains(
+        self, evaluation: object, tmp_path: Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "a.md").write_text("Set `enable_tls_v2` and enable_tls.\n", encoding="utf-8")
+        check = evaluation.check_no_answer  # type: ignore[attr-defined]
+        with pytest.raises(SystemExit, match="is in the corpus"):
+            check(self.with_cases({"query": "--enable-tls", "shape": "identifier"}), corpus)
+        # A longer identifier that contains it is not the same token run.
+        check(self.with_cases({"query": "--enable-tls-v", "shape": "identifier"}), corpus)
+
+    def test_the_fixture_guard_rejects_a_malformed_case(
+        self, evaluation: object, tmp_path: Path
+    ) -> None:
+        check = evaluation.check_no_answer  # type: ignore[attr-defined]
+        for case in (
+            {"query": "X", "shape": "identifier", "expected": "Some > Section"},
+            {"query": "X", "shape": "paraphrase"},
+            {"query": "--", "shape": "identifier"},
+        ):
+            with pytest.raises(SystemExit, match="malformed"):
+                check(self.with_cases(case), tmp_path)
+
+    def test_the_fixture_guard_reads_no_corpus_without_cases(
+        self, evaluation: object, tmp_path: Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "gone.md").symlink_to(tmp_path / "nowhere.md")  # unreadable if read at all
+        evaluation.check_no_answer(_queries(), corpus)  # type: ignore[attr-defined]
+
+    def test_a_no_answer_query_the_corpus_contains_stops_the_run_before_any_search(
+        self, evaluation: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = TestTheCostReport.isolate(evaluation, tmp_path, monkeypatch)
+        queries = self.with_cases({"query": "ECONNRESET", "shape": "identifier"})
+        (evaluation.DATA / "queries.json").write_text(json.dumps(queries))  # type: ignore[attr-defined]
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "a.md").write_text("# Errors\n\nECONNRESET means the peer hung up.\n")
+        monkeypatch.setattr(evaluation, "CORPUS", corpus)
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+        passing = _passing_scores(evaluation)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+        try:
+            with pytest.raises(SystemExit, match="is in the corpus"):
+                evaluation.main()  # type: ignore[attr-defined]
+        finally:
+            logging.disable(logging.NOTSET)
+        assert stub.searched == [], "the fixture was checked only after searching"
+
+    def test_a_no_answer_pass_that_fails_does_not_decide_the_exit_code(
+        self,
+        evaluation: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        TestTheCostReport.isolate(evaluation, tmp_path, monkeypatch)
+        passing = _passing_scores(evaluation)
+        monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: passing)
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+
+        def broken(*_args: object) -> dict[str, object]:
+            raise RuntimeError("no-answer pass exploded")
+
+        monkeypatch.setattr(evaluation, "measure_no_answer", broken)
+        try:
+            code = evaluation.main()  # type: ignore[attr-defined]
+        finally:
+            logging.disable(logging.NOTSET)
+        assert code == 0
+        assert "no-answer stratum: not measured" in capsys.readouterr().out
 
 
 class TestEvalIndexCache:

@@ -8,7 +8,9 @@ description: Run the markdown-memory retrieval benchmark, check the accuracy gat
 Scores the **shipped** `search_docs` pipeline against the frozen corpus
 (`scripts/eval_data/corpus/`, 54 sections) and the labelled queries in
 `scripts/eval_data/queries.json`: 34 paraphrase queries in each split, plus 10 dev and
-8 held-out identifier queries.
+8 held-out identifier queries. A separate no-answer stratum - 4 queries per split the corpus
+cannot answer - is reported by how often the default call abstains; it never gates, and at
+that size a change of one query is 25pp.
 
 ## Run
 
