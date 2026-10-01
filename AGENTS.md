@@ -51,8 +51,9 @@ Work in this order:
    A `(Part n)` pointer also carries `part_preview`, how that part begins, so parts of one
    split section can be told apart before reading any of them.
    `keyword_match` says whether keyword search found the query's terms; when it is
-   `"no_match"`, no section contains them, so report an identifier looked up that way as
-   undocumented rather than answering from the hits, which are only semantic neighbours.
+   `"no_match"`, no indexed section contains them: a query of identifiers alone then returns
+   no results, and any other query's hits are only semantic neighbours. Report such an
+   identifier as not in the indexed documentation rather than answering from neighbours.
    When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it. When `index_status.changed_files` is non-zero,

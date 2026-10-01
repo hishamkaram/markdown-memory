@@ -390,15 +390,15 @@ async def test_hits_after_the_first_are_pointers_that_read_section_follows(
         )
 
 
-async def test_an_absent_identifier_says_its_hits_are_only_neighbours(
+async def test_an_absent_identifier_abstains_and_says_why(
     server: MCPServer[None], docs_dir: Path
 ) -> None:
-    """#37 (#33's `maxItemErrors`): hits for a term no section contains must not read as matches."""
+    """#33's `maxItemErrors`: #37 said no section contains it, #38 stops handing out neighbours."""
     await call(server, "index_directory", directory=str(docs_dir))
     answer = await call(server, "search_docs", query="maxItemErrors")
-    assert answer["results"], "the semantic neighbours still come back"
+    assert answer["results"] == [], "an identifier nothing contains gets no neighbours"
     assert answer["keyword_match"] == "no_match"
-    assert "contains any of the searched terms" in answer["keyword_message"]
+    assert "not in the indexed documentation" in answer["keyword_message"]
     assert list(answer) == ["results", "keyword_match", "keyword_message", "index_status"]
 
 

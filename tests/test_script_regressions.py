@@ -415,7 +415,7 @@ class TestTheNoAnswerStratum:
             service.close()
         identifier, question = measured["dev/identifier"], measured["dev/question"]
         assert identifier.queries == ("ECONNRESET",) and identifier.no_match == (True,)
-        assert identifier.hits[0] > 0, "nothing abstains yet: the neighbours come back"
+        assert identifier.hits == (0,), "#38: an identifier nothing contains abstains"
         assert question.queries == ("install",) and question.no_match == (False,)
         assert measured["held_out/identifier"].queries == ()
 

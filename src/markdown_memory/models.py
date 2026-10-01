@@ -244,6 +244,14 @@ _KEYWORD_MESSAGES: dict[KeywordMatch, str] = {
     "no_terms": "The query has no searchable terms: any hits are semantic neighbours only.",
     "unavailable": "Keyword search failed for this query: any hits are semantic neighbours only.",
 }
+# The page a lookup of identifiers nothing contains gets instead of their neighbours. It
+# speaks of the index only: a file created since the last walk is in no status count.
+_ABSTAINED = (
+    "No section in the current index contains any of the searched terms, so no hits are "
+    "returned: an identifier looked up this way is not in the indexed documentation (a file "
+    "added since the last index run would not be searched yet). If it abbreviates a concept, "
+    "search again in plain words."
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,6 +267,8 @@ class SearchPage:
     keyword_match: KeywordMatch
 
     def keyword_message(self) -> str | None:
+        if self.keyword_match == "no_match" and not self.results:
+            return _ABSTAINED
         return _KEYWORD_MESSAGES.get(self.keyword_match)
 
 
