@@ -26,6 +26,20 @@ def estimate_tokens(text: str) -> int:
     return max(1, -(-len(text) // CHARS_PER_TOKEN))
 
 
+PART_PREVIEW_CHARS = 100  # ~25 tokens: enough to tell one part of a split section from another
+
+
+def preview(text: str, limit: int = PART_PREVIEW_CHARS) -> str:
+    """``text`` cut to ``limit`` characters at a word boundary, marked with an ellipsis.
+
+    Text without whitespace to cut at - a long URL or identifier - is cut at ``limit`` itself.
+    """
+    if len(text) <= limit:
+        return text
+    cut = next((i for i in range(limit, 0, -1) if text[i].isspace()), 0)
+    return text[: cut or limit].rstrip() + "…"
+
+
 def part_path(base_path: str, part_index: int) -> str:
     """Breadcrumb for one part of an oversized section, e.g. ``A > B (Part 2)``."""
     return f"{base_path} (Part {part_index})"
@@ -179,6 +193,7 @@ class SearchResult:
     fts_rank: int | None
     vec_rank: int | None
     matched_passage: str | None = None
+    part_preview: str | None = None  # how one part of a split section begins
 
     def to_dict(self) -> JsonDict:
         payload: JsonDict = {
@@ -197,7 +212,7 @@ class SearchResult:
         return payload
 
     def to_pointer(self) -> JsonDict:
-        """Where a lower-ranked hit is, what reading it costs, and why it matched - not its text.
+        """Where a lower-ranked hit is, what reading it costs, and why it matched - not its content.
 
         `heading_path` is what `read_section` takes, verbatim: for one part of a split section it
         names that part, while the base path would reassemble every part and cost more than
@@ -212,6 +227,8 @@ class SearchResult:
         }
         if self.matched_passage is not None:
             pointer["matched_passage"] = self.matched_passage
+        if self.part_preview is not None:
+            pointer["part_preview"] = self.part_preview
         return pointer
 
 

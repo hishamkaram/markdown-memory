@@ -421,6 +421,8 @@ async def test_a_pointer_to_a_split_part_reads_that_part_not_the_whole(
             heading_path=pointer["heading_path"],
         )
         assert estimate_tokens(text) == pointer["tokens"] < estimate_tokens(whole)
+        # #39: the part says how it begins, so the pointers can be told apart before reading.
+        assert pointer["part_preview"].startswith("Paragraph "), pointer
 
 
 async def test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it(

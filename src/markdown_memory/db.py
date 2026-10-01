@@ -1330,6 +1330,21 @@ class Database:
             ).fetchone()
         return int(row[0])
 
+    def first_passages(self, section_ids: Sequence[int]) -> dict[int, str]:
+        """Each section's first passage (ordinal 0), as the parser stored it: plain text."""
+        passages: dict[int, str] = {}
+        with self._reading() as conn:
+            for start in range(0, len(section_ids), _SQL_VARIABLE_BATCH):
+                batch = section_ids[start : start + _SQL_VARIABLE_BATCH]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    "SELECT section_id, content FROM units "
+                    f"WHERE section_id IN ({placeholders}) AND ordinal = 0",
+                    tuple(batch),
+                ).fetchall()
+                passages.update((int(section_id), str(text)) for section_id, text in rows)
+        return passages
+
     def sections_with_passages(self, section_ids: Sequence[int]) -> set[int]:
         """The subset of ``section_ids`` that has a body (heading-only sections have none)."""
         if not section_ids:

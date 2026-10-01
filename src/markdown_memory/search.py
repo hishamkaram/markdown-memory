@@ -25,7 +25,7 @@ from typing import NoReturn, TypeVar
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
-from markdown_memory.models import KeywordMatch, SearchPage, SearchResult
+from markdown_memory.models import KeywordMatch, SearchPage, SearchResult, preview
 
 logger = logging.getLogger(__name__)
 
@@ -310,16 +310,23 @@ class HybridSearcher:
             # Deleted by a concurrent re-index between ranking and fetch: the next-best
             # candidates fill the page instead of leaving it short.
             hydrated.update(self._db.get_sections_with_documents(ordered[limit:]))
-        results: list[SearchResult] = []
+        page: list[int] = []
         stale = False
         for section_id in ordered:
-            if len(results) == limit:
+            if len(page) == limit:
                 break
-            pair = hydrated.get(section_id)
-            if pair is None:
+            if section_id in hydrated:
+                page.append(section_id)
+            else:
                 stale = True
-                continue
-            section, document = pair
+        # A part of a split section shares its breadcrumb with every other part: say how it
+        # begins. Its first stored passage is already plain text - markup stripped, a table
+        # row's header restored - so nothing is parsed again here.
+        firsts = self._db.first_passages([sid for sid in page if hydrated[sid][0].part_index > 0])
+        results: list[SearchResult] = []
+        for section_id in page:
+            section, document = hydrated[section_id]
+            first = firsts.get(section_id)
             results.append(
                 SearchResult(
                     section_id=section.id,
@@ -334,6 +341,7 @@ class HybridSearcher:
                     fts_rank=fts_ranks.get(section_id),
                     vec_rank=vec_ranks.get(section_id),
                     matched_passage=passages.get(section_id),
+                    part_preview=None if first is None else preview(first),
                 )
             )
         return SearchPage(tuple(results), keyword_match), stale

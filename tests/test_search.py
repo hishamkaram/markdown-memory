@@ -10,9 +10,9 @@ from fakes import FakeEmbedder
 
 from markdown_memory.db import Database
 from markdown_memory.embedders import Embedder
-from markdown_memory.exceptions import DatabaseError, EmbeddingError
+from markdown_memory.exceptions import DatabaseError, EmbeddingError, SearchError
 from markdown_memory.indexer import Indexer
-from markdown_memory.models import SearchPage
+from markdown_memory.models import PART_PREVIEW_CHARS, SearchPage, SearchResult, preview
 from markdown_memory.search import (
     MAX_RESULT_LIMIT,
     RRF_K,
@@ -379,6 +379,136 @@ class TestKeywordMatch:
         assert all(messages.values()), "every state but matched explains itself"
         assert [s for s, m in messages.items() if "contains" in (m or "")] == ["no_match"]
         assert all("neighbours" in (m or "") for m in messages.values())
+
+
+# ---------------------------------------------------------------------- part_preview
+
+PROSE = "# Survey\n\n" + "\n\n".join(
+    f"Paragraph {n} of the wombat burrow survey. " * 6 for n in range(30)
+)
+LISTS = "# Fields\n\n" + "\n".join(
+    f"- **field{n}** (int): how many wombat burrows the survey visits per day" for n in range(80)
+)
+TABLE = "# Limits\n\n| Name | Meaning |\n| --- | --- |\n" + "\n".join(
+    f"| limit{n} | the wombat burrow survey stops after {n} visits |" for n in range(80)
+)
+
+
+def _parts(page: SearchPage) -> list[SearchResult]:
+    return [r for r in page.results if r.heading_path.endswith(")") and "(Part " in r.heading_path]
+
+
+class TestPartPreview:
+    """#39: a pointer to one part of a split section says how that part begins."""
+
+    @pytest.fixture
+    def searcher(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> Iterator[HybridSearcher]:
+        root = tmp_path / "big"
+        root.mkdir()
+        for name, text in (("prose.md", PROSE), ("lists.md", LISTS), ("table.md", TABLE)):
+            (root / name).write_text(text + "\n", encoding="utf-8")
+        (root / "small.md").write_text("# Small\n\nOne wombat burrow survey.\n", encoding="utf-8")
+        Indexer(db, fake_embedder).index_directory(root)
+        engine = HybridSearcher(db, fake_embedder)
+        yield engine
+        engine.close()
+
+    def test_every_part_carries_its_first_passage_shortened(
+        self, db: Database, searcher: HybridSearcher
+    ) -> None:
+        page = searcher.search_page("wombat burrow survey", limit=50)
+        parts = _parts(page)
+        assert len({r.file_path for r in parts}) == 3, "prose, list and table all split"
+        for result in parts:
+            # The oracle is the stored passages, read without the code under test.
+            (first,) = (
+                db.connection()
+                .execute(
+                    "SELECT content FROM units WHERE section_id = ? ORDER BY ordinal LIMIT 1",
+                    (result.section_id,),
+                )
+                .fetchone()
+            )
+            assert result.part_preview == preview(first), result.heading_path
+            assert "part_preview" not in result.to_dict(), "rank 1 already carries the text"
+            assert len(result.part_preview) <= PART_PREVIEW_CHARS + 1
+        by_file = {Path(r.file_path).name: r for r in parts if r.heading_path.endswith("(Part 2)")}
+        assert by_file["prose.md"].part_preview.startswith("Paragraph ")
+        assert by_file["lists.md"].part_preview.startswith("field")  # the bold term, unmarked
+        # Part 2 starts mid-table: its rows read with their header, not as bare cells.
+        assert by_file["table.md"].part_preview.startswith("Name: limit")
+
+    def test_a_section_stored_whole_has_none(self, searcher: HybridSearcher) -> None:
+        page = searcher.search_page("wombat burrow survey", limit=50)
+        whole = [r for r in page.results if r not in _parts(page)]
+        assert whole and all(r.part_preview is None for r in whole)
+        assert all("part_preview" not in r.to_pointer() for r in whole)
+
+    def test_a_part_with_a_matched_passage_carries_both(self, searcher: HybridSearcher) -> None:
+        parts = _parts(searcher.search_page("wombat burrow survey", limit=50))
+        both = [r for r in parts if r.matched_passage is not None]
+        assert both, "the fake vectors match passages of the parts"
+        assert all({"matched_passage", "part_preview"} <= set(r.to_pointer()) for r in both)
+
+    def test_a_keyword_only_part_still_says_how_it_begins(
+        self, db: Database, searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def offline(query: str, limit: int) -> tuple[list[int], dict[int, str]]:
+            raise SearchError("vectors offline")
+
+        monkeypatch.setattr(searcher, "_vector_ranking", offline)
+        parts = _parts(searcher.search_page("wombat burrow survey", limit=50))
+        assert parts and all(r.matched_passage is None for r in parts)
+        assert all(r.part_preview and "part_preview" in r.to_pointer() for r in parts)
+
+    def test_a_part_without_a_first_passage_has_none(
+        self, db: Database, searcher: HybridSearcher
+    ) -> None:
+        part = _parts(searcher.search_page("wombat burrow survey", limit=50))[0]
+        with db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM units WHERE section_id = ? AND ordinal = 0", (part.section_id,)
+            )
+        again = {
+            r.section_id: r for r in searcher.search_page("wombat burrow survey", limit=50).results
+        }
+        assert again[part.section_id].part_preview is None
+        assert "part_preview" not in again[part.section_id].to_pointer()
+
+    def test_the_preview_is_the_same_after_a_fresh_index(
+        self, searcher: HybridSearcher, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        first = {
+            r.heading_path: r.part_preview
+            for r in _parts(searcher.search_page("wombat burrow survey", limit=50))
+        }
+        with Database(tmp_path / "again.db") as other:
+            Indexer(other, fake_embedder).index_directory(tmp_path / "big")
+            engine = HybridSearcher(other, fake_embedder)
+            try:
+                second = {
+                    r.heading_path: r.part_preview
+                    for r in _parts(engine.search_page("wombat burrow survey", limit=50))
+                }
+            finally:
+                engine.close()
+        assert first and first == second
+
+
+class TestPreview:
+    def test_text_that_fits_is_unchanged(self) -> None:
+        assert preview("x" * PART_PREVIEW_CHARS) == "x" * PART_PREVIEW_CHARS
+
+    def test_longer_text_is_cut_between_words(self) -> None:
+        # 100 is not a multiple of 7: a cut at the limit would land inside a word.
+        assert preview("wombat " * 30) == ("wombat " * 14).rstrip() + "…"
+
+    def test_text_with_nowhere_to_cut_is_cut_at_the_limit(self) -> None:
+        assert preview("x" * 150) == "x" * PART_PREVIEW_CHARS + "…"
+        # Whitespace only at the very start is not a place to cut: that would leave nothing.
+        assert preview(" " + "y" * 150) == " " + "y" * (PART_PREVIEW_CHARS - 1) + "…"
 
 
 # ---------------------------------------------------------------------- real embeddings
