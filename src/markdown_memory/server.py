@@ -80,8 +80,8 @@ SERVER_INSTRUCTIONS = (
     "get_document_outline followed by read_section to fetch one heading's text. search_docs "
     "returns the best section in full and pointers to the rest: follow a pointer with "
     "read_section, heading_path verbatim, only when the first is not enough. When its "
-    "keyword_match is no_match, no section contains the searched terms: report an identifier "
-    "looked up that way as undocumented instead of answering from the semantic neighbours. "
+    "keyword_match is no_match, no indexed section contains the searched terms: an identifier "
+    "lookup then returns no results, and must be reported as not in the indexed docs. "
     "Prefer these tools over reading whole Markdown files."
 )
 
@@ -444,8 +444,9 @@ def create_server(
         returns every part, and the pointer carries a `part_preview` of how its part begins.
         `keyword_match` says whether keyword search found the query's
         terms: anything but "matched" comes with a `keyword_message`, and the hits are
-        semantic neighbours only. Only "no_match" means no section contains the searched
-        terms - an identifier looked up that way is undocumented, whatever its neighbours say.
+        semantic neighbours only. Only "no_match" means no indexed section contains the
+        searched terms; a query made only of identifiers then returns no results at all, as
+        the identifier is not in the indexed documentation - whatever its neighbours would say.
         `index_status.changed_files` counts indexed documents that no
         longer match the index - a hit may quote text that is no longer there - and is
         independent of coverage: it can be non-zero while coverage reads "verified", so

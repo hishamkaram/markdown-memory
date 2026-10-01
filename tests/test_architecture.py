@@ -39,7 +39,7 @@ BUDGETS = {
     "headings.py": 155,
     "indexer.py": 495,
     "model_cache.py": 173,
-    "models.py": 265,
+    "models.py": 270,
     "parser.py": 722,
     "search.py": 399,
     "server.py": 355,

@@ -20,6 +20,7 @@ import logging
 import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from itertools import pairwise
 from typing import NoReturn, TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
@@ -198,17 +199,28 @@ _IDENTIFIER_MARKS = frozenset("_./\\:@#$=")
 
 
 def _is_identifier(quoted_term: str) -> bool:
-    """Spelled like a flag, path, environment variable, constant or version.
+    """Spelled like a flag, path, environment variable, constant, camelCase key or version.
 
     Spelling cannot tell ``ENOSPC`` from ``HTTP``: whether a match on such a term may
     bypass the keyword gate also depends on how rare it is (see ``HybridSearcher._gate``).
     """
-    term = quoted_term.strip('"')
+    # An agent quotes code the way Markdown does: `--flag` is the flag, for spelling too.
+    term = quoted_term.strip("\"'`")
     return (
         term.startswith("-")
         or any(character in _IDENTIFIER_MARKS or character.isdigit() for character in term[:-1])
         or (len(term) > 1 and term.isupper())
+        or any(lower.islower() and upper.isupper() for lower, upper in pairwise(term))
     )
+
+
+def _is_identifier_lookup(terms: Sequence[str]) -> bool:
+    """Every searched term is spelled like an identifier, and none went unsearched.
+
+    At ``_MAX_QUERY_TERMS`` ``fts_terms`` may have cut the query short, and `no_match` would
+    then speak for only part of it.
+    """
+    return 0 < len(terms) < _MAX_QUERY_TERMS and all(_is_identifier(term) for term in terms)
 
 
 _SENTENCE_PUNCTUATION = "\"'()[]{}<>?!.,;:"
@@ -296,6 +308,10 @@ class HybridSearcher:
         (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
         if fts_error is not None and vec_error is not None:
             raise fts_error
+        if keyword_match == "no_match" and _is_identifier_lookup(fts_terms(query)):
+            # No indexed section contains the identifier: its semantic neighbours name other
+            # things, and an agent handed them answers from them (#33). An empty page says so.
+            return SearchPage((), keyword_match), False
         for name, error in (("keyword", fts_error), ("vector", vec_error)):
             if error is not None:
                 logger.warning("%s search failed; using the other index only: %s", name, error)

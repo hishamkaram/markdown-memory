@@ -640,8 +640,9 @@ class LiveTest:
         absent, _, _ = await self.call("search_docs", query="maxItemErrors", limit=5)
         self.check(
             absent["keyword_match"] == "no_match" and "keyword_message" in absent,
-            "an identifier no section contains is no_match: its hits are neighbours only",
+            "an identifier no section contains is no_match, and says so",
         )
+        self.check(absent["results"] == [], "an identifier no section contains gets no neighbours")
         results = (await self.call("search_docs", query="HELIOS_WAL_SEGMENT_MB", limit=5))[0][
             "results"
         ]

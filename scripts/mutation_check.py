@@ -1096,7 +1096,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 8971),',
+        old='    ("README.md", 9019),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1998,6 +1998,58 @@ MUTATIONS = (
         fails_with="RuntimeError",
     ),
     Mutation(
+        name="abstain: miss a camelCase identifier",
+        module="search.py",
+        old="        or any(lower.islower() and upper.isupper()",
+        new="        or any(False and upper.isupper()",
+        tests="test_an_absent_identifier_is_no_match_and_abstains",
+    ),
+    Mutation(
+        name="abstain: read a backticked flag as a word",
+        module="search.py",
+        old="""    term = quoted_term.strip("\\"'`")""",
+        new="""    term = quoted_term.strip('"')""",
+        tests="test_an_identifier_lookup_nothing_contains_abstains",
+    ),
+    Mutation(
+        name="abstain: hand out neighbours for an identifier nothing contains",
+        module="search.py",
+        old='        if keyword_match == "no_match" and _is_identifier_lookup(fts_terms(query)):',
+        new="        if False:",
+        tests="test_an_identifier_lookup_nothing_contains_abstains",
+    ),
+    Mutation(
+        name="abstain: on any keyword state, not only no_match",
+        module="search.py",
+        old='        if keyword_match == "no_match" and _is_identifier_lookup(fts_terms(query)):',
+        new="        if _is_identifier_lookup(fts_terms(query)):",
+        tests=(
+            "test_a_failed_keyword_index_never_abstains"
+            " or test_candidates_the_gate_refuses_never_abstain"
+        ),
+    ),
+    Mutation(
+        name="abstain: when one term merely looks like an identifier",
+        module="search.py",
+        old="< _MAX_QUERY_TERMS and all(_is_identifier(term)",
+        new="< _MAX_QUERY_TERMS and any(_is_identifier(term)",
+        tests="test_anything_else_nothing_contains_keeps_its_neighbours",
+    ),
+    Mutation(
+        name="abstain: speak for terms a cut query never searched",
+        module="search.py",
+        old="    return 0 < len(terms) < _MAX_QUERY_TERMS and",
+        new="    return 0 < len(terms) <= _MAX_QUERY_TERMS and",
+        tests="test_anything_else_nothing_contains_keeps_its_neighbours",
+    ),
+    Mutation(
+        name="abstain: explain an empty page as neighbours",
+        module="models.py",
+        old='        if self.keyword_match == "no_match" and not self.results:',
+        new="        if False:",
+        tests="test_an_identifier_lookup_nothing_contains_abstains",
+    ),
+    Mutation(
         name="part_preview: look up no first passage",
         module="search.py",
         old="        firsts = self._db.first_passages(",
@@ -2073,7 +2125,7 @@ MUTATIONS = (
         module="search.py",
         old='            return [], "no_match"',
         new='            return [], "filtered"',
-        tests="test_an_absent_identifier_is_no_match_and_its_hits_are_only_neighbours",
+        tests="test_an_absent_identifier_is_no_match_and_abstains",
     ),
     Mutation(
         name="keyword_match: say nothing contains terms the gate merely refused",
@@ -2115,7 +2167,7 @@ MUTATIONS = (
         module="server.py",
         old='            payload["keyword_message"] = message',
         new="            pass",
-        tests="test_an_absent_identifier_says_its_hits_are_only_neighbours",
+        tests="test_an_absent_identifier_abstains_and_says_why",
         fails_with="KeyError",
     ),
     Mutation(

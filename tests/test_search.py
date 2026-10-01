@@ -17,6 +17,7 @@ from markdown_memory.search import (
     MAX_RESULT_LIMIT,
     RRF_K,
     HybridSearcher,
+    _is_identifier,
     build_fts_query,
     reciprocal_rank_fusion,
 )
@@ -300,12 +301,12 @@ class TestKeywordMatch:
         assert page.keyword_match == "matched"
         assert page.keyword_message() is None
 
-    def test_an_absent_identifier_is_no_match_and_its_hits_are_only_neighbours(
+    def test_an_absent_identifier_is_no_match_and_abstains(
         self, fake_searcher: HybridSearcher
     ) -> None:
         page = fake_searcher.search_page("maxItemErrors")
         assert page.keyword_match == "no_match"
-        assert page.results and all(r.fts_rank is None for r in page.results)
+        assert page.results == (), "#38: no neighbours for an identifier nothing contains"
 
     def test_candidates_the_gate_refuses_are_filtered_not_no_match(
         self, fake_searcher: HybridSearcher
@@ -373,12 +374,107 @@ class TestKeywordMatch:
         for query in ("compaction", "maxItemErrors", "quota zebra giraffe"):
             assert fake_searcher.search_page(query).results == tuple(fake_searcher.search(query))
 
-    def test_only_no_match_says_nothing_contains_the_terms(self) -> None:
+    def test_only_no_match_says_nothing_contains_the_terms(
+        self, fake_searcher: HybridSearcher
+    ) -> None:
+        hits = fake_searcher.search_page("compaction").results[:1]
         states = ("no_match", "filtered", "no_terms", "unavailable")
-        messages = {state: SearchPage((), state).keyword_message() for state in states}
+        messages = {state: SearchPage(hits, state).keyword_message() for state in states}
         assert all(messages.values()), "every state but matched explains itself"
         assert [s for s, m in messages.items() if "contains" in (m or "")] == ["no_match"]
         assert all("neighbours" in (m or "") for m in messages.values())
+
+
+# ---------------------------------------------------------------------- abstention (#38)
+
+
+def _absent(count: int) -> str:
+    return " ".join(f"ABSENT_{n}" for n in range(count))
+
+
+class TestAbstention:
+    """#38: a lookup of identifiers no indexed section contains returns nothing, not neighbours."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "maxItemErrors",
+            "ABSENT_ENV_VAR",
+            "--absent-flag",
+            "`--absent-flag`",
+            "'--absent-flag'",
+            "EABSENT",
+            "ABSENT_ENV_VAR --absent-flag",
+            # A bare acronym abstains too: spelling cannot tell SSO from ENOSPC, and the
+            # message says to search again in words.
+            "ZQXR",
+            _absent(31),
+        ],
+    )
+    def test_an_identifier_lookup_nothing_contains_abstains(
+        self, fake_searcher: HybridSearcher, query: str
+    ) -> None:
+        page = fake_searcher.search_page(query)
+        assert (page.results, page.keyword_match) == ((), "no_match")
+        assert "not in the indexed documentation" in (page.keyword_message() or "")
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "zebra giraffe",
+            "maxItemErrors zebra",
+            # At 32 terms `fts_terms` may have cut the query: no_match covers only part of it.
+            _absent(32),
+            _absent(33),
+        ],
+    )
+    def test_anything_else_nothing_contains_keeps_its_neighbours(
+        self, fake_searcher: HybridSearcher, query: str
+    ) -> None:
+        page = fake_searcher.search_page(query)
+        assert page.keyword_match == "no_match"
+        assert page.results, "only an identifier lookup abstains"
+        assert "neighbours" in (page.keyword_message() or "")
+
+    @pytest.mark.parametrize("query", ["ORBIT_UPSTREAM_TIMEOUT_MS", "`--drain-seconds`"])
+    def test_a_present_identifier_still_answers(
+        self, fake_searcher: HybridSearcher, query: str
+    ) -> None:
+        page = fake_searcher.search_page(query)
+        assert page.keyword_match == "matched"
+        assert query.strip("`") in page.results[0].content
+
+    def test_a_failed_keyword_index_never_abstains(
+        self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+            raise DatabaseError("fts index unavailable")
+
+        monkeypatch.setattr(db, "fts_search", broken)
+        page = fake_searcher.search_page("ABSENT_ENV_VAR")
+        assert page.keyword_match == "unavailable" and page.results
+
+    def test_candidates_the_gate_refuses_never_abstain(self, fake_searcher: HybridSearcher) -> None:
+        # Every term is identifier-shaped, and BM25 found "ORBIT" - in too many sections to
+        # pass as rare, carrying too little of the IDF for the gate. Found, then refused.
+        page = fake_searcher.search_page("ORBIT ZQXR_ONE ZQXR_TWO")
+        assert page.keyword_match == "filtered" and page.results
+
+    @pytest.mark.parametrize(
+        ("term", "expected"),
+        [
+            ("maxItemErrors", True),
+            ("PostgreSQL", True),
+            ("`--flag`", True),
+            ("'--flag'", True),
+            ("HTTPServer", False),
+            ("Node2", False),
+            ("Errors", False),
+            ("errors", False),
+        ],
+    )
+    def test_what_counts_as_an_identifier(self, term: str, expected: bool) -> None:
+        assert _is_identifier(f'"{term}"') is expected
 
 
 # ---------------------------------------------------------------------- part_preview
