@@ -181,7 +181,8 @@ def main() -> int:
         1
         for record in records
         for occurrence in record.occurrences
-        if any(step not in ("search_docs", "read_section") for step in occurrence.followed_by)
+        # Only a step off the server is a retreat: an outline after a search is navigation.
+        if any(step in miner.FILE_TOOLS or step == "Bash" for step in occurrence.followed_by)
     )
     reads = sum(
         1

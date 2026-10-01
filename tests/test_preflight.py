@@ -8,6 +8,7 @@ attaches the request that prompted each query, and leaves judgement alone.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -176,3 +177,20 @@ class TestCollecting:
         assert loaded["query"] == "retry policy"
         assert loaded["occurrences"][0]["task"] == "a task"
         assert loaded["family"] == ""
+
+
+class TestTheSummary:
+    def test_an_outline_after_a_search_is_not_a_retreat(
+        self, preflight: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+    ) -> None:
+        session(
+            tmp_path / "p" / "a.jsonl",
+            (SEARCH, {"query": "retry policy"}),
+            ("mcp__markdown-memory__get_document_outline", {"file_path": "/docs/a.md"}),
+            *[("Bash", {"command": "ls"})] * 5,
+            (SEARCH, {"query": "backoff"}),
+            ("Read", {"file_path": "/docs/retry.md"}),
+        )
+        monkeypatch.setattr(sys, "argv", ["preflight.py", "--root", str(tmp_path)])
+        preflight.main()
+        assert "followed by file access       1  (50%)" in capsys.readouterr().out
