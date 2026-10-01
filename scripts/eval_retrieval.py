@@ -16,8 +16,9 @@ the machine - and never gates).
 Exits non-zero when the held-out set regresses below the documented floor, so it can
 gate a change to the parser, the embedder or the ranking. Beside accuracy it reports what the
 default `search_docs` call costs in estimated tokens against the section that answers it;
-that is informational and never gates, never enters the baseline. The held-out queries were
-written before any tuning: tune on ``dev`` only, never on ``held_out``.
+that is informational and never gates, never enters the baseline. So is the no-answer stratum:
+queries the corpus cannot answer, scored by how often the default call abstains. The held-out
+queries were written before any tuning: tune on ``dev`` only, never on ``held_out``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import statistics
 import sys
 import time
@@ -50,6 +52,7 @@ PRIMARY_GRADE = 3
 FLOOR_PARAPHRASE_TOP1 = 0.80
 FLOOR_PARAPHRASE_TOP5 = 0.90
 FLOOR_IDENTIFIER_TOP1 = 1.00
+NO_ANSWER_SHAPES = ("identifier", "question")
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +91,15 @@ class Cost:
         ]
 
 
+@dataclass(slots=True, frozen=True)
+class NoAnswer:
+    """How the default call answered one set of queries the corpus cannot answer, in order."""
+
+    queries: tuple[str, ...]
+    hits: tuple[int, ...]
+    no_match: tuple[bool, ...]
+
+
 def _base(heading_path: str) -> str:
     return heading_path.split(" (Part ")[0]
 
@@ -123,8 +135,8 @@ def resolve_answers(
             owners.setdefault(path, []).append(document.file_path)
     answers: dict[str, Answer] = {}
     for split in ("dev", "held_out"):
-        for cases in queries[split].values():
-            for case in cases:
+        for kind in ("paraphrase", "identifier"):  # no-answer cases have nothing to resolve
+            for case in queries[split][kind]:
                 label = str(case["expected"])
                 if label in answers:
                     continue
@@ -140,6 +152,83 @@ def resolve_answers(
                 tokens = estimate_tokens(service.read_section(found[0], path))
                 answers[label] = Answer(found[0], path, tokens)
     return answers
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[0-9a-z]+", text.lower())
+
+
+def check_no_answer(queries: dict[str, dict[str, list[dict[str, object]]]], corpus: Path) -> None:
+    """Every no-answer case is well formed and absent from the corpus - before anything is searched.
+
+    Absent as the keyword index would look for it: the query's tokens as a consecutive run, so
+    `--enable-tls` is found in a corpus that says `enable_tls`, while a longer identifier that
+    merely contains it is not. Read only when there are cases to check.
+    """
+    cases = [case for split in ("dev", "held_out") for case in queries[split]["no_answer"]]
+    if not cases:
+        return
+    documents = [_tokens(path.read_text(encoding="utf-8")) for path in sorted(corpus.rglob("*.md"))]
+    for case in cases:
+        phrase = _tokens(str(case.get("query", "")))
+        if "expected" in case or case.get("shape") not in NO_ANSWER_SHAPES or not phrase:
+            raise SystemExit(f"fixture: malformed no-answer case {case!r}")
+        width = len(phrase)
+        for words in documents:
+            if any(words[i : i + width] == phrase for i in range(len(words) - width + 1)):
+                raise SystemExit(f"fixture: no-answer query {case['query']!r} is in the corpus")
+
+
+def measure_no_answer(
+    service: MarkdownMemoryService, queries: dict[str, dict[str, list[dict[str, object]]]]
+) -> dict[str, NoAnswer]:
+    """What the default call returns for each no-answer case, per split and shape.
+
+    On `search_page`, the layer `evaluate` reads and the tool serialises: an abstention made
+    there is what an agent receives.
+    """
+    measured: dict[str, NoAnswer] = {}
+    for split in ("dev", "held_out"):
+        for shape in NO_ANSWER_SHAPES:
+            cases = [case for case in queries[split]["no_answer"] if case["shape"] == shape]
+            pages = [service.search_page(str(case["query"]), 5) for case in cases]
+            measured[f"{split}/{shape}"] = NoAnswer(
+                queries=tuple(str(case["query"]) for case in cases),
+                hits=tuple(len(page.results) for page in pages),
+                no_match=tuple(page.keyword_match == "no_match" for page in pages),
+            )
+    return measured
+
+
+def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None:
+    print("\nno-answer stratum (informational; abstention never gates; n is small, low power)")
+    header = f"{'set':<22} {'n':>3}  abstained  no_match"
+    print(header + "\n" + "-" * len(header))
+    for split in ("dev", "held_out"):
+        rows = [(shape, measured[f"{split}/{shape}"]) for shape in NO_ANSWER_SHAPES]
+        rows.append(
+            (
+                "all",
+                NoAnswer(
+                    queries=tuple(q for _, part in rows for q in part.queries),
+                    hits=tuple(h for _, part in rows for h in part.hits),
+                    no_match=tuple(m for _, part in rows for m in part.no_match),
+                ),
+            )
+        )
+        for shape, result in rows:
+            if not result.queries:
+                continue  # a rate over nothing is not zero
+            n = len(result.queries)
+            abstained = sum(hits == 0 for hits in result.hits) / n
+            no_match = sum(result.no_match) / n
+            print(f"{split + ' ' + shape:<22} {n:>3}  {abstained:9.0%}  {no_match:8.0%}")
+    if show_misses:
+        for name, result in measured.items():
+            split, shape = name.split("/")
+            for query, hits in zip(result.queries, result.hits, strict=True):
+                if hits:
+                    print(f"  miss [{split}/no_answer {shape}] {hits} hits: {query}")
 
 
 def measure_costs(
@@ -366,6 +455,7 @@ def run(
     service, built = open_service(arguments, base, probes)
     try:
         answers = resolve_answers(service, queries)
+        check_no_answer(queries, CORPUS)
         print(f"embedder: {service.embedder.model_name}")
         if not built:
             print("index: reused from cache (fingerprint, integrity and vectors verified)")
@@ -386,6 +476,10 @@ def run(
             for name, result in scores.items():
                 for query, rank in result.misses:
                     print(f"  miss [{name}] rank={rank}: {query}")
+        try:
+            print_no_answer(measure_no_answer(service, queries), show_misses=arguments.show_misses)
+        except Exception as exc:  # informational, like the cost pass below
+            print(f"\nno-answer stratum: not measured ({exc})")
         try:
             print_costs(measure_costs(service, queries, answers), per_query=arguments.show_costs)
         except Exception as exc:  # informational: it must never decide how the run ends

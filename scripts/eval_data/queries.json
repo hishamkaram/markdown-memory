@@ -1,5 +1,5 @@
 {
-  "_about": "Labelled retrieval queries over scripts/eval_data/corpus. 'expected' is a heading path (or 'file.md::path' when ambiguous across files). 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. The held-out set was written BEFORE any tuning and must never be used to tune.",
+  "_about": "Labelled retrieval queries over scripts/eval_data/corpus. 'expected' is a heading path (or 'file.md::path' when ambiguous across files). 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. The held-out set was written BEFORE any tuning and must never be used to tune. 'no_answer' cases are questions the corpus cannot answer: they carry no 'expected', only a 'shape' ('identifier' or 'question'), and are scored by abstention, never by Top-k.",
   "dev": {
     "paraphrase": [
       {
@@ -198,6 +198,24 @@
         "query": "ANALYZE",
         "expected": "Troubleshooting > Slow Queries After Upgrade"
       }
+    ],
+    "no_answer": [
+      {
+        "query": "HELIOS_REPLICATION_FACTOR",
+        "shape": "identifier"
+      },
+      {
+        "query": "--enable-tls",
+        "shape": "identifier"
+      },
+      {
+        "query": "maxItemErrors",
+        "shape": "identifier"
+      },
+      {
+        "query": "how do I set up single sign-on with Okta",
+        "shape": "question"
+      }
     ]
   },
   "held_out": {
@@ -381,6 +399,24 @@
       {
         "query": "cuckoo filter",
         "expected": "Ingest Pipeline Architecture > Stages > Deduplicator"
+      }
+    ],
+    "no_answer": [
+      {
+        "query": "ORBIT_CORS_ORIGINS",
+        "shape": "identifier"
+      },
+      {
+        "query": "ECONNRESET",
+        "shape": "identifier"
+      },
+      {
+        "query": "--max-connections",
+        "shape": "identifier"
+      },
+      {
+        "query": "is there a French translation of the user interface",
+        "shape": "question"
       }
     ]
   }
