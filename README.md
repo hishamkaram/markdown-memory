@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 16,270
+       alt="One question asked of four documentation files. Reading them whole costs 16,360
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 16,270 tokens in all:
+`docs/evaluation-protocol.md`, 16,360 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 16,270**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 16,360**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.
@@ -362,7 +362,7 @@ the revision is pinned. See [License](#license) for what that means for you.
 | `list_documents(directory="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
 | `get_document_outline(file_path)` | Hierarchical TOC with line ranges and token estimates |
 | `read_section(file_path, heading_path, include_subsections=False)` | Verbatim text of one section |
-| `search_docs(query, limit=5)` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, and `matched_passage` when a passage won) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no section contains them, so the hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
+| `search_docs(query, limit=5)` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, `matched_passage` when a passage won, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no section contains them, so the hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base

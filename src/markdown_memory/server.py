@@ -441,7 +441,8 @@ def create_server(
         that did. Follow one with
         `read_section(file_path, heading_path)` only when the first hit does not answer,
         passing `heading_path` verbatim: for a `(Part n)` of a split section the base path
-        returns every part. `keyword_match` says whether keyword search found the query's
+        returns every part, and the pointer carries a `part_preview` of how its part begins.
+        `keyword_match` says whether keyword search found the query's
         terms: anything but "matched" comes with a `keyword_message`, and the hits are
         semantic neighbours only. Only "no_match" means no section contains the searched
         terms - an identifier looked up that way is undocumented, whatever its neighbours say.

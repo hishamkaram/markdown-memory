@@ -657,7 +657,7 @@ class LiveTest:
                 and not {"content", "score", "fts_rank", "vec_rank"} & set(p)
                 for p in pointers
             ),
-            "every hit after the first is a pointer: where, how big, why - no text, no ranks",
+            "every hit after the first is a pointer: where, how big, why - no content, no ranks",
         )
         followed, _, _ = await self.call(
             "read_section",
