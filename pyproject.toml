@@ -1,6 +1,6 @@
 [project]
 name = "markdown-memory"
-version = "0.4.1"
+version = "0.5.0"
 description = "MCP server that hands coding agents the one Markdown section that answers the question, not the whole file. Local hybrid search: BM25 keywords + ONNX embeddings in SQLite. No API keys, no network."
 readme = "README.md"
 authors = [

@@ -197,20 +197,19 @@ class SearchResult:
     part_preview: str | None = None  # how one part of a split section begins
 
     def to_dict(self) -> JsonDict:
-        payload: JsonDict = {
+        """The best hit: where it is, what it costs, and its text - a pointer plus `content`.
+
+        Nothing that ranks it (`score`, `fts_rank`, `vec_rank`) and no title fields: no tool
+        takes them, and `heading_path` already names the section. No `matched_passage`
+        either: it restates a passage of `content`, and would be paid for twice.
+        """
+        return {
             "file_path": self.file_path,
-            "document_title": self.document_title,
             "heading_path": self.heading_path,
-            "heading_title": self.heading_title,
             "lines": f"{self.start_line}-{self.end_line}",
-            "score": round(self.score, 6),
-            "fts_rank": self.fts_rank,
-            "vec_rank": self.vec_rank,
             "tokens": estimate_tokens(self.content),
             "content": self.content,
         }
-        # No `matched_passage` here: it restates a passage of `content`; it would be paid twice.
-        return payload
 
     def to_pointer(self) -> JsonDict:
         """Where a lower-ranked hit is, what reading it costs, and why it matched - not its content.
@@ -227,7 +226,10 @@ class SearchResult:
             "tokens": estimate_tokens(self.content),
         }
         if self.matched_passage is not None:
-            pointer["matched_passage"] = self.matched_passage
+            # How the passage that won the vector ranking begins: enough to tell why it matched,
+            # while `read_section` has the whole of it. Chosen by vector distance, a passage has
+            # no keyword position to centre a window on.
+            pointer["matched_passage"] = preview(self.matched_passage)
         if self.part_preview is not None:
             pointer["part_preview"] = self.part_preview
         return pointer

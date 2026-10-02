@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent
 from markdown_memory.config import ServerConfig
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.embedders import DEFAULT_EMBEDDER, GEMMA_DIMENSION
-from markdown_memory.models import estimate_tokens
+from markdown_memory.models import PART_PREVIEW_CHARS, estimate_tokens
 
 # How long [9] leaves the server idle before measuring what that idleness costs and what
 # the query after it costs. Long enough that any onnxruntime spin window has closed.
@@ -371,6 +371,10 @@ class CheckFailedError(Exception):
     """A live-test expectation did not hold."""
 
 
+# The tools that answer with JSON; the other two answer with text an agent reads as is.
+JSON_TOOLS = {"list_documents", "get_document_outline", "search_docs"}
+
+
 class LiveTest:
     def __init__(self, client: Client, docs: Path, files: dict[str, str]) -> None:
         self.client = client
@@ -389,7 +393,11 @@ class LiveTest:
         print(f"  ok    {description}")
 
     async def call(self, tool: str, **arguments: Any) -> tuple[Any, str, float]:
-        """Returns (structured result, raw text exactly as the model would read it, ms)."""
+        """Returns (the result, its text exactly as the model reads it, ms).
+
+        Every result is one text block: JSON for the tools that answer with objects, read as
+        is for the two that answer with text.
+        """
         started = time.perf_counter()
         outcome = await self.client.call_tool(tool, arguments)
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -397,11 +405,7 @@ class LiveTest:
         text = "\n".join(block.text for block in outcome.content if isinstance(block, TextContent))
         if outcome.is_error:
             return None, text, elapsed_ms
-        structured = outcome.structured_content or {}
-        # A tool returning an object is its own structured content; only a bare list or
-        # scalar arrives wrapped in "result".
-        payload = structured["result"] if set(structured) == {"result"} else structured
-        return payload, text, elapsed_ms
+        return (json.loads(text) if tool in JSON_TOOLS else text), text, elapsed_ms
 
     async def median_latency(self, tool: str, runs: int = 7, **arguments: Any) -> float:
         samples = [(await self.call(tool, **arguments))[2] for _ in range(runs)]
@@ -444,12 +448,20 @@ class LiveTest:
         self.check("ERROR" not in summary, "no per-file errors")
         answer, _, _ = await self.call("list_documents")
         self.check(
-            "list_documents returns an envelope", set(answer) == {"documents", "index_status"}
+            set(answer) == {"documents", "index_status"}, "list_documents returns an envelope"
         )
         self.check(
-            "a freshly indexed root vouches for itself",
             answer["index_status"]
-            == {"coverage": "verified", "failures": [], "changed_files": 0, "message": None},
+            == {
+                "root": str(self.docs.resolve()),
+                "coverage": "verified",
+                "failures": [],
+                "changed_files": 0,
+                "indexing": False,  # automatic indexing is off for these scenarios
+                "gitignore": "no_repository",  # a temporary directory, outside any repository
+                "message": None,
+            },
+            "a freshly indexed root vouches for itself",
         )
         documents = answer["documents"]
         titles = {Path(d["file_path"]).name: d["title"] for d in documents}
@@ -629,12 +641,8 @@ class LiveTest:
             answer, _, elapsed = await self.call("search_docs", query=query, limit=5)
             results = answer["results"]
             top = results[0]
-            print(
-                f"        {query!r} -> {top['heading_path']} "
-                f"(fts_rank={top['fts_rank']}, vec_rank={top['vec_rank']}, {elapsed:.1f} ms)"
-            )
+            print(f"        {query!r} -> {top['heading_path']} ({elapsed:.1f} ms)")
             self.check(top["heading_path"] == expected_path, f"top hit for {query!r} is correct")
-            self.check(top["fts_rank"] == 1, "FTS5 ranked it first")
             self.check(query in top["content"], "the literal identifier is in the returned section")
             self.check(answer["keyword_match"] == "matched", "keyword_match says it matched")
         absent, _, _ = await self.call("search_docs", query="maxItemErrors", limit=5)
@@ -648,17 +656,18 @@ class LiveTest:
         ]
         top, pointers = results[0], results[1:]
         self.check(
-            abs(top["score"] - (1 / (60 + top["fts_rank"]) + 1 / (60 + top["vec_rank"]))) < 1e-6,
-            "score equals 1/(60+fts_rank) + 1/(60+vec_rank)",
+            set(top) == {"file_path", "heading_path", "lines", "tokens", "content"},
+            "the first hit is a pointer plus its text - no ranks, no titles, no passage",
         )
         self.check(
             bool(pointers)
             and all(
                 {"file_path", "heading_path", "lines", "tokens"} <= set(p)
                 and not {"content", "score", "fts_rank", "vec_rank"} & set(p)
+                and len(p.get("matched_passage", "")) <= PART_PREVIEW_CHARS + 1
                 for p in pointers
             ),
-            "every hit after the first is a pointer: where, how big, why - no content, no ranks",
+            "every hit after the first is a pointer: where, how big, how its passage begins",
         )
         followed, _, _ = await self.call(
             "read_section",
@@ -679,7 +688,7 @@ class LiveTest:
     async def semantic_search(self) -> None:
         print("\n[6] search_docs: conceptual queries are answered by the vector index")
         # (query, target section, worst acceptable position). None of the queries' content
-        # words occur in their target, so FTS5 cannot retrieve it: fts_rank must be None.
+        # words occur in their target, so FTS5 cannot retrieve it: vectors must.
         cases = (
             (
                 "what happens when the system is overloaded",
@@ -696,19 +705,16 @@ class LiveTest:
             results = answer["results"]
             hit = next((r for r in results if r["heading_path"] == expected_path), None)
             position = results.index(hit) + 1 if hit else None
-            print(
-                f"        {query!r} -> #{position} {expected_path} "
-                f"(fts_rank={hit and hit.get('fts_rank')}, vec_rank={hit and hit.get('vec_rank')}, "
-                f"{elapsed:.1f} ms)"
-            )
+            print(f"        {query!r} -> #{position} {expected_path} ({elapsed:.1f} ms)")
             self.check(
                 hit is not None and position is not None and position <= worst_position,
                 f"target section ranked within the top {worst_position}",
             )
             assert hit is not None
-            if position == 1:  # only the first hit carries its ranks; a pointer has none
-                self.check(hit["fts_rank"] is None, "FTS5 did not match it: keywords alone miss")
-                self.check(hit["vec_rank"] == 1, "vector index ranked it first")
+            # Which index found it is pinned below the wire (test_retrieval_pipeline): no
+            # rank reaches the agent, who has no use for one.
+            if position == 1:
+                self.check("content" in hit, "found in full, as the first hit")
             else:
                 self.check("content" not in hit and "tokens" in hit, "found as a pointer")
 
@@ -824,6 +830,7 @@ async def auto_index_check(test: LiveTest, root: Path, model_cache: str) -> None
             "MARKDOWN_MEMORY_MODEL_CACHE": model_cache,
             "MARKDOWN_MEMORY_EMBEDDER": DEFAULT_EMBEDDER,
             "MARKDOWN_MEMORY_AUTO_INDEX": "1",
+            "GIT_CEILING_DIRECTORIES": str(root),  # as for the first server: no outer checkout
         },
     )
     with (root / "auto.stderr.log").open("w", encoding="utf-8") as errlog:
@@ -867,6 +874,9 @@ async def main() -> int:
                 # Off here: these scenarios call index_directory themselves and time it, and
                 # a background run holding the lock would make them busy. [13] turns it on.
                 "MARKDOWN_MEMORY_AUTO_INDEX": "0",
+                # git stops looking at the workspace, so the docs are in no repository even
+                # when the temporary directory sits inside a checkout.
+                "GIT_CEILING_DIRECTORIES": str(root),
             },
         )
         print(f"workspace : {root}")

@@ -98,6 +98,7 @@ class NoAnswer:
     queries: tuple[str, ...]
     hits: tuple[int, ...]
     no_match: tuple[bool, ...]
+    payloads: tuple[int, ...]  # what each call cost, its keyword_message included
 
 
 def _base(heading_path: str) -> str:
@@ -196,13 +197,14 @@ def measure_no_answer(
                 queries=tuple(str(case["query"]) for case in cases),
                 hits=tuple(len(page.results) for page in pages),
                 no_match=tuple(page.keyword_match == "no_match" for page in pages),
+                payloads=_payloads(service, [str(case["query"]) for case in cases]),
             )
     return measured
 
 
 def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None:
     print("\nno-answer stratum (informational; abstention never gates; n is small, low power)")
-    header = f"{'set':<22} {'n':>3}  abstained  no_match"
+    header = f"{'set':<22} {'n':>3}  abstained  no_match  payload"
     print(header + "\n" + "-" * len(header))
     for split in ("dev", "held_out"):
         rows = [(shape, measured[f"{split}/{shape}"]) for shape in NO_ANSWER_SHAPES]
@@ -213,6 +215,7 @@ def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None
                     queries=tuple(q for _, part in rows for q in part.queries),
                     hits=tuple(h for _, part in rows for h in part.hits),
                     no_match=tuple(m for _, part in rows for m in part.no_match),
+                    payloads=tuple(t for _, part in rows for t in part.payloads),
                 ),
             )
         )
@@ -222,7 +225,9 @@ def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None
             n = len(result.queries)
             abstained = sum(hits == 0 for hits in result.hits) / n
             no_match = sum(result.no_match) / n
-            print(f"{split + ' ' + shape:<22} {n:>3}  {abstained:9.0%}  {no_match:8.0%}")
+            payload = statistics.median(result.payloads)
+            row = f"{split + ' ' + shape:<22} {n:>3}  {abstained:9.0%}  {no_match:8.0%}"
+            print(f"{row}  {payload:7.0f}")
     if show_misses:
         for name, result in measured.items():
             split, shape = name.split("/")
@@ -231,39 +236,44 @@ def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None
                     print(f"  miss [{split}/no_answer {shape}] {hits} hits: {query}")
 
 
+def _payloads(service: MarkdownMemoryService, queries: Sequence[str]) -> tuple[int, ...]:
+    """The default call's estimated cost for each query, measured on the text the server sends.
+
+    That text is what a client puts in the model's context, so it is measured as sent - escaping
+    included - rather than re-serialised here. Calls go one at a time: they share one service
+    and one SQLite connection.
+    """
+    server = create_server(service=service)
+
+    async def measure() -> tuple[int, ...]:
+        payloads: list[int] = []
+        for query in queries:
+            outcome = await server.call_tool("search_docs", {"query": query})
+            text = getattr(outcome.content[0], "text", None)
+            if outcome.is_error or not isinstance(text, str):
+                raise RuntimeError(f"search_docs failed for {query!r}")
+            payloads.append(estimate_tokens(text))
+        return tuple(payloads)
+
+    return asyncio.run(measure())
+
+
 def measure_costs(
     service: MarkdownMemoryService,
     queries: dict[str, dict[str, list[dict[str, object]]]],
     answers: dict[str, Answer],
 ) -> dict[str, Cost]:
-    """The default call's estimated cost, measured on the text block the MCP SDK sends.
-
-    That block is what a client puts in the model's context, so it is measured as the SDK
-    writes it - indentation and escaping included - rather than re-serialised here. Calls go
-    one at a time: they share one service and one SQLite connection.
-    """
-    server = create_server(service=service)
-
-    async def measure() -> dict[str, Cost]:
-        costs: dict[str, Cost] = {}
-        for split in ("dev", "held_out"):
-            for kind in ("paraphrase", "identifier"):
-                cases = queries[split][kind]
-                payloads: list[int] = []
-                for case in cases:
-                    outcome = await server.call_tool("search_docs", {"query": str(case["query"])})
-                    text = getattr(outcome.content[0], "text", None)
-                    if outcome.is_error or not isinstance(text, str):
-                        raise RuntimeError(f"search_docs failed for {case['query']!r}")
-                    payloads.append(estimate_tokens(text))
-                costs[f"{split}/{kind}"] = Cost(
-                    queries=tuple(str(case["query"]) for case in cases),
-                    payloads=tuple(payloads),
-                    answers=tuple(answers[str(case["expected"])].tokens for case in cases),
-                )
-        return costs
-
-    return asyncio.run(measure())
+    """What the default call cost against the section that answers it, per split and kind."""
+    costs: dict[str, Cost] = {}
+    for split in ("dev", "held_out"):
+        for kind in ("paraphrase", "identifier"):
+            cases = queries[split][kind]
+            costs[f"{split}/{kind}"] = Cost(
+                queries=tuple(str(case["query"]) for case in cases),
+                payloads=_payloads(service, [str(case["query"]) for case in cases]),
+                answers=tuple(answers[str(case["expected"])].tokens for case in cases),
+            )
+    return costs
 
 
 def print_costs(costs: dict[str, Cost], *, per_query: bool) -> None:

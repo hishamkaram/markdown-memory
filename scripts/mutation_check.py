@@ -1096,7 +1096,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 9992),',
+        old='    ("README.md", 10134),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1238,8 +1238,8 @@ MUTATIONS = (
         name="cost: measure a call other than the default one",
         module="eval_retrieval.py",
         area="scripts",
-        old='{"query": str(case["query"])})',
-        new='{"query": str(case["query"]), "limit": 1})',
+        old='server.call_tool("search_docs", {"query": query})',
+        new='server.call_tool("search_docs", {"query": query, "limit": 1})',
         tests="test_the_payload_is_the_text_block_the_default_call_sends",
     ),
     Mutation(
@@ -2251,8 +2251,8 @@ MUTATIONS = (
     Mutation(
         name="part_preview: pay for it beside rank 1's full text",
         module="models.py",
-        old="        # No `matched_passage` here",
-        new='        payload["part_preview"] = self.part_preview  #',
+        old='            "content": self.content,',
+        new='            "content": self.content, "part_preview": self.part_preview,',
         tests="test_every_part_carries_its_first_passage_shortened",
     ),
     Mutation(
@@ -2344,8 +2344,8 @@ MUTATIONS = (
     Mutation(
         name="pointers: pay for the matched passage twice in the full result",
         module="models.py",
-        old="        # No `matched_passage` here",
-        new='        payload["matched_passage"] = self.matched_passage  #',
+        old='            "content": self.content,',
+        new='            "content": self.content, "matched_passage": self.matched_passage,',
         tests="test_best_passage_decides_and_is_reported",
     ),
     Mutation(
@@ -2365,17 +2365,18 @@ MUTATIONS = (
     Mutation(
         name="pointers: drop why a pointer matched",
         module="models.py",
-        old="        if self.matched_passage is not None:\n            pointer[",
-        new="        if False:\n            pointer[",
+        old="        if self.matched_passage is not None:\n            # How the passage",
+        new="        if False:\n            # How the passage",
         tests="test_best_passage_decides_and_is_reported",
         fails_with="KeyError",
     ),
     Mutation(
         name="pointers: report a passage for a hit no passage won",
         module="models.py",
-        old="        if self.matched_passage is not None:\n            pointer[",
-        new="        if True:\n            pointer[",
+        old="        if self.matched_passage is not None:\n            # How the passage",
+        new="        if True:\n            # How the passage",
         tests="test_result_without_a_winning_passage_omits_the_field",
+        fails_with="TypeError",  # preview(None): the field is built for a hit that has none
     ),
     Mutation(
         name="pointers: return every hit in full",
@@ -2812,6 +2813,114 @@ MUTATIONS = (
         old='["git", "-C", self.root, "status"] if self.root else ["git", "status"]',
         new='["git", "status"]',
         tests="test_unavailable_names_a_command_the_agent_can_run",
+    ),
+    Mutation(
+        name="transport: send search results twice, as text and as structuredContent",
+        module="server.py",
+        old=(
+            "    @server.tool(structured_output=False)\n"
+            "    @anticipated_errors\n"
+            "    def search_docs("
+        ),
+        new="    @server.tool()\n    @anticipated_errors\n    def search_docs(",
+        tests="test_the_five_tools_are_registered_with_typed_schemas",
+    ),
+    Mutation(
+        name="transport: let index_directory declare an output schema",
+        module="server.py",
+        old=(
+            "    @server.tool(structured_output=False)\n"
+            "    @anticipated_errors\n"
+            "    def index_directory("
+        ),
+        new="    @server.tool()\n    @anticipated_errors\n    def index_directory(",
+        tests="test_the_five_tools_are_registered_with_typed_schemas",
+    ),
+    Mutation(
+        name="transport: let list_documents declare an output schema",
+        module="server.py",
+        old=(
+            "    @server.tool(structured_output=False)\n"
+            "    @anticipated_errors\n"
+            "    def list_documents("
+        ),
+        new="    @server.tool()\n    @anticipated_errors\n    def list_documents(",
+        tests="test_the_five_tools_are_registered_with_typed_schemas",
+    ),
+    Mutation(
+        name="transport: let get_document_outline declare an output schema",
+        module="server.py",
+        old=(
+            "    @server.tool(structured_output=False)\n"
+            "    @anticipated_errors\n"
+            "    def get_document_outline("
+        ),
+        new="    @server.tool()\n    @anticipated_errors\n    def get_document_outline(",
+        tests="test_the_five_tools_are_registered_with_typed_schemas",
+    ),
+    Mutation(
+        name="transport: let read_section declare an output schema",
+        module="server.py",
+        old=(
+            "    @server.tool(structured_output=False)\n"
+            "    @anticipated_errors\n"
+            "    def read_section("
+        ),
+        new="    @server.tool()\n    @anticipated_errors\n    def read_section(",
+        tests="test_the_five_tools_are_registered_with_typed_schemas",
+    ),
+    Mutation(
+        name="transport: escape every non-ASCII character",
+        module="server.py",
+        old='    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)',
+        new='    return json.dumps(value, separators=(",", ":"))',
+        tests="test_non_ascii_text_is_sent_as_itself_not_escaped",
+    ),
+    Mutation(
+        name="transport: indent the JSON every reader pays for",
+        module="server.py",
+        old='    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)',
+        new="    return json.dumps(value, indent=2, ensure_ascii=False)",
+        tests="test_each_result_is_one_text_block_of_compact_json_or_raw_text",
+    ),
+    Mutation(
+        name="transport: JSON-encode a section's raw Markdown",
+        module="server.py",
+        old=(
+            "        return services.get(cwd, file_path).read_section(\n"
+            "            file_path, heading_path, include_subsections=include_subsections, "
+            "cwd=cwd\n"
+            "        )"
+        ),
+        new=(
+            "        return _json(services.get(cwd, file_path).read_section(\n"
+            "            file_path, heading_path, include_subsections=include_subsections, "
+            "cwd=cwd\n"
+            "        ))"
+        ),
+        tests="test_each_result_is_one_text_block_of_compact_json_or_raw_text",
+    ),
+    Mutation(
+        name="pointers: quote the whole passage instead of how it begins",
+        module="models.py",
+        old='            pointer["matched_passage"] = preview(self.matched_passage)',
+        new='            pointer["matched_passage"] = self.matched_passage',
+        tests="test_a_pointer_shows_how_a_long_passage_begins_not_all_of_it",
+    ),
+    Mutation(
+        name="top hit: send the ranks an agent has no use for",
+        module="models.py",
+        old='            "content": self.content,',
+        new='            "content": self.content, "fts_rank": self.fts_rank,',
+        tests="test_search_docs_returns_sections_and_breadcrumbs",
+    ),
+    Mutation(
+        name="live test: a status check that cannot fail",
+        module="live_test.py",
+        area="scripts",
+        old='            answer["index_status"]\n            == {',
+        new='            True or answer["index_status"]\n            == {',
+        tests="test_a_root_that_does_not_vouch_for_itself_fails_the_run",
     ),
 )
 

@@ -9,6 +9,7 @@ holds reused for every passage whose embedded text is identical.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import threading
@@ -97,12 +98,15 @@ def primary(tmp_path: Path, repo: Path, embedder: FakeEmbedder) -> Iterator[Mark
     service.close()
 
 
+# The tools that answer with JSON; the other two answer with text an agent reads as is.
+JSON_TOOLS = {"list_documents", "get_document_outline", "search_docs"}
+
+
 async def call(client: Client, name: str, **arguments: Any) -> Any:
     outcome = await client.call_tool(name, arguments)
     assert not outcome.is_error, outcome.content
-    content = outcome.structured_content
-    assert content is not None
-    return content["result"] if set(content) == {"result"} else content
+    text = str(outcome.content[0].text)  # type: ignore[union-attr]
+    return json.loads(text) if name in JSON_TOOLS else text
 
 
 async def error(client: Client, name: str, **arguments: Any) -> str:

@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 18,066
+       alt="One question asked of four documentation files. Reading them whole costs 18,214
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 18,066 tokens in all:
+`docs/evaluation-protocol.md`, 18,214 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 18,066**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 18,214**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.
@@ -320,8 +320,9 @@ the section that answers each query, as a median, a p95 and a median ratio per s
 (`--show-costs` lists every query). It is informational - it never gates and never enters
 the baseline - and it depends on where the repository is checked out, since every hit
 carries its absolute path, so compare two runs from the same checkout. On this corpus the
-default call costs a median of about 600-700 tokens against answering sections of
-roughly 50-80.
+default call costs a median of about 470-520 tokens against answering sections of
+roughly 50-80; an identifier lookup that abstains costs about 140, its `keyword_message`
+included.
 
 A no-answer stratum - 4 queries per split that the corpus cannot answer, written before any
 abstention rule existed - is scored apart from the rest: how often the default call returns
@@ -372,7 +373,14 @@ the revision is pinned. See [License](#license) for what that means for you.
 | `list_documents(directory="", cwd="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
 | `get_document_outline(file_path, cwd="")` | Hierarchical TOC with line ranges and token estimates |
 | `read_section(file_path, heading_path, include_subsections=False, cwd="")` | Verbatim text of one section |
-| `search_docs(query, limit=5, cwd="")` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, `matched_passage` when a passage won, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
+| `search_docs(query, limit=5, cwd="")` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, a `matched_passage` preview of the passage that won the vector ranking, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
+
+Every result is one text block, sent once: compact JSON from `search_docs`,
+`list_documents` and `get_document_outline`, the raw text from `read_section` and
+`index_directory`. No tool declares an output schema, so no result also carries a
+`structuredContent` copy: a client that shows the model the whole result (Codex CLI does)
+would otherwise pay for it twice. The first hit of `search_docs` is a pointer plus its
+`content`, nothing that ranks it.
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base
