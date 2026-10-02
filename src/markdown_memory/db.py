@@ -1345,6 +1345,46 @@ class Database:
                 passages.update((int(section_id), str(text)) for section_id, text in rows)
         return passages
 
+    def passage_vectors(
+        self, file_path: str, texts: Iterable[str], weights_revision: str
+    ) -> dict[str, list[float]]:
+        """Stored passage vectors of one document, keyed by the exact text that was embedded.
+
+        For another tree of the same repository to reuse instead of embedding again. Only
+        a document stamped with these weights and the current vector format qualifies, and
+        only the passages whose embedded text - breadcrumb and passage, as `unit_texts`
+        builds it - is among ``texts``, so a file's whole vector set is never held in memory
+        on the chance of a match. Each vector is read by its own key: in a join, `vec0`
+        reports no cost and SQLite scans the whole table from it. A vector that does not
+        decode to a usable one of this dimension is left out, and gets embedded.
+        """
+        wanted = set(texts)
+        found: dict[str, list[float]] = {}
+        with self._reading() as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = conn.execute(
+                    "SELECT u.id, s.heading_path, u.content FROM documents d "
+                    "JOIN sections s ON s.doc_id = d.id JOIN units u ON u.section_id = s.id "
+                    "WHERE d.file_path = ? AND d.weights_revision = ? AND d.vector_format = ?",
+                    (file_path, weights_revision, VECTOR_FORMAT),
+                ).fetchall()
+                for unit_id, heading_path, content in rows:
+                    text = f"{heading_path}: {content}"
+                    if text not in wanted or text in found:
+                        continue
+                    blob = conn.execute(
+                        "SELECT embedding FROM units_vec WHERE unit_id = ?", (unit_id,)
+                    ).fetchone()
+                    if blob is None or len(blob[0]) != 4 * self._embedding_dim:
+                        continue
+                    vector = list(struct.unpack(f"<{self._embedding_dim}f", blob[0]))
+                    if _is_usable_vector(vector):
+                        found[text] = vector
+            finally:
+                conn.execute("COMMIT")
+        return found
+
     def sections_with_passages(self, section_ids: Sequence[int]) -> set[int]:
         """The subset of ``section_ids`` that has a body (heading-only sections have none)."""
         if not section_ids:

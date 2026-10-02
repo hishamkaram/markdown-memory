@@ -122,8 +122,11 @@ class TestNavigationRules:
             "file_path",
             "heading_path",
             "include_subsections",
+            "cwd",
         }
-        assert set(tools["search_docs"].input_schema["properties"]) == {"query", "limit"}
+        assert set(tools["search_docs"].input_schema["properties"]) == {"query", "limit", "cwd"}
+        # One rule for agents, so every tool takes it (#69).
+        assert all("cwd" in tool.input_schema["properties"] for tool in tools.values())
 
 
 class TestDocsMatchTheCode:

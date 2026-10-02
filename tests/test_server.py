@@ -331,13 +331,16 @@ async def test_invalid_arguments_are_rejected_by_the_schema(server: MCPServer[No
         await server.call_tool("search_docs", {"query": "x", "limit": "many"})
 
 
-async def test_search_docs_returns_sections_and_breadcrumbs(server: MCPServer[None]) -> None:
+async def test_search_docs_returns_sections_and_breadcrumbs(
+    server: MCPServer[None], service: MarkdownMemoryService
+) -> None:
     await call(server, "index_directory")
     answer = await call(server, "search_docs", query="ORBIT_UPSTREAM_TIMEOUT_MS", limit=3)
     assert set(answer) == {"results", "keyword_match", "index_status"}
     assert answer["keyword_match"] == "matched"  # and so no keyword_message
     # A clean index says so quietly: a caveat on every answer is a caveat nobody reads.
     assert answer["index_status"] == {
+        "root": str(service.root),
         "coverage": "verified",
         "failures": [],
         "changed_files": 0,

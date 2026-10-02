@@ -131,8 +131,7 @@ def git_ignored(root: Path) -> GitIgnore:
     generated output is then indexed. Input and output are captured: stdout is the JSON-RPC
     channel, and stdin is the client's.
     """
-    env = {name: value for name, value in os.environ.items() if name not in _GIT_LOCATION_VARIABLES}
-    env |= {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}  # C: the message below is matched
+    env = git_environment()
     try:
         listed = subprocess.check_output(
             ["git", "-C", str(root), "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -158,6 +157,15 @@ def git_ignored(root: Path) -> GitIgnore:
     # for an ignored directory asked on purpose, and its contents are indexed.
     entries = (os.fsdecode(raw).rstrip("/") for raw in listed.split(b"\0"))
     return GitIgnore("applied", frozenset(_printable(entry) for entry in entries if entry))
+
+
+def git_environment() -> dict[str, str]:
+    """The environment git is run in: its own repository's, never a hook's, and in C.
+
+    C because callers match git's messages, and no prompt because nobody is there to answer.
+    """
+    env = {name: value for name, value in os.environ.items() if name not in _GIT_LOCATION_VARIABLES}
+    return env | {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 
 
 def _unavailable(root: Path, cause: str) -> GitIgnore:

@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import ParamSpec, TypeVar
@@ -24,7 +24,7 @@ from typing import ParamSpec, TypeVar
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from markdown_memory import __version__, headings
+from markdown_memory import __version__, headings, trees
 from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import (
     ENV_AUTO_INDEX,
@@ -36,6 +36,7 @@ from markdown_memory.config import (
     ENV_LOG_LEVEL,
     ServerConfig,
     _config_from_cli,
+    tree_database,
 )
 from markdown_memory.db import Database
 from markdown_memory.embedders import (
@@ -48,6 +49,7 @@ from markdown_memory.exceptions import (
     IndexingError,
     MarkdownMemoryError,
     SearchError,
+    WorkTreeError,
 )
 from markdown_memory.freshness import FreshnessSweep
 from markdown_memory.indexer import Indexer
@@ -81,26 +83,29 @@ SERVER_INSTRUCTIONS = (
     "returns the best section in full and pointers to the rest: follow a pointer with "
     "read_section, heading_path verbatim, only when the first is not enough. When its "
     "keyword_match is no_match, no indexed section contains the searched terms: an identifier "
-    "lookup then returns no results, and must be reported as not in the indexed docs. "
-    "Prefer these tools over reading whole Markdown files."
+    "lookup then returns no results, and must be reported as not in the indexed docs - "
+    "unless index_status.indexing is true and coverage unknown, when it may only not be "
+    "indexed yet. "
+    "Pass your working directory as cwd on every call: in a git worktree the answers then "
+    "come from that worktree's own copy of the docs, and index_status.root names the tree "
+    "that answered. Prefer these tools over reading whole Markdown files."
 )
 
 
 class MarkdownMemoryService:
     """Application service behind the MCP tools; returns typed domain models."""
 
-    def __init__(self, config: ServerConfig, embedder: Embedder | None = None) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        embedder: Embedder | None = None,
+        *,
+        run_lock: threading.Lock | None = None,
+        donor: MarkdownMemoryService | None = None,
+    ) -> None:
         self._config = config
         self._embedder: Embedder = embedder or create_embedder(
             config.embedder, cache_dir=config.model_cache_dir
-        )
-        self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
-        self._indexer = Indexer(
-            self._db,
-            self._embedder,
-            workers=config.index_workers,
-            exclude=config.exclude,
-            gitignore=config.gitignore,
         )
         # Resolved, because indexing resolves: a document under a symlinked or relative
         # docs root is stored by its real path, and a scope spelled any other way filters
@@ -108,6 +113,23 @@ class MarkdownMemoryService:
         # again per call lets a retargeted symlink answer from one tree while reporting on
         # another, which is a lie told with two correct halves.
         self._root = str(headings._absolute(self._config.docs_dir, SearchError))
+        self._db = Database(config.db_path, embedding_dim=self._embedder.dimension)
+        self._run_lock = run_lock or threading.Lock()
+        self._indexer = Indexer(
+            self._db,
+            self._embedder,
+            workers=config.index_workers,
+            exclude=config.exclude,
+            gitignore=config.gitignore,
+            # Another work tree of the repository mostly holds the same text as the root
+            # it was branched from, and that root's vectors for it are already stored.
+            reuse=(
+                None
+                if donor is None
+                else functools.partial(_donated, donor.db, Path(donor.root), Path(self._root))
+            ),
+            run_lock=self._run_lock,
+        )
         self._freshness = FreshnessSweep(self._db)
         self._searcher = HybridSearcher(self._db, self._embedder, scope=self._root)
         #: Only the stdio server starts one (`main`): a service built by a test or a
@@ -117,6 +139,22 @@ class MarkdownMemoryService:
     @property
     def db(self) -> Database:
         return self._db
+
+    @property
+    def config(self) -> ServerConfig:
+        return self._config
+
+    @property
+    def root(self) -> str:
+        return self._root
+
+    @property
+    def run_lock(self) -> threading.Lock:
+        return self._run_lock
+
+    @property
+    def auto_indexing(self) -> bool:
+        return self._auto is not None
 
     @property
     def embedder(self) -> Embedder:
@@ -169,14 +207,14 @@ class MarkdownMemoryService:
         scope = self._resolve_directory(directory or None)
         return self._db.list_documents(str(self._within_root(scope, IndexingError)))
 
-    def get_document_outline(self, file_path: str) -> list[OutlineNode]:
-        document = self._resolve_document(file_path)
+    def get_document_outline(self, file_path: str, *, cwd: str = "") -> list[OutlineNode]:
+        document = self._resolve_document(file_path, cwd)
         return headings.build_outline(self._db.get_sections(document.id))
 
     def read_section(
-        self, file_path: str, heading_path: str, *, include_subsections: bool = False
+        self, file_path: str, heading_path: str, *, include_subsections: bool = False, cwd: str = ""
     ) -> str:
-        document = self._resolve_document(file_path)
+        document = self._resolve_document(file_path, cwd)
         sections = self._db.get_sections(document.id)
         matched = headings.select_sections(
             sections, heading_path, include_subsections=include_subsections
@@ -223,8 +261,9 @@ class MarkdownMemoryService:
         return self._with_freshness(self._db.index_status(self._root), self._root)
 
     def _with_indexing(self, status: IndexStatus) -> IndexStatus:
+        # And which tree answered: one server can serve several work trees of a repository.
         active = self._auto is not None and self._auto.active
-        return dataclasses.replace(status, indexing=active) if active else status
+        return dataclasses.replace(status, indexing=active, root=self._root)
 
     def _with_freshness(self, status: IndexStatus, scope: str) -> IndexStatus:
         """Add what only the filesystem knows: which indexed files have moved on.
@@ -277,14 +316,20 @@ class MarkdownMemoryService:
             )
         return resolved
 
-    def _resolve_document(self, file_path: str) -> Document:
-        """Find an indexed document by absolute path, relative path, or unique path suffix."""
+    def _resolve_document(self, file_path: str, cwd: str = "") -> Document:
+        """Find an indexed document by absolute path, relative path, or unique path suffix.
+
+        A relative path is the agent's when it says where it is (`cwd`); only otherwise is
+        the server's own working directory a guess worth trying.
+        """
         requested = file_path.strip()
         if not requested:
             raise DocumentNotFoundError("file_path must not be empty")
         path = headings._user_path(requested, DocumentNotFoundError)
         candidates = [path]
-        if not path.is_absolute():
+        if not path.is_absolute() and cwd.strip():
+            candidates = [Path(cwd.strip()).expanduser() / path, self._config.docs_dir / path]
+        elif not path.is_absolute():
             candidates = [self._config.docs_dir / path]
             try:
                 candidates.append(Path.cwd() / path)
@@ -310,6 +355,22 @@ class MarkdownMemoryService:
 # ---------------------------------------------------------------------- MCP wiring
 
 
+def _donated(
+    donor: Database,
+    donor_root: Path,
+    root: Path,
+    file_path: str,
+    texts: Sequence[str],
+    weights: str,
+) -> Mapping[str, Sequence[float]]:
+    """The donor root's stored vectors for the same file there, by the texts they embed."""
+    try:
+        relative = Path(file_path).relative_to(root)
+    except ValueError:  # indexed from outside this tree: there is no same file to ask about
+        return {}
+    return donor.passage_vectors(str(donor_root / relative), texts, weights)
+
+
 def anticipated_errors(function: Callable[_P, _R]) -> Callable[_P, _R]:
     """Report domain failures to the model verbatim.
 
@@ -329,27 +390,90 @@ def anticipated_errors(function: Callable[_P, _R]) -> Callable[_P, _R]:
 
 
 class _ServiceProvider:
-    """Hands the tools their service and owns its lifetime when nobody else does.
+    """Hands each tool call the service for its work tree, and owns their lifetime.
 
-    A service passed in by the caller is never closed here. One the server creates itself
-    lives as long as any session is open, and is created again on demand afterwards, so
-    the same server object can serve several sessions (or concurrent ones) in a row.
+    The configured service may be passed in, and is then never closed here. One the server
+    creates itself lives as long as any session is open, and is created again on demand
+    afterwards, so the same server object can serve several sessions (or concurrent ones) in
+    a row. The services of other work trees are always the provider's own: one per tree,
+    created on its first call and closed with the session, never evicted while one is open.
     """
 
     def __init__(self, config: ServerConfig | None, service: MarkdownMemoryService | None) -> None:
         self._config = config
         self._external = service
         self._owned: MarkdownMemoryService | None = None
+        self._trees: dict[str, MarkdownMemoryService] = {}
+        self._home: dict[str, trees.Tree | None] = {}
         self._sessions = 0
         self._lock = threading.Lock()
 
-    def get(self) -> MarkdownMemoryService:
+    def get(self, cwd: str = "", path: str | None = None) -> MarkdownMemoryService:
+        """The service that answers for ``path``, else for ``cwd``, else the configured one.
+
+        A path decides first, so a pointer a worktree search returned is read from that
+        worktree with or without `cwd`, and a worktree named to `index_directory` is never
+        written into the configured root's database. A tree that is not another checkout of
+        the configured root's repository is answered from the configured root, as before.
+        """
+        configured = self._configured()
+        probe = _probe(cwd, path)
+        if probe is None:
+            return configured
+        other = trees.work_tree(probe)
+        home = self._home_tree(configured)
+        if other is None or home is None or other.common_dir != home.common_dir:
+            return configured
+        if other.top == home.top:
+            return configured
+        return self._tree_service(configured, trees.counterpart(Path(configured.root), home, other))
+
+    def _configured(self) -> MarkdownMemoryService:
         if self._external is not None:
             return self._external
         with self._lock:
             if self._owned is None:
                 self._owned = MarkdownMemoryService(self._config or ServerConfig.from_env())
             return self._owned
+
+    def _home_tree(self, configured: MarkdownMemoryService) -> trees.Tree | None:
+        """The configured root's own work tree, asked once: it does not move under a server."""
+        with self._lock:
+            if configured.root not in self._home:
+                try:
+                    self._home[configured.root] = trees.work_tree(Path(configured.root))
+                except WorkTreeError as exc:
+                    logger.warning("Serving %s alone: %s", configured.root, exc)
+                    self._home[configured.root] = None
+            return self._home[configured.root]
+
+    def _tree_service(self, configured: MarkdownMemoryService, docs: Path) -> MarkdownMemoryService:
+        with self._lock:
+            tree = self._trees.get(str(docs))
+            if tree is not None:
+                return tree
+            if len(self._trees) >= trees.MAX_TREES:
+                raise WorkTreeError(
+                    f"This server already answers for {trees.MAX_TREES} other work trees "
+                    f"besides {configured.root}; {docs} would be one more. Call without `cwd` "
+                    "to search the configured root, or restart the server."
+                )
+            database = tree_database(configured.config, docs)
+            if os.path.realpath(database) == os.path.realpath(configured.config.db_path):
+                raise WorkTreeError(f"{docs} would share the configured root's database")
+            tree = MarkdownMemoryService(
+                dataclasses.replace(configured.config, docs_dir=docs, db_path=database),
+                embedder=configured.embedder,
+                run_lock=configured.run_lock,
+                donor=configured,
+            )
+            # Armed, not started: the first search starts it, as for the configured root,
+            # and an explicit index_directory that created this tree is not then refused
+            # as busy by a run of its own making.
+            if configured.auto_indexing:
+                tree.start_auto_index(request=False)
+            self._trees[str(docs)] = tree
+            return tree
 
     def session_started(self) -> None:
         with self._lock:
@@ -358,10 +482,44 @@ class _ServiceProvider:
     def session_ended(self) -> None:
         with self._lock:
             self._sessions -= 1
-            if self._sessions > 0 or self._owned is None:
+            if self._sessions > 0:
                 return
+            # Before the configured service: their runs read its database for vectors.
+            closing = list(self._trees.values())
+            self._trees = {}
             owned, self._owned = self._owned, None
-        owned.close()
+        for service in closing:
+            service.close()
+        if owned is not None:
+            owned.close()
+
+
+def _anchored(directory: str | None, cwd: str) -> str | None:
+    """A relative directory the agent names is its own, when it exists where the agent is.
+
+    Otherwise it keeps meaning what it always did: relative to the documentation root.
+    """
+    if directory is None or not directory.strip() or not cwd.strip():
+        return directory
+    named = headings._user_path(directory.strip(), WorkTreeError)
+    here = headings._user_path(cwd.strip(), WorkTreeError) / named
+    return str(here) if not named.is_absolute() and here.is_dir() else directory
+
+
+def _probe(cwd: str, path: str | None) -> Path | None:
+    """What decides the work tree of a call: an absolute path it names, else its `cwd`."""
+    if path is not None and path.strip():
+        named = headings._user_path(path.strip(), WorkTreeError)
+        if named.is_absolute():
+            return named
+    if not cwd.strip():
+        return None
+    directory = headings._user_path(cwd.strip(), WorkTreeError)
+    if not directory.is_absolute() or not directory.is_dir():
+        raise WorkTreeError(
+            f"cwd must be the absolute path of an existing directory, not {cwd.strip()!r}"
+        )
+    return directory
 
 
 def create_server(
@@ -384,17 +542,20 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def index_directory(directory: str | None = None) -> str:
+    def index_directory(directory: str | None = None, cwd: str = "") -> str:
         """Scan a directory tree for Markdown files and (re)index new or changed ones.
 
         Unchanged files are skipped via SHA-256 hashes; files deleted from disk are purged.
-        Omit `directory` to index the server's configured documentation root.
+        Omit `directory` to index the documentation root that answers for `cwd`.
+        `cwd` is your working directory: pass it on every call. In a git worktree the answer then
+        comes from that worktree's own copy of the docs.
         """
-        return services.get().index_directory(directory).summary()
+        directory = _anchored(directory, cwd)
+        return services.get(cwd, directory).index_directory(directory).summary()
 
     @server.tool()
     @anticipated_errors
-    def list_documents(directory: str = "") -> JsonDict:
+    def list_documents(directory: str = "", cwd: str = "") -> JsonDict:
         """List indexed documents (path, title, section count), optionally under `directory`.
 
         Returns `{"documents": [...], "index_status": {...}}`. `index_status.changed_files`
@@ -403,8 +564,12 @@ def create_server(
         `index_status.coverage` is
         "verified" only when a full index run of this documentation root finished and read
         every file it found; otherwise it is "unknown" and `index_status.message` says why.
+        `index_status.root` is the documentation root that answered.
+        `cwd` is your working directory: pass it on every call. In a git worktree the answer then
+        comes from that worktree's own copy of the docs.
         """
-        service = services.get()
+        directory = _anchored(directory, cwd) or ""
+        service = services.get(cwd, directory)
         scope = directory if directory.strip() else None
         return {
             "documents": [summary.to_dict() for summary in service.list_documents(directory)],
@@ -413,24 +578,33 @@ def create_server(
 
     @server.tool()
     @anticipated_errors
-    def get_document_outline(file_path: str) -> list[JsonDict]:
+    def get_document_outline(file_path: str, cwd: str = "") -> list[JsonDict]:
         """Hierarchical table of contents of one document: heading paths, line ranges and
-        token estimates. Costs a few hundred tokens; use it to pick a section to read."""
-        return [node.to_dict() for node in services.get().get_document_outline(file_path)]
+        token estimates. Costs a few hundred tokens; use it to pick a section to read.
+        `cwd` is your working directory: pass it on every call. In a git worktree the answer then
+        comes from that worktree's own copy of the docs.
+        """
+        service = services.get(cwd, file_path)
+        return [node.to_dict() for node in service.get_document_outline(file_path, cwd=cwd)]
 
     @server.tool()
     @anticipated_errors
-    def read_section(file_path: str, heading_path: str, include_subsections: bool = False) -> str:
+    def read_section(
+        file_path: str, heading_path: str, include_subsections: bool = False, cwd: str = ""
+    ) -> str:
         """Return the verbatim Markdown of one section, addressed by its breadcrumb
         (`Root > Child > Subchild`, as shown by get_document_outline). By default only the
-        section's own text is returned; set `include_subsections` to append its children."""
-        return services.get().read_section(
-            file_path, heading_path, include_subsections=include_subsections
+        section's own text is returned; set `include_subsections` to append its children.
+        `cwd` is your working directory: pass it on every call. In a git worktree the answer then
+        comes from that worktree's own copy of the docs.
+        """
+        return services.get(cwd, file_path).read_section(
+            file_path, heading_path, include_subsections=include_subsections, cwd=cwd
         )
 
     @server.tool()
     @anticipated_errors
-    def search_docs(query: str, limit: int = 5) -> JsonDict:
+    def search_docs(query: str, limit: int = 5, cwd: str = "") -> JsonDict:
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
@@ -454,8 +628,11 @@ def create_server(
         When `index_status.coverage` is "unknown", what you searched is
         missing part of its documentation, or was never indexed end to end: an answer drawn
         from it may be confidently incomplete, and `index_status.message` says what to run.
+        `index_status.root` is the documentation root that answered.
+        `cwd` is your working directory: pass it on every call. In a git worktree the answer then
+        comes from that worktree's own copy of the docs.
         """
-        service = services.get()
+        service = services.get(cwd)
         page = service.search_page(query, limit)
         payload: JsonDict = {
             "results": [
@@ -464,10 +641,11 @@ def create_server(
             ],
             "keyword_match": page.keyword_match,
         }
-        message = page.keyword_message()
+        status = service.index_status()
+        message = page.keyword_message(status)
         if message is not None:
             payload["keyword_message"] = message
-        payload["index_status"] = service.index_status().to_dict()
+        payload["index_status"] = status.to_dict()
         return payload
 
     return server

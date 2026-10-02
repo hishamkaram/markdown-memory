@@ -104,6 +104,10 @@ class ServerConfig:
     auto_index: bool = True
     #: Whether what git ignores below the docs root is left out of the index.
     gitignore: bool = True
+    #: Whether `db_path` was chosen rather than derived from the docs root. Chosen unless
+    #: the environment resolution derived it: a path written into a config by hand is one
+    #: somebody picked, and other work trees' indexes go beside it rather than elsewhere.
+    db_explicit: bool = True
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -128,6 +132,7 @@ class ServerConfig:
             index_workers=_positive_int(ENV_INDEX_WORKERS, DEFAULT_INDEX_WORKERS),
             auto_index=_switched_on(ENV_AUTO_INDEX),
             gitignore=_switched_on(ENV_GITIGNORE),
+            db_explicit=db_path is not None,
         )
 
 
@@ -169,7 +174,24 @@ def resolve_config(
         index_workers=base.index_workers,
         auto_index=base.auto_index if auto_index is None else auto_index,
         gitignore=base.gitignore if gitignore is None else gitignore,
+        db_explicit=bool(db or configured_db),
     )
+
+
+def tree_database(config: ServerConfig, docs_dir: Path) -> Path:
+    """The database another work tree's copy of the docs root is indexed into.
+
+    Never the configured root's own file: the root's runs purge every row outside it, which
+    is what used to undo a worktree indexed into the same database. By default it is the
+    file a server configured for that tree would use. A database placed explicitly says
+    where indexes may live - a mounted volume, a writable directory - so the tree's goes
+    beside it, named after the tree the way the default is.
+    """
+    default = _project_database(docs_dir)
+    if not config.db_explicit:
+        return default
+    configured = config.db_path
+    return configured.with_name(f"{configured.stem}-{default.parent.name}{configured.suffix}")
 
 
 def _config_from_cli(arguments: argparse.Namespace) -> ServerConfig:

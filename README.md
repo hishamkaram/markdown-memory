@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 16,453
+       alt="One question asked of four documentation files. Reading them whole costs 17,629
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 16,453 tokens in all:
+`docs/evaluation-protocol.md`, 17,629 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 16,453**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 17,629**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.
@@ -359,11 +359,11 @@ the revision is pinned. See [License](#license) for what that means for you.
 
 | Tool | Purpose |
 | --- | --- |
-| `index_directory(directory=None)` | Scan a tree, (re)index new/changed `.md` files (SHA-256), purge deleted ones |
-| `list_documents(directory="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
-| `get_document_outline(file_path)` | Hierarchical TOC with line ranges and token estimates |
-| `read_section(file_path, heading_path, include_subsections=False)` | Verbatim text of one section |
-| `search_docs(query, limit=5)` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, `matched_passage` when a passage won, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
+| `index_directory(directory=None, cwd="")` | Scan a tree, (re)index new/changed `.md` files (SHA-256), purge deleted ones |
+| `list_documents(directory="", cwd="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
+| `get_document_outline(file_path, cwd="")` | Hierarchical TOC with line ranges and token estimates |
+| `read_section(file_path, heading_path, include_subsections=False, cwd="")` | Verbatim text of one section |
+| `search_docs(query, limit=5, cwd="")` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, `matched_passage` when a passage won, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base
@@ -371,6 +371,10 @@ path reassembles them byte-for-byte. `file_path` may be absolute, relative to th
 root, or any unique path suffix. `heading_path` is matched exactly first, then ignoring
 spacing around `>`, then ignoring case, then as a trailing fragment (`Child > Subchild`
 or just the title); an ambiguous request lists the exact candidates.
+
+Every tool takes `cwd`, the agent's working directory; see
+[Git worktrees](#git-worktrees). `index_status.root` names the documentation root that
+answered.
 
 ## Configuration
 
@@ -437,8 +441,9 @@ its own path. Like an exclusion, each rule purges what it covers from an index b
 before it applied.
 
 Documents are stored under their absolute path, so one database *can* hold several
-projects - but **search only ever answers from the root this server was started with**,
-and `list_documents` shows only that root. Each project gets its own database by default,
+projects - but **search only ever answers from the root this server was started with**, or
+from that root's copy in another worktree of the same repository (see
+[Git worktrees](#git-worktrees)), and `list_documents` shows only that root. Each project gets its own database by default,
 so this matters only if you point two of them at one file with `MARKDOWN_MEMORY_DB`: the
 second is then indexed, invisible, and paying for itself in disk.
 
@@ -475,6 +480,41 @@ path against `CLAUDE_PROJECT_DIR` (which Claude Code *does* export to the spawne
 falling back to the working directory only when that is not set. The docs root defaults to
 that same project root, so it needs no entry. Each worktree of a repository is its own
 directory, so each gets its own index.
+
+### Git worktrees
+
+An agent working in a linked worktree - `claude -w`, a subagent with
+`isolation: "worktree"`, Codex started in one - usually shares the server of the checkout it
+came from, and that server's docs are another branch's. So every tool takes `cwd`, and the
+agent instructions (`SERVER_INSTRUCTIONS`, and the rules in `CLAUDE.md`, `AGENTS.md` and
+`.cursorrules`) tell the agent to pass its working directory on every call. It works the
+same way in every client, because it is an ordinary tool argument: MCP roots, the other way
+a server could learn where its client is, are deprecated by the 2026-07-28 specification.
+
+| `cwd` (or an absolute path the call names) is in... | Answered from |
+| --- | --- |
+| nothing, or the configured root's own checkout | the configured root, as before |
+| another worktree of the same repository - or the main checkout, when the server was started in a worktree | that tree's copy of the docs root, in a database of its own |
+| anywhere else: another repository, no repository | the configured root, as before |
+| a directory that does not exist, a worktree git cannot read, a tree without the docs directory | an error that says why |
+
+Which tree a path is in is asked of git (`git rev-parse --show-toplevel --git-common-dir`),
+never worked out by reading `.git` files. A path the call names decides before `cwd`, so a
+pointer a worktree search returned is read from that worktree, and indexing a worktree never
+writes into the configured root's database. Another tree's index is built in the background
+from the first search that names it, like the root's, and starts warm: a passage whose embedded text is
+identical to one the configured root already holds, under the same weights, reuses that
+vector instead of being embedded again, so only what the branch changed reaches the model.
+Until that first run finishes the tree answers with what it has, and says so
+(`coverage: unknown`, `indexing: true`).
+
+Its database is the one a server configured for that tree would use - or, when
+`MARKDOWN_MEMORY_DB` is set, a file beside that one named after the tree. It is kept between
+sessions, so a worktree reopened on another branch is answered from its old index until the
+background run catches up - the same window the main checkout has after a `git checkout`,
+reported the same way, by `index_status.changed_files`. One server answers for up to 8 other
+trees at a time, runs one index at a time across all of them, and closes them when the
+session ends.
 
 By default nothing is written into the repository. (A *relative* `MARKDOWN_MEMORY_DB`
 is resolved against the project root and does land inside it - `.gitignore` covers

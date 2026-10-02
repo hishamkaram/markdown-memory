@@ -62,6 +62,11 @@ _INDEX_WORKERS_ENV = "MARKDOWN_MEMORY_INDEX_WORKERS"
 DEFAULT_INDEX_WORKERS = 2
 
 
+#: Vectors another index already holds for a file's passages: given the file, the texts it
+#: is about to embed and the weights this run embeds with, those it may reuse, by text.
+Reuse = Callable[[str, Sequence[str], str], Mapping[str, Sequence[float]]]
+
+
 # Below this the pooled direction is rounding noise rather than a direction. Unit vectors
 # that genuinely cancel land near 1e-16; a real centroid of normalised passages is >= 1/n
 # of one passage, which for the 64-passage ceiling is ~0.015.
@@ -153,6 +158,9 @@ class Indexer:
         workers: int | None = None,
         exclude: Sequence[str] = (),
         gitignore: bool = True,
+        *,
+        reuse: Reuse | None = None,
+        run_lock: threading.Lock | None = None,
     ) -> None:
         if embedder.dimension != db.embedding_dim:
             raise IndexingError(
@@ -168,7 +176,10 @@ class Indexer:
         self._workers = max(1, workers if workers is not None else _index_workers())
         self._exclude = tuple(exclude)
         self._gitignore = gitignore
-        self._run_lock = threading.Lock()
+        self._reuse = reuse
+        # Shared by every tree one server serves: two runs at once would hold two sets of
+        # embedding buffers, which is what the memory budget is measured without.
+        self._run_lock = run_lock or threading.Lock()
 
     @property
     def _parser(self) -> MarkdownParser:
@@ -500,7 +511,9 @@ class Indexer:
         """
         recorded = self._db.get_meta(WEIGHTS_META_KEY)
         if self._embedder.weights_revision is None and (
-            recorded == WEIGHTS_REVOKED
+            # A tree that could reuse another's vectors needs to know whose they would be.
+            self._reuse is not None
+            or recorded == WEIGHTS_REVOKED
             or self._db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
             or (recorded is None and self._db.count_rows("units_vec") > 0)
         ):
@@ -745,10 +758,20 @@ class Indexer:
         texts: list[str] = []
         for section in parsed.sections:
             texts.extend(section.unit_texts)
-        embeddings = self._embedder.embed_documents(texts)
-        if len(embeddings) != len(texts):
-            raise EmbeddingError(f"Got {len(embeddings)} vectors for {len(texts)} texts")
-        embedded = iter(embeddings)
+        # A vector is a function of the exact text and the weights alone - no path is part
+        # of the input - so one another tree already holds for the same text is the one
+        # this embedding would produce, and only the rest need the model.
+        reused = (
+            self._reuse(file_path, texts, identity)
+            if self._reuse is not None and identity is not None and texts
+            else {}
+        )
+        missing = [text for text in texts if text not in reused]
+        fresh = self._embedder.embed_documents(missing)
+        if len(fresh) != len(missing):
+            raise EmbeddingError(f"Got {len(fresh)} vectors for {len(missing)} texts")
+        computed = iter(fresh)
+        embedded = iter([reused[text] if text in reused else next(computed) for text in texts])
         vectors = []
         for section in parsed.sections:
             units = tuple(next(embedded) for _ in section.units)

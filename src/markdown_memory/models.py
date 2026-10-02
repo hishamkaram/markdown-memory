@@ -252,6 +252,13 @@ _ABSTAINED = (
     "added since the last index run would not be searched yet). If it abbreviates a concept, "
     "search again in plain words."
 )
+# What any miss says instead while the tree is being indexed and nothing vouches for it yet:
+# a fresh worktree answers its first search from an index that is still empty.
+_STILL_INDEXING = (
+    "This documentation root is being indexed right now and is not yet known to be whole "
+    "(index_status), so a term not found may only not be indexed yet: search again once "
+    "index_status.indexing is false before concluding the docs do not cover it."
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -266,7 +273,9 @@ class SearchPage:
     results: tuple[SearchResult, ...]
     keyword_match: KeywordMatch
 
-    def keyword_message(self) -> str | None:
+    def keyword_message(self, status: IndexStatus | None = None) -> str | None:
+        if self.keyword_match != "matched" and status and status.indexing and not status.verified:
+            return _STILL_INDEXING
         if self.keyword_match == "no_match" and not self.results:
             return _ABSTAINED
         return _KEYWORD_MESSAGES.get(self.keyword_match)
@@ -325,10 +334,14 @@ class IndexStatus:
     #: `no_repository`, `unavailable` (git could not be asked, so what it ignores was indexed
     #: too), or `unknown` when no walk has finished since the index was built.
     gitignore: str = "unknown"
+    #: The documentation root this answer was drawn from: the configured one, or another
+    #: work tree's copy of it when the call named a path or `cwd` in that tree.
+    root: str = ""
 
     def to_dict(self) -> JsonDict:
         shown = self.failures[:MAX_REPORTED_FAILURES]
         return {
+            "root": self.root,
             "coverage": "verified" if self.verified else "unknown",
             "failures": [failure.to_dict() for failure in shown],
             "changed_files": self.changed_files,
