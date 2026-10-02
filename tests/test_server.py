@@ -288,13 +288,13 @@ async def test_unknown_section_lists_the_available_paths(
 
 
 async def test_unindexed_and_ambiguous_files_are_reported(server: MCPServer[None]) -> None:
-    with pytest.raises(ToolError, match="not indexed"):
+    with pytest.raises(ToolError, match="No indexed document matches"):
         await server.call_tool("get_document_outline", {"file_path": "clean_doc.md"})
     await call(server, "index_directory")
     # docs/clean_doc.md resolves exactly against the docs root even though a nested twin exists
     outline = await call(server, "get_document_outline", file_path="clean_doc.md")
     assert outline[1]["title"] == "Orbit Gateway"
-    with pytest.raises(ToolError, match="not indexed"):
+    with pytest.raises(ToolError, match="No indexed document matches"):
         await server.call_tool("get_document_outline", {"file_path": "absent.md"})
 
 

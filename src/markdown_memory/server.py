@@ -24,7 +24,7 @@ from typing import ParamSpec, TypeVar
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from markdown_memory import __version__, headings, trees
+from markdown_memory import __version__, discovery, headings, trees
 from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import (
     ENV_AUTO_INDEX,
@@ -88,7 +88,10 @@ SERVER_INSTRUCTIONS = (
     "indexed yet. "
     "Pass your working directory as cwd on every call: in a git worktree the answers then "
     "come from that worktree's own copy of the docs, and index_status.root names the tree "
-    "that answered. Prefer these tools over reading whole Markdown files."
+    "that answered. index_status.gitignore is applied, off, no_repository, unavailable (git "
+    "could not be asked; the message says how to see why) or unknown - no run has recorded "
+    "git's state yet, which is not a failure. Prefer these tools over reading whole Markdown "
+    "files."
 )
 
 
@@ -346,10 +349,33 @@ class MarkdownMemoryService:
         if matches:
             listing = ", ".join(match.file_path for match in matches[: headings._MAX_LISTED_PATHS])
             raise DocumentNotFoundError(f"'{requested}' is ambiguous; it matches: {listing}")
-        raise DocumentNotFoundError(
-            f"'{requested}' is not indexed. Run index_directory, then list_documents "
-            "to see the available paths."
+        raise DocumentNotFoundError(self._not_indexed(requested, path, candidates))
+
+    def _not_indexed(self, requested: str, path: Path, candidates: Sequence[Path]) -> str:
+        """What to tell an agent whose document is not in the index, and what to do instead.
+
+        A bare name was a suffix lookup, and nothing on disk is what it meant. A path the
+        agent spelled is judged where it points: the candidate that exists, else the first.
+        """
+        advice = "Run index_directory, then list_documents to see the available paths."
+        if not (path.is_absolute() or "/" in requested or requested.startswith(".")):
+            return f"No indexed document matches '{requested}'. {advice}"
+        target = next((c for c in candidates if os.path.lexists(c)), candidates[0])
+        reason = discovery.unindexed_reason(
+            Path(os.path.abspath(target)),
+            Path(self._root),
+            self._config.exclude,
+            self._config.gitignore,
         )
+        if reason is not None:
+            return reason
+        shown = discovery._printable(os.path.abspath(target))
+        if self._auto is not None and self._auto.active:
+            return (
+                f"'{shown}' is not indexed yet: a run is indexing {self._root} now; try again "
+                "when index_status.indexing is false."
+            )
+        return f"'{shown}' is not indexed. {advice}"
 
 
 # ---------------------------------------------------------------------- MCP wiring
@@ -565,6 +591,10 @@ def create_server(
         "verified" only when a full index run of this documentation root finished and read
         every file it found; otherwise it is "unknown" and `index_status.message` says why.
         `index_status.root` is the documentation root that answered.
+        `index_status.gitignore` is what git said when a run of the root last finished:
+        `applied`, `off` (switched off), `no_repository`, `unavailable` (git could not be asked,
+        so ignored files may be indexed; the message says how to see why) or `unknown` (no run
+        has recorded it yet - not a failure, and nothing to do).
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """
@@ -629,6 +659,10 @@ def create_server(
         missing part of its documentation, or was never indexed end to end: an answer drawn
         from it may be confidently incomplete, and `index_status.message` says what to run.
         `index_status.root` is the documentation root that answered.
+        `index_status.gitignore` is what git said when a run of the root last finished:
+        `applied`, `off` (switched off), `no_repository`, `unavailable` (git could not be asked,
+        so ignored files may be indexed; the message says how to see why) or `unknown` (no run
+        has recorded it yet - not a failure, and nothing to do).
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """

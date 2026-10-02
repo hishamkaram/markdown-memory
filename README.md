@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 17,629
+       alt="One question asked of four documentation files. Reading them whole costs 18,066
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 17,629 tokens in all:
+`docs/evaluation-protocol.md`, 18,066 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 17,629**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 18,066**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.
@@ -179,10 +179,19 @@ is the tree, and the message says so.
 
 And it carries `gitignore`: what git said the last time a walk of the root finished -
 `applied`, `off` (switched off), `no_repository` (nothing to ignore), `unknown` (no walk has
-finished since the index was built), or `unavailable`: the root is in a repository git could
-not be asked about - not installed, timed out, refused by `safe.directory` - so what it
-ignores was indexed as well. Only `unavailable` gets a message, and only on a tree that is
-otherwise whole; the server log says why.
+recorded it yet: the first search after a start, while the catch-up run is going, or an index
+upgraded from a version that did not record it - not a failure, and the run records it), or
+`unavailable`: the root is in a repository git could not be asked about - not installed, timed
+out, refused by `safe.directory` - so what it ignores was indexed as well. Only `unavailable`
+gets a message, and only on a tree that is otherwise whole: it names the `git status` to run
+to see why.
+
+A checkout whose repository is configured bare (`core.bare = true`, which some agent worktree
+tooling sets on the main checkout) makes git refuse with *"this operation must be run in a
+work tree"*. The server then asks git again with that checkout as the work tree - what git
+itself does once the setting is gone - so `.gitignore` still applies and worktree routing still
+works, and it logs a warning naming `git -C <checkout> config core.bare false`, which it never
+runs for you.
 
 ## The embedding model
 
@@ -371,6 +380,12 @@ path reassembles them byte-for-byte. `file_path` may be absolute, relative to th
 root, or any unique path suffix. `heading_path` is matched exactly first, then ignoring
 spacing around `>`, then ignoring case, then as a trailing fragment (`Child > Subchild`
 or just the title); an ambiguous request lists the exact candidates.
+
+A document that is not in the index gets the reason rather than a blanket "run
+index_directory": the path does not exist, is not Markdown, is outside the documentation root
+(pass `cwd` if it is another worktree), sits in a directory every walk skips (index that
+directory), is inside a linked worktree (pass `cwd`), or is excluded or git-ignored (a run of
+the root would remove it again); a bare name the suffix lookup missed says so.
 
 Every tool takes `cwd`, the agent's working directory; see
 [Git worktrees](#git-worktrees). `index_status.root` names the documentation root that

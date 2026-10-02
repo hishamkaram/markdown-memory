@@ -204,6 +204,10 @@ Work in this order:
    identifier as not in the indexed documentation rather than answering from neighbours -
    unless `index_status.indexing` is true and coverage `"unknown"`: then it may only not be
    indexed yet, so search again once indexing is false.
+   `index_status.gitignore` is what git said when a run of the root last finished: `applied`,
+   `off`, `no_repository`, `unavailable` (git could not be asked, so ignored files may be in
+   the index; the message says how to see why) or `unknown` - no run has recorded it yet, which
+   is not a failure and needs nothing from you.
    When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it. When `index_status.changed_files` is non-zero,

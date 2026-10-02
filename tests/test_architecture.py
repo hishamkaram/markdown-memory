@@ -32,7 +32,9 @@ BUDGETS = {
     "autoindex.py": 130,
     "config.py": 150,
     "db.py": 1205,  # the outlier, grandfathered
-    "discovery.py": 210,
+    # Raised from 210 for #70: the one way git is run (a checkout git calls bare is read as
+    # one), and why a path is not in the index, naming the rule that left it out.
+    "discovery.py": 310,
     "embedders.py": 366,
     "exceptions.py": 16,
     "freshness.py": 69,
@@ -44,7 +46,7 @@ BUDGETS = {
     "parser.py": 722,
     "search.py": 399,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd.
-    "server.py": 485,
+    "server.py": 500,
     "trees.py": 70,
 }
 
