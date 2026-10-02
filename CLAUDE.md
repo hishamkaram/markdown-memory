@@ -60,7 +60,7 @@ The first run downloads the embedding model (~218 MB) into
 | Path | Responsibility |
 | --- | --- |
 | `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
-| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`) |
+| `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`, `WorkTreeError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v7), repository methods, `integrity_problems()` |
 | `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, `Scope` (exclusions, `git_ignored` -> `GitIgnore`, linked worktrees), `without_aliases` (symlinks to a file indexed anyway), symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
@@ -71,8 +71,9 @@ The first run downloads the embedding model (~218 MB) into
 | `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
 | `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, started by a search's `index_status` - the first after the server starts, then whenever one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
+| `src/markdown_memory/trees.py` | Which work tree a path is in (`work_tree`: one `git rev-parse`, never a parse of `.git`), where the docs root sits in another tree of the same repository (`counterpart`), `MAX_TREES` |
 | `src/markdown_memory/headings.py` | Breadcrumb resolution (`Root > Child`), section selection, the outline tree |
-| `src/markdown_memory/server.py` | `MarkdownMemoryService`, MCP tool wiring, `main()` |
+| `src/markdown_memory/server.py` | `MarkdownMemoryService`, MCP tool wiring, `_ServiceProvider` (one service per work tree a call names by path or `cwd`, sharing the embedder and the run lock; another tree's index reuses the configured root's vectors for identical passage text), `main()` |
 | `tests/` | `test_<area>.py` covers the module of that name; `test_<area>_regressions.py` pins every bug review found there. `fakes.py` holds `FakeEmbedder` (offline, deterministic), `helpers.py` the shared builders |
 | `scripts/eval_data/` | Frozen eval corpus, labelled queries, `baseline.json` |
 
@@ -141,6 +142,10 @@ accepted change, record the new numbers with `--update-baseline` and update the 
 `README.md`. Rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: all lowered accuracy and cost 2-12 s per query.
 
+A passage vector is reused across work trees on the exact embedded text, the weights stamp
+and `VECTOR_FORMAT` - the prompts are not part of the stamp, so **changing an embedding prompt
+bumps `VECTOR_FORMAT`**, which makes every document re-embed itself.
+
 Changing the embedding dimension invalidates every stored vector: the index is discarded and
 rebuilt (`IndexReport.notes` says so). Changing the weights at the same dimension does not:
 each document is stamped with the weights that embedded it (`documents.weights_revision`),
@@ -172,6 +177,12 @@ same CPU moves those numbers further than the changes being measured.
 ~150 lines into context unless the user explicitly asks for the whole file. Fetch the one
 section you need instead; it is typically 10-50x cheaper.
 
+**Pass `cwd` - your working directory, as an absolute path - on every call.** In another git
+worktree of the repository the server was started for, answers then come from that worktree's
+own copy of the docs, indexed into its own database the first time it is named; anywhere else
+it changes nothing. `index_status.root` names the documentation root that answered: when it is
+not the tree you are working in, you are reading another checkout's docs.
+
 Work in this order:
 
 1. **`search_docs(query, limit=5)`** - start here. Returns
@@ -190,7 +201,9 @@ Work in this order:
    `keyword_match` says whether keyword search found the query's terms; when it is
    `"no_match"`, no indexed section contains them: a query of identifiers alone then returns
    no results, and any other query's hits are only semantic neighbours. Report such an
-   identifier as not in the indexed documentation rather than answering from neighbours.
+   identifier as not in the indexed documentation rather than answering from neighbours -
+   unless `index_status.indexing` is true and coverage `"unknown"`: then it may only not be
+   indexed yet, so search again once indexing is false.
    When `index_status.coverage` is `"unknown"`, the documentation you just
    searched is missing files or was never indexed end to end - say so rather than
    concluding the docs do not cover it. When `index_status.changed_files` is non-zero,

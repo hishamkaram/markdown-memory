@@ -30,7 +30,7 @@ PACKAGE_DIR = ROOT / "src" / PACKAGE
 BUDGETS = {
     "__init__.py": 44,
     "autoindex.py": 130,
-    "config.py": 138,
+    "config.py": 150,
     "db.py": 1205,  # the outlier, grandfathered
     "discovery.py": 210,
     "embedders.py": 366,
@@ -39,10 +39,13 @@ BUDGETS = {
     "headings.py": 155,
     "indexer.py": 495,
     "model_cache.py": 173,
-    "models.py": 270,
+    # Raised from 270 for #69: what a miss says while a fresh tree is still indexing.
+    "models.py": 285,
     "parser.py": 722,
     "search.py": 399,
-    "server.py": 355,
+    # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd.
+    "server.py": 485,
+    "trees.py": 70,
 }
 
 #: Where a heavy dependency may be imported **at module scope**, which is what puts it in

@@ -69,3 +69,7 @@ class DocumentNotFoundError(MarkdownMemoryError):
 
 class SectionNotFoundError(MarkdownMemoryError):
     """The requested heading path does not exist in the indexed document."""
+
+
+class WorkTreeError(MarkdownMemoryError):
+    """A path names a work tree this server cannot answer for, and it says why."""
