@@ -190,7 +190,7 @@ Work in this order:
    `keyword_message` whenever `keyword_match` is not `"matched"`. The first hit carries the
    full section `content` with its breadcrumb (`heading_path`), line range and token
    estimate; the rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` and,
-   when a passage won the vector ranking, the `matched_passage` that did. Use exact
+   when a passage won the vector ranking, `matched_passage`: how that passage begins. Use exact
    identifiers verbatim (`--dry-run`, `HELIOS_BATCH`, `ENOSPC`): they are matched by
    keyword at 100% Top-1. Plain-language questions work too, but the
    first hit is not always the answer (Top-1 ~88%; Top-5 is ~97% reliable): when it is not,

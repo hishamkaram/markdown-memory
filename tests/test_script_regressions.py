@@ -127,6 +127,7 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
         # The stub holds no corpus to resolve labels in or to cost; both have their own tests.
         monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
         monkeypatch.setattr(evaluation, "measure_costs", lambda *_args: {})
+        monkeypatch.setattr(evaluation, "_payloads", lambda _service, qs: tuple(0 for _ in qs))
         try:
             code = evaluation.main()  # type: ignore[attr-defined]
         finally:
@@ -418,22 +419,28 @@ class TestTheNoAnswerStratum:
         assert identifier.hits == (0,), "#38: an identifier nothing contains abstains"
         assert question.queries == ("install",) and question.no_match == (False,)
         assert measured["held_out/identifier"].queries == ()
+        # Costed like any call: an abstention still pays for its keyword_message.
+        assert identifier.payloads[0] > 0 and len(question.payloads) == 1
 
     def test_the_report_counts_an_empty_page_as_abstaining(
         self, evaluation: object, capsys: pytest.CaptureFixture[str]
     ) -> None:
         no_answer = evaluation.NoAnswer  # type: ignore[attr-defined]
-        empty = no_answer(queries=(), hits=(), no_match=())
+        empty = no_answer(queries=(), hits=(), no_match=(), payloads=())
         measured = {
-            "dev/identifier": no_answer(queries=("A", "B"), hits=(0, 3), no_match=(True, True)),
-            "dev/question": no_answer(queries=("c d",), hits=(5,), no_match=(False,)),
+            "dev/identifier": no_answer(
+                queries=("A", "B"), hits=(0, 3), no_match=(True, True), payloads=(40, 90)
+            ),
+            "dev/question": no_answer(
+                queries=("c d",), hits=(5,), no_match=(False,), payloads=(120,)
+            ),
             "held_out/identifier": empty,
             "held_out/question": empty,
         }
         evaluation.print_no_answer(measured, show_misses=True)  # type: ignore[attr-defined]
         out = capsys.readouterr().out
-        assert "dev identifier           2        50%      100%" in out
-        assert "dev all                  3        33%       67%" in out
+        assert "dev identifier           2        50%      100%       65" in out
+        assert "dev all                  3        33%       67%       90" in out
         assert "held_out" not in out.split("miss")[0], "a set with no cases prints no rate"
         assert "miss [dev/no_answer identifier] 3 hits: B" in out
         assert "hits: A" not in out, "an abstention is not a miss"
@@ -963,3 +970,51 @@ class TestTheReindexScriptTargetsTheDirectoryItWasGiven:
         assert seen[0].db_path == resolve_config(docs_dir=beta).db_path
         assert seen[0].db_path != ServerConfig.from_env().db_path
         assert seen[0].exclude == ("vendor",)
+
+
+class TestLiveTestScript:
+    """`live_test.py` is a gate: a check in it that cannot fail is a gate that is not there."""
+
+    @pytest.fixture
+    def live(self) -> Any:
+        # By name, not by path: the mutation check points `pythonpath` at its mutated copy.
+        import live_test
+
+        return live_test
+
+    @staticmethod
+    def client(status: dict[str, Any]) -> Any:
+        from mcp.types import CallToolResult, TextContent
+
+        class Client:
+            async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+                text = (
+                    "Indexed: 6 scanned, 6 (re)indexed"
+                    if name == "index_directory"
+                    else json.dumps({"documents": [], "index_status": status})
+                )
+                return CallToolResult(content=[TextContent(type="text", text=text)])
+
+        return Client()
+
+    async def test_a_root_that_does_not_vouch_for_itself_fails_the_run(
+        self, live: Any, tmp_path: Path
+    ) -> None:
+        clean = {
+            "root": str(tmp_path.resolve()),
+            "coverage": "verified",
+            "failures": [],
+            "changed_files": 0,
+            "indexing": False,
+            "gitignore": "no_repository",
+            "message": None,
+        }
+        vouch = "a freshly indexed root vouches for itself"
+        for wrong in ({"coverage": "unknown"}, {"changed_files": 2}, {"gitignore": "unavailable"}):
+            run = live.LiveTest(self.client(clean | wrong), tmp_path, {})
+            with pytest.raises(live.CheckFailedError, match=vouch):
+                await run.indexing()
+        # A clean status passes that check; the run then stops at the next one, documents.
+        run = live.LiveTest(self.client(clean), tmp_path, {})
+        with pytest.raises(live.CheckFailedError, match="reports 6 documents"):
+            await run.indexing()

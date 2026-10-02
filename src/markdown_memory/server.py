@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import functools
+import json
 import logging
 import os
 import sys
@@ -23,6 +24,7 @@ from typing import ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import JsonValue
 
 from markdown_memory import __version__, discovery, headings, trees
 from markdown_memory.autoindex import AutoIndexer
@@ -566,7 +568,11 @@ def create_server(
         "markdown-memory", version=__version__, instructions=SERVER_INSTRUCTIONS, lifespan=lifespan
     )
 
-    @server.tool()
+    # Every result goes out once, as text: a tool with an output schema is sent twice, as
+    # indented text and as `structuredContent`, and a client that shows the model the whole
+    # result (Codex) pays for both. Claude Code, which shows the structured copy, sees the
+    # same compact JSON either way.
+    @server.tool(structured_output=False)
     @anticipated_errors
     def index_directory(directory: str | None = None, cwd: str = "") -> str:
         """Scan a directory tree for Markdown files and (re)index new or changed ones.
@@ -579,45 +585,39 @@ def create_server(
         directory = _anchored(directory, cwd)
         return services.get(cwd, directory).index_directory(directory).summary()
 
-    @server.tool()
+    @server.tool(structured_output=False)
     @anticipated_errors
-    def list_documents(directory: str = "", cwd: str = "") -> JsonDict:
+    def list_documents(directory: str = "", cwd: str = "") -> str:
         """List indexed documents (path, title, section count), optionally under `directory`.
 
-        Returns `{"documents": [...], "index_status": {...}}`. `index_status.changed_files`
-        counts indexed documents that no longer match the index; it is independent of
-        coverage, so read `index_status.message` whenever either is set.
-        `index_status.coverage` is
-        "verified" only when a full index run of this documentation root finished and read
-        every file it found; otherwise it is "unknown" and `index_status.message` says why.
-        `index_status.root` is the documentation root that answered.
-        `index_status.gitignore` is what git said when a run of the root last finished:
-        `applied`, `off` (switched off), `no_repository`, `unavailable` (git could not be asked,
-        so ignored files may be indexed; the message says how to see why) or `unknown` (no run
-        has recorded it yet - not a failure, and nothing to do).
+        Returns JSON `{"documents": [...], "index_status": {...}}`. `index_status` is the one
+        search_docs describes: `root`, `coverage`, `changed_files`, `message`, and `gitignore`
+        (`applied`, `off`, `no_repository`, `unavailable` or `unknown`).
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """
         directory = _anchored(directory, cwd) or ""
         service = services.get(cwd, directory)
         scope = directory if directory.strip() else None
-        return {
-            "documents": [summary.to_dict() for summary in service.list_documents(directory)],
-            "index_status": service.index_status(scope).to_dict(),
-        }
+        return _json(
+            {
+                "documents": [summary.to_dict() for summary in service.list_documents(directory)],
+                "index_status": service.index_status(scope).to_dict(),
+            }
+        )
 
-    @server.tool()
+    @server.tool(structured_output=False)
     @anticipated_errors
-    def get_document_outline(file_path: str, cwd: str = "") -> list[JsonDict]:
-        """Hierarchical table of contents of one document: heading paths, line ranges and
+    def get_document_outline(file_path: str, cwd: str = "") -> str:
+        """Hierarchical table of contents of one document, as JSON: heading paths, line ranges and
         token estimates. Costs a few hundred tokens; use it to pick a section to read.
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """
         service = services.get(cwd, file_path)
-        return [node.to_dict() for node in service.get_document_outline(file_path, cwd=cwd)]
+        return _json([node.to_dict() for node in service.get_document_outline(file_path, cwd=cwd)])
 
-    @server.tool()
+    @server.tool(structured_output=False)
     @anticipated_errors
     def read_section(
         file_path: str, heading_path: str, include_subsections: bool = False, cwd: str = ""
@@ -632,37 +632,32 @@ def create_server(
             file_path, heading_path, include_subsections=include_subsections, cwd=cwd
         )
 
-    @server.tool()
+    @server.tool(structured_output=False)
     @anticipated_errors
-    def search_docs(query: str, limit: int = 5, cwd: str = "") -> JsonDict:
+    def search_docs(query: str, limit: int = 5, cwd: str = "") -> str:
         """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
-        Returns `{"results": [...], "keyword_match": ..., "index_status": {...}}`, `results`
-        holding at most `limit` hits, best first. The first carries the section's full
-        `content`; the rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` (what
-        reading it costs) and, when a passage won the vector ranking, the `matched_passage`
-        that did. Follow one with
-        `read_section(file_path, heading_path)` only when the first hit does not answer,
-        passing `heading_path` verbatim: for a `(Part n)` of a split section the base path
-        returns every part, and the pointer carries a `part_preview` of how its part begins.
-        `keyword_match` says whether keyword search found the query's
-        terms: anything but "matched" comes with a `keyword_message`, and the hits are
-        semantic neighbours only. Only "no_match" means no indexed section contains the
-        searched terms; a query made only of identifiers then returns no results at all, as
-        the identifier is not in the indexed documentation - whatever its neighbours would say.
-        `index_status.changed_files` counts indexed documents that no
-        longer match the index - a hit may quote text that is no longer there - and is
-        independent of coverage: it can be non-zero while coverage reads "verified", so
-        read `index_status.message` whenever either is set.
-        When `index_status.coverage` is "unknown", what you searched is
-        missing part of its documentation, or was never indexed end to end: an answer drawn
-        from it may be confidently incomplete, and `index_status.message` says what to run.
-        `index_status.root` is the documentation root that answered.
-        `index_status.gitignore` is what git said when a run of the root last finished:
-        `applied`, `off` (switched off), `no_repository`, `unavailable` (git could not be asked,
-        so ignored files may be indexed; the message says how to see why) or `unknown` (no run
-        has recorded it yet - not a failure, and nothing to do).
+        Returns JSON `{"results": [...], "keyword_match": ..., "index_status": {...}}`, at most
+        `limit` hits, best first. The first carries the section's full `content`; the rest are
+        pointers - `file_path`, `heading_path`, `lines`, `tokens` (what reading it costs) and,
+        when a passage won the vector ranking, a `matched_passage` preview of it. Follow one with
+        `read_section(file_path, heading_path)` only when the first hit does not answer, passing
+        `heading_path` verbatim: for a `(Part n)` of a split section the base path returns every
+        part, and the pointer carries a `part_preview` of how its part begins.
+        `keyword_match` other than "matched" comes with a `keyword_message`, and the hits are
+        semantic neighbours only. Only "no_match" means no indexed section contains the searched
+        terms; a query made only of identifiers then returns no results at all, as the
+        identifier is not in the indexed documentation - whatever its neighbours would say.
+        `index_status.root` is the documentation root that answered. `coverage` "unknown" means
+        what you searched is missing part of its documentation, or was never indexed end to end:
+        an answer drawn from it may be confidently incomplete. `changed_files` counts indexed
+        documents that no longer match the index - a hit may quote text that is no longer there -
+        and can be non-zero while coverage reads "verified". Read `message` whenever either is
+        set: it says what to run. `gitignore` is what git said when a run of the root last
+        finished: `applied`, `off` (switched off), `no_repository`, `unavailable` (git could not
+        be asked, so ignored files may be indexed; the message says how to see why) or `unknown`
+        (no run has recorded it yet - not a failure, and nothing to do).
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """
@@ -680,9 +675,14 @@ def create_server(
         if message is not None:
             payload["keyword_message"] = message
         payload["index_status"] = status.to_dict()
-        return payload
+        return _json(payload)
 
     return server
+
+
+def _json(value: JsonValue) -> str:
+    """A tool result as compact JSON: indentation is paid for by the reader, on every call."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
 def configure_logging(level: str | None = None) -> None:

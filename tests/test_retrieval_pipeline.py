@@ -20,7 +20,13 @@ from markdown_memory.embedders import (
 )
 from markdown_memory.exceptions import DatabaseError, IndexingError
 from markdown_memory.indexer import Indexer
-from markdown_memory.models import SectionDraft, SectionVectors
+from markdown_memory.models import (
+    PART_PREVIEW_CHARS,
+    SearchResult,
+    SectionDraft,
+    SectionVectors,
+    preview,
+)
 from markdown_memory.parser import MAX_UNIT_CHARS, MAX_UNITS_PER_SECTION, MarkdownParser
 from markdown_memory.search import KEYWORD_GATE, HybridSearcher, _is_identifier, fts_terms
 
@@ -393,6 +399,13 @@ class TestPassageRanking:
         assert top.to_pointer()["matched_passage"] == top.matched_passage
         # The full shape already carries the passage inside `content`; it is not paid for twice.
         assert "matched_passage" not in top.to_dict()
+
+    def test_a_pointer_shows_how_a_long_passage_begins_not_all_of_it(self) -> None:
+        passage = "The ingest pipeline pauses when downstream is slow. " * 10
+        hit = SearchResult(1, "/d/a.md", "A", "B", "A > B", "x", 1, 2, 0.1, None, 1, passage)
+        assert hit.to_pointer()["matched_passage"] == preview(passage)
+        assert len(preview(passage)) <= PART_PREVIEW_CHARS + 1 < len(passage)
+        assert hit.matched_passage == passage  # read_section still has the whole of it
 
     def test_result_without_a_winning_passage_omits_the_field(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path

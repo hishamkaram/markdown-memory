@@ -606,6 +606,11 @@ class TestPreview:
         # Whitespace only at the very start is not a place to cut: that would leave nothing.
         assert preview(" " + "y" * 150) == " " + "y" * (PART_PREVIEW_CHARS - 1) + "…"
 
+    def test_empty_and_unspaced_scripts_are_safe(self) -> None:
+        assert preview("") == ""
+        cjk = "日本語の文書検索" * 20  # no whitespace anywhere: cut at the limit, by character
+        assert preview(cjk) == cjk[:PART_PREVIEW_CHARS] + "…"
+
 
 # ---------------------------------------------------------------------- real embeddings
 

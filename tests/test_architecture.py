@@ -45,8 +45,9 @@ BUDGETS = {
     "models.py": 285,
     "parser.py": 722,
     "search.py": 399,
-    # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd.
-    "server.py": 500,
+    # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
+    # and for #73: every result sent once, as compact JSON text.
+    "server.py": 510,
     "trees.py": 70,
 }
 

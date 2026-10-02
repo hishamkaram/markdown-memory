@@ -18,7 +18,12 @@ from markdown_memory.config import ServerConfig
 from markdown_memory.exceptions import SectionNotFoundError
 from markdown_memory.headings import build_outline, normalize_heading_path, select_sections
 from markdown_memory.models import PREAMBLE_TITLE, Section, estimate_tokens
-from markdown_memory.server import MarkdownMemoryService, configure_logging, create_server
+from markdown_memory.server import (
+    MarkdownMemoryService,
+    _json,
+    configure_logging,
+    create_server,
+)
 
 
 @pytest.fixture
@@ -46,17 +51,18 @@ def server(service: MarkdownMemoryService) -> MCPServer[None]:
     return create_server(service=service)
 
 
-async def call(server: MCPServer[None], name: str, **arguments: Any) -> Any:
-    """Invoke a tool and return its structured result (the ``result`` wrapper removed).
+# The tools that answer with JSON; the other two answer with text an agent reads as is.
+JSON_TOOLS = {"list_documents", "get_document_outline", "search_docs"}
 
-    A tool that already returns an object is its own structured content; only a bare list
-    or scalar is wrapped in ``result``.
-    """
+
+async def call(server: MCPServer[None], name: str, **arguments: Any) -> Any:
+    """Invoke a tool and return what its one text block says, parsed when it is JSON."""
     outcome = await server.call_tool(name, arguments)
     assert not outcome.is_error
-    assert outcome.structured_content is not None
-    content = outcome.structured_content
-    return content["result"] if set(content) == {"result"} else content
+    assert outcome.structured_content is None
+    (block,) = outcome.content
+    text = block.text  # type: ignore[union-attr]
+    return json.loads(text) if name in JSON_TOOLS else text
 
 
 async def test_the_five_tools_are_registered_with_typed_schemas(server: MCPServer[None]) -> None:
@@ -79,7 +85,8 @@ async def test_the_five_tools_are_registered_with_typed_schemas(server: MCPServe
     assert tools["index_directory"].input_schema.get("required", []) == []
     for tool in tools.values():
         assert tool.description
-        assert tool.output_schema is not None
+        # No output schema, so no `structuredContent`: a result is sent once, as text.
+        assert tool.output_schema is None
 
 
 async def test_index_directory_defaults_to_the_configured_root(server: MCPServer[None]) -> None:
@@ -352,21 +359,39 @@ async def test_search_docs_returns_sections_and_breadcrumbs(
     assert 1 <= len(results) <= 3
     top = results[0]
     assert top["heading_path"] == "Orbit Gateway > Configuration > Environment Variables"
-    assert top["fts_rank"] == 1
+    assert service.search_docs("ORBIT_UPSTREAM_TIMEOUT_MS", 3)[0].fts_rank == 1
     assert "ORBIT_UPSTREAM_TIMEOUT_MS" in top["content"]
-    assert set(top) == {
-        "file_path",
-        "document_title",
-        "heading_path",
-        "heading_title",
-        "lines",
-        "score",
-        "fts_rank",
-        "vec_rank",
-        "tokens",
-        "content",
-    }  # fmt: skip - and no matched_passage: it would repeat a sentence of `content`
+    # A pointer plus its text: nothing that ranks it, no titles `heading_path` already names,
+    # and no matched_passage - it would repeat a sentence of `content`.
+    assert set(top) == {"file_path", "heading_path", "lines", "tokens", "content"}
     assert (await call(server, "search_docs", query="   "))["results"] == []
+
+
+async def test_each_result_is_one_text_block_of_compact_json_or_raw_text(
+    server: MCPServer[None], service: MarkdownMemoryService
+) -> None:
+    """Sent once, as text: a client that shows the model the whole result pays for nothing twice."""
+    await call(server, "index_directory")
+    path = (await call(server, "list_documents"))["documents"][0]["file_path"]
+    for name, arguments in (
+        ("search_docs", {"query": "ORBIT_UPSTREAM_TIMEOUT_MS"}),
+        ("list_documents", {}),
+        ("get_document_outline", {"file_path": path}),
+    ):
+        outcome = await server.call_tool(name, arguments)
+        assert outcome.structured_content is None
+        (block,) = outcome.content
+        text = block.text  # type: ignore[union-attr]
+        assert text == json.dumps(json.loads(text), separators=(",", ":"), ensure_ascii=False)
+    heading = service.get_document_outline(path)[0].heading_path
+    outcome = await server.call_tool("read_section", {"file_path": path, "heading_path": heading})
+    (block,) = outcome.content
+    assert block.text == service.read_section(path, heading)  # type: ignore[union-attr]
+
+
+def test_non_ascii_text_is_sent_as_itself_not_escaped() -> None:
+    """`\\u65e5` is six characters for one, and a model reads the escape, not the word."""
+    assert _json({"t": "naïve — 日本語"}) == '{"t":"naïve — 日本語"}'
 
 
 async def test_hits_after_the_first_are_pointers_that_read_section_follows(
