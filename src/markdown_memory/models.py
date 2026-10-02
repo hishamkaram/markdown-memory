@@ -6,6 +6,7 @@ JSON-serialisable payloads returned by the MCP tools.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -332,7 +333,8 @@ class IndexStatus:
     indexing: bool = False
     #: What git said about the root the last time a walk of it finished: `applied`, `off`,
     #: `no_repository`, `unavailable` (git could not be asked, so what it ignores was indexed
-    #: too), or `unknown` when no walk has finished since the index was built.
+    #: too), or `unknown` when no finished walk has recorded it yet - since the index was built,
+    #: or since an upgrade from a version that did not record it.
     gitignore: str = "unknown"
     #: The documentation root this answer was drawn from: the configured one, or another
     #: work tree's copy of it when the call named a path or `cwd` in that tree.
@@ -379,10 +381,15 @@ class IndexStatus:
                 )
             if self.gitignore == "unavailable":
                 # Last: the tree is whole, only perhaps larger than the project's own docs.
+                # The cause is in the report and the log, and an agent reads neither; a
+                # command it can run itself is the part that reaches it.
+                where = shlex.join(
+                    ["git", "-C", self.root, "status"] if self.root else ["git", "status"]
+                )
                 return (
                     "git could not list the files it ignores when this root was last indexed, "
-                    "so generated or ignored Markdown may be among the results; the server "
-                    "log says why."
+                    f"so generated or ignored Markdown may be among the results; run `{where}` "
+                    "to see why."
                 )
             return None
         if not self.failures:

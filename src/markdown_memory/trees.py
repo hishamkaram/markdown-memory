@@ -56,14 +56,9 @@ def work_tree(path: Path) -> Tree | None:
             raise WorkTreeError(f"No directory of {discovery._printable(str(path))} exists")
         directory = directory.parent
     try:
-        listed = subprocess.check_output(
-            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute",
-             "--show-toplevel", "--git-common-dir"],
-            stdin=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            env=discovery.git_environment(),
-        )  # fmt: skip
+        listed = discovery.git(
+            directory, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"
+        )
     except FileNotFoundError:
         return None
     except subprocess.CalledProcessError as exc:

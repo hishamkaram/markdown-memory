@@ -11,8 +11,10 @@ import contextlib
 import hashlib
 import logging
 import os
+import shlex
 import stat
 import subprocess
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -112,7 +114,8 @@ class GitIgnore:
 
     ``state`` is `applied`, `off` (switched off), `no_repository` (nothing to ignore - the walk
     is already right) or `unavailable` (a repository git could not be asked about, so what it
-    ignores is indexed as well; ``cause`` says why).
+    ignores is indexed as well; ``cause`` says why). A status reads `unknown` until a finished
+    run has recorded one of these.
     """
 
     state: str
@@ -131,16 +134,10 @@ def git_ignored(root: Path) -> GitIgnore:
     generated output is then indexed. Input and output are captured: stdout is the JSON-RPC
     channel, and stdin is the client's.
     """
-    env = git_environment()
     try:
-        listed = subprocess.check_output(
-            ["git", "-C", str(root), "ls-files", "--others", "--ignored", "--exclude-standard",
-             "--directory", "-z"],
-            stdin=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            env=env,
-        )  # fmt: skip
+        listed = git(
+            root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"
+        )
     except FileNotFoundError:
         if not _in_repository(root):
             return GitIgnore("no_repository")
@@ -157,6 +154,85 @@ def git_ignored(root: Path) -> GitIgnore:
     # for an ignored directory asked on purpose, and its contents are indexed.
     entries = (os.fsdecode(raw).rstrip("/") for raw in listed.split(b"\0"))
     return GitIgnore("applied", frozenset(_printable(entry) for entry in entries if entry))
+
+
+#: What git says in a checkout whose repository is configured bare (`core.bare = true`, which
+#: some agent worktree tooling sets on the main checkout); the second is a submodule's, whose
+#: config also names its work tree.
+_BARE_CHECKOUT = ("must be run in a work tree", "unable to set up work tree using invalid config")
+
+
+#: Checkouts already warned about, so a server running for days logs each one once.
+_warned: set[str] = set()
+
+
+_warned_lock = threading.Lock()
+
+
+def git(directory: Path, *args: str) -> bytes:
+    """Run git in ``directory`` and return what it printed; `CalledProcessError` if it failed.
+
+    The one way this package runs git: input and output captured (stdout is the JSON-RPC
+    channel, stdin the client's), its own repository's environment, a timeout. A checkout
+    whose repository says it is bare is read with the checkout as the work tree, which is
+    what git itself does once the setting is gone. Nothing in git's config is changed.
+    """
+    try:
+        return _run_git(directory, args)
+    except subprocess.CalledProcessError as exc:
+        said = os.fsdecode(exc.stderr or b"")
+        if exc.returncode != 128 or not any(marker in said for marker in _BARE_CHECKOUT):
+            raise
+        checkout = _bare_checkout(directory)
+        if checkout is None:
+            raise
+        with _warned_lock:
+            first = str(checkout) not in _warned
+            _warned.add(str(checkout))
+        if first:
+            shown = _printable(str(checkout))
+            logger.warning(
+                "git treats the repository of %s as bare (core.bare = true); it was read with "
+                "%s as its work tree. Other git commands there fail until `%s`, unless "
+                "something set it on purpose.",
+                shown,
+                shown,
+                shlex.join(["git", "-C", shown, "config", "core.bare", "false"]),
+            )
+        return _run_git(directory, args, work_tree=checkout)
+
+
+def _run_git(directory: Path, args: Sequence[str], work_tree: Path | None = None) -> bytes:
+    command = ["git", "-C", str(directory)]
+    if work_tree is not None:
+        command.append(f"--work-tree={work_tree}")
+    return subprocess.check_output(
+        [*command, *args],
+        stdin=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        env=git_environment(),
+    )
+
+
+def _bare_checkout(directory: Path) -> Path | None:
+    """The checkout around ``directory`` when git calls its repository bare, else ``None``.
+
+    Git is asked first: a real bare repository, or a path inside a git directory, answers
+    true and is left alone. Otherwise the work tree is the nearest directory with a `.git`
+    entry, which is where git itself starts - its existence is checked, nothing is read.
+    """
+    try:
+        inside = _run_git(directory, ("rev-parse", "--is-inside-git-dir")).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if inside != b"false":
+        return None
+    start = directory.resolve()
+    return next(
+        (candidate for candidate in (start, *start.parents) if os.path.lexists(candidate / ".git")),
+        None,
+    )
 
 
 def git_environment() -> dict[str, str]:
@@ -363,12 +439,89 @@ def _in_linked_worktree(path: Path, root: Path) -> bool:
     prompted this kept 38 of them under `.claude/worktrees/`. ``root`` itself is never asked,
     so pointing `index_directory` at a worktree still indexes it.
     """
+    return _linked_worktree_of(path, root) is not None
+
+
+def _linked_worktree_of(path: Path, root: Path) -> Path | None:
     current = path
     while current != root and current.parent != current:
         if _is_linked_worktree(current):
-            return True
+            return current
         current = current.parent
-    return False
+    return None
+
+
+def unindexed_reason(path: Path, root: Path, exclude: Sequence[str], gitignore: bool) -> str | None:
+    """Why the file at ``path`` is not in the index of ``root``; ``None`` when nothing says.
+
+    For an agent that named a document the index does not hold, and was told only "Run
+    index_directory" - advice that cannot help a path outside the root, or one the root's own
+    runs leave out and would purge again. The first rule that holds answers, in the order a
+    walk decides: what is on disk, then where it is, then the root's own rules. Only the
+    error path asks, so one `git check-ignore` here costs nothing anyone waits on.
+    """
+    shown = _printable(str(path))
+    if not path.exists():
+        return f"'{shown}' does not exist."
+    if path.is_dir() or path.suffix.lower() not in MARKDOWN_SUFFIXES:
+        return f"'{shown}' is not a Markdown document (.md or .markdown)."
+    # The directory resolved, the name kept: a link is indexed under its own path, wherever
+    # it points, so it is judged there too.
+    real = path.parent.resolve() / path.name
+    if real != root and root not in real.parents:
+        return (
+            f"'{shown}' is outside {_printable(str(root))}, the documentation root this server "
+            "indexes. If it is in another worktree of this repository, pass that worktree as cwd."
+        )
+    parts = real.relative_to(root).parts[:-1]
+    skipped = next((end for end in range(len(parts)) if parts[end] in _SKIPPED_DIRECTORIES), None)
+    if skipped is not None:
+        directory = _printable(str(root.joinpath(*parts[: skipped + 1])))
+        return (
+            f"'{shown}' is inside {directory}, which every walk of the root skips; "
+            f"index_directory('{directory}') indexes it."
+        )
+    worktree = _linked_worktree_of(real, root)
+    if worktree is not None:
+        return (
+            f"'{shown}' is inside the linked worktree {_printable(str(worktree))}, which the "
+            "root's index leaves out: pass that worktree as cwd, or this file's absolute path, "
+            "to read the worktree's own index."
+        )
+    if _is_excluded(real, root, exclude):
+        why = "an exclusion pattern (the server's --exclude)"
+    elif gitignore and _git_ignores(real, root):
+        why = "git ignoring it (the server's --no-gitignore turns that off)"
+    else:
+        return None
+    return (
+        f"'{shown}' is under {_printable(str(root))} but left out of its index by {why}: "
+        "a run of the root leaves it out, and removes any copy indexed here."
+    )
+
+
+def _git_ignores(path: Path, root: Path) -> bool:
+    """Whether a walk of ``root`` leaves ``path`` out because git ignores it.
+
+    The walk's own question (`git_ignored`), narrowed to the path's top component: a deeper
+    pathspec below an ignored directory makes git fail ("directory entry not superset of
+    prefix"), and `check-ignore` would also read a nested clone's `.gitignore`, which the walk
+    does not, and call everything below a root git ignores ignored, which the walk indexes
+    anyway (`./`). Anything git cannot answer counts as no.
+    """
+    relative = path.relative_to(root)
+    try:
+        listed = git(
+            root, "--literal-pathspecs",  # a name such as `:(top)x.md` is not pathspec magic
+            "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
+            "--", relative.parts[0],
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # A root git ignores whole comes back as `./`, which names no path below it.
+    entries = {os.fsdecode(raw).rstrip("/") for raw in listed.split(b"\0")}
+    parts = relative.parts
+    return any("/".join(parts[:end]) in entries for end in range(1, len(parts) + 1))
 
 
 def _is_linked_worktree(directory: Path) -> bool:
