@@ -955,12 +955,14 @@ class TestTheExcerptHarness:
         import eval_excerpts
 
         text = self.page(dict(self.TOP, excerpt=True, content="the passage"))
+        whole = self.page(dict(self.TOP, content="# B\n\nthe section"))
         orders = set()
         for seed in range(20):
             item = eval_excerpts.make_item(
                 f"v2-dev-paraphrase-{seed:02d}",
                 "q",
                 text,
+                whole,
                 "# B\n\nthe section",
                 random.Random(seed),
             )
@@ -972,8 +974,12 @@ class TestTheExcerptHarness:
             assert "excerpt" not in json.dumps(item.judge)  # nothing tells the judge which
             orders.add(excerpt)
         assert orders == {"A", "B"}
-        again = eval_excerpts.make_item("x", "q", text, "s", random.Random(3))
-        first = eval_excerpts.make_item("x", "q", text, "s", random.Random(3))
+        again = eval_excerpts.make_item(
+            "x", "q", text, whole, "# B\n\nthe section", random.Random(3)
+        )
+        first = eval_excerpts.make_item(
+            "x", "q", text, whole, "# B\n\nthe section", random.Random(3)
+        )
         assert again is not None and first is not None and again.key == first.key
 
     def test_a_whole_section_is_shown_once_and_its_baseline_is_its_own_payload(self) -> None:
@@ -983,14 +989,15 @@ class TestTheExcerptHarness:
 
         text = self.page(dict(self.TOP, content="# B\n\nthe section"))
         item = eval_excerpts.make_item(
-            "v1-dev-identifier-00", "q", text, "# B\n\nthe section", random.Random(0)
+            "v1-dev-identifier-00", "q", text, text, "# B\n\nthe section", random.Random(0)
         )
         assert item is not None
         assert item.judge["texts"] == {"A": "# B\n\nthe section"}
         assert item.key["excerpt"] is None and item.key["section"] == "A"
         assert item.key["payload_tokens"] == item.key["section_payload_tokens"]
 
-    def test_the_baseline_differs_from_the_payload_by_the_excerpt_alone(self) -> None:
+    def test_the_baseline_is_the_whole_section_response_for_the_same_top_hit(self) -> None:
+        """Priced from what the server sends with the excerpt off, `lines` and all."""
         import random
 
         import eval_excerpts
@@ -998,20 +1005,27 @@ class TestTheExcerptHarness:
         pointer = {"file_path": "b.md", "heading_path": "C", "lines": "1-2", "tokens": 7}
         section = "# B\n\n" + "a long section " * 40
         text = self.page(dict(self.TOP, excerpt=True, content="the passage"), pointer)
-        item = eval_excerpts.make_item("v2-dev-paraphrase-00", "q", text, section, random.Random(0))
+        whole = self.page(dict(self.TOP, lines="1-40", content=section), pointer)
+        item = eval_excerpts.make_item(
+            "v2-dev-paraphrase-00", "q", text, whole, section, random.Random(0)
+        )
         assert item is not None
-        whole = self.page(dict(self.TOP, content=section), pointer)
         assert item.key["section_payload_tokens"] == estimate_tokens(whole)
         assert item.key["payload_tokens"] == estimate_tokens(text)
         assert item.key["read_tokens"] == estimate_tokens(section)
+        elsewhere = self.page(dict(self.TOP, heading_path="A > C", content=section), pointer)
+        with pytest.raises(RuntimeError, match="another top hit"):
+            eval_excerpts.make_item("x", "q", text, elsewhere, section, random.Random(0))
 
     def test_a_key_names_the_section_its_query_was_answered_by(self) -> None:
         import random
 
         import eval_excerpts
 
-        text = self.page(dict(self.TOP, content="# B\n\nthe section"))
-        item = eval_excerpts.make_item("v2-dev-paraphrase-00", "q", text, "s", random.Random(0))
+        text = self.page(dict(self.TOP, content="s"))
+        item = eval_excerpts.make_item(
+            "v2-dev-paraphrase-00", "q", text, text, "s", random.Random(0)
+        )
         assert item is not None and item.key["cluster"] == "a.md :: A > B"
 
     @staticmethod
@@ -1090,25 +1104,39 @@ class TestTheExcerptHarness:
         assert 1.0 < spread <= 1.5
         assert spread == eval_excerpts.cost_upper(outcomes([f"s{n}" for n in range(8)]), "x")
 
-    def test_the_gates_count_only_frozen_items_and_cost_only_on_v2(self) -> None:
+    def test_the_gates_count_only_frozen_items_and_hold_only_on_v2(self) -> None:
         import eval_excerpts
 
-        def run(corpus: str, kept: int, total: int, payload: int, extra: int = 0) -> bool:
-            keys = [
+        def keys(corpus: str, total: int, payload: int) -> list[dict[str, Any]]:
+            return [
                 self.key(f"{corpus}-sealed-paraphrase-{n:03d}", "A", payload=payload)
-                for n in range(total + extra)
+                for n in range(total)
             ]
-            judges = [{k["id"]: "yes" if n < kept else "no" for n, k in enumerate(keys)}] * 3
-            eligible = [k["id"] for k in keys[:total]]
-            return eval_excerpts.score(keys, eligible, judges)[1]
 
-        assert run("v2", 120, 120, 100)
-        assert run("v2", 114, 120, 100)  # 95.0%, Wilson bound 90.6%
-        assert not run("v2", 113, 120, 100)  # 94.2%
-        assert not run("v2", 20, 20, 100)  # 100%, but a bound of 88.1% on twenty items
-        assert not run("v2", 120, 120, 170)  # 85% of the baseline's cost
-        assert run("v1", 120, 120, 170)  # v1's cost is reported, not gated
-        assert run("v2", 120, 120, 100, extra=30)  # items outside the frozen list do not count
+        def run(kept: int, total: int, payload: int, extra: int = 0, v1: int = 0) -> bool:
+            items = keys("v2", total + extra, payload) + keys("v1", v1, 200)
+            ids = [k["id"] for k in items]
+            verdict = {item_id: "yes" if n < kept else "no" for n, item_id in enumerate(ids)}
+            eligible = ids[:total] + ids[total + extra :]
+            return eval_excerpts.score(items, eligible, [verdict] * 3)[1]
+
+        assert run(124, 124, 100)
+        assert run(118, 124, 100)  # 95.2%, Wilson bound 90.9%
+        assert not run(117, 124, 100)  # 94.4%
+        assert not run(20, 20, 100)  # 100%, but a bound of 88.1% on twenty items
+        assert run(124, 124, 180)  # 90% of the baseline: a material saving, target missed
+        assert not run(124, 124, 182)  # 91%
+        assert run(124, 124, 100, extra=30)  # items outside the frozen list do not count
+        assert run(124, 124, 100, v1=20)  # v1 is reported: its lost excerpts gate nothing
+        assert not eval_excerpts.score(keys("v1", 20, 100), [], [{}] * 3)[1]
+
+    def test_the_cost_target_is_reported_but_does_not_gate(self) -> None:
+        import eval_excerpts
+
+        items = [self.key(f"v2-sealed-paraphrase-{n:03d}", "A", payload=170) for n in range(124)]
+        verdict = {k["id"]: "yes" for k in items}
+        lines, passed = eval_excerpts.score(items, [k["id"] for k in items], [verdict] * 3)
+        assert passed and any("target 80% / 85%: missed" in line for line in lines)
 
     def test_a_malformed_missing_or_repeated_verdict_stops_the_score(self, tmp_path: Path) -> None:
         import eval_excerpts
@@ -1127,9 +1155,22 @@ class TestTheExcerptHarness:
         with pytest.raises(SystemExit, match="malformed"):
             read([{"id": ids[0], "A": "yes"}, {"id": ids[0], "A": "no"}])
         with pytest.raises(SystemExit, match="no verdict"):
-            read([{"id": "another", "A": "yes"}])
+            read([])
+        with pytest.raises(SystemExit, match="not given"):
+            read([{"id": ids[0], "A": "yes"}, {"id": "another", "A": "yes"}])
         answer = [{"id": ids[0], "A": "yes", "note": "x"}]
         assert read("```json\n" + json.dumps(answer) + "\n```") == {ids[0]: "yes"}
+
+    def test_a_build_that_drifted_from_the_frozen_denominator_is_not_scored(self) -> None:
+        import eval_excerpts
+
+        keys = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: A")]
+        frozen = {"eligible": [keys[0]["id"]], "clusters": {keys[0]["id"]: "a.md :: A"}}
+        assert eval_excerpts.drifted(keys, frozen) == ""
+        assert "missing" in eval_excerpts.drifted([], frozen)
+        assert "repeated" in eval_excerpts.drifted(keys * 2, frozen)
+        moved = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: B")]
+        assert "another section" in eval_excerpts.drifted(moved, frozen)
 
     def test_the_prompt_asks_for_the_letter_the_score_reads(self) -> None:
         import eval_excerpts

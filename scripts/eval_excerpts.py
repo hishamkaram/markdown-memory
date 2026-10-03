@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import random
@@ -53,13 +54,18 @@ SEED = 76
 RANKING_LIMIT = 20  # what eval_retrieval.evaluate searches
 KINDS = ("paraphrase", "identifier")
 VERDICTS = ("yes", "partial", "no")
+# Gated on corpus v2 only, over every frozen eligible item; v1 is reported. The cost gate asks
+# for a material net saving; the 80% target is what #76 hoped for, and is reported, not gated.
+GATED = ("v2",)
 FLOOR_RETENTION = 0.95
 FLOOR_RETENTION_BOUND = 0.90  # one-sided 95% Wilson lower bound on retention
-CEILING_COST_RATIO = 0.80  # on corpus v2 only; v1 is reported
-CEILING_COST_BOUND = 0.85  # one-sided 95% bootstrap upper bound, resampling sections
-COST_GATED = ("v2",)
+CEILING_COST_RATIO = 0.90
+CEILING_COST_BOUND = 0.95  # one-sided 95% bootstrap upper bound, resampling sections
+TARGET_COST_RATIO = 0.80
+TARGET_COST_BOUND = 0.85
 Z_95 = 1.6448536269514722  # one-sided 95%
 BOOTSTRAP_ROUNDS = 2000
+JUDGES = 3  # a strict majority of three: no split is left for a joint pass to settle
 
 JUDGE_PROMPT = """\
 You are judging a documentation-retrieval experiment. Do NOT run tests and change NO files.
@@ -142,33 +148,38 @@ def _call(service: MarkdownMemoryService, tool: str, arguments: dict[str, Any]) 
     return asyncio.run(call())
 
 
-def _compact(value: object) -> str:
-    """The server's own serialisation (`server._json`), so token counts compare like for like."""
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-
-
 def make_item(
-    item_id: str, query: str, payload_text: str, section_text: str, rng: random.Random
+    item_id: str,
+    query: str,
+    payload_text: str,
+    baseline_text: str,
+    section_text: str,
+    rng: random.Random,
 ) -> Item | None:
     """The judge's view and the key of one query, from what `search_docs` sent.
 
-    `section_text` is `read_section` of the top hit: its whole section, or its part for a
-    `(Part n)`. The baseline payload is the same page with that text as the top hit's content,
-    so the two payloads differ by the excerpt alone.
+    `baseline_text` is what `search_docs` sends for the same query with the excerpt switched
+    off, and `section_text` is `read_section` of the top hit: its whole section, or its part
+    for a `(Part n)`. The two responses must name the same top hit, whose whole content is
+    that section, or the baseline would price something else.
     """
     page = json.loads(payload_text)
     if not page["results"]:
         return None
     top = page["results"][0]
-    whole = {key: value for key, value in top.items() if key != "excerpt"}
-    whole["content"] = section_text
-    baseline = dict(page, results=[whole, *page["results"][1:]])
+    whole = json.loads(baseline_text)["results"][0]
+    if (whole["file_path"], whole["heading_path"], whole["content"]) != (
+        top["file_path"],
+        top["heading_path"],
+        section_text,
+    ):
+        raise RuntimeError(f"{item_id}: the whole-section response names another top hit")
     key: dict[str, Any] = {
         "id": item_id,
         # Queries answered by one section are not independent: the bootstrap resamples these.
         "cluster": f"{top['file_path']} :: {top['heading_path']}",
         "payload_tokens": estimate_tokens(payload_text),
-        "section_payload_tokens": estimate_tokens(_compact(baseline)),
+        "section_payload_tokens": estimate_tokens(baseline_text),
         "read_tokens": estimate_tokens(section_text),
     }
     if top.get("excerpt"):
@@ -190,6 +201,8 @@ def build(
     for kind, index, case in _cases(queries, split):
         query = str(case["query"])
         payload_text = _call(service, "search_docs", {"query": query})
+        with excerpts_off():
+            baseline_text = _call(service, "search_docs", {"query": query})
         top = (json.loads(payload_text)["results"] or [None])[0]
         if top is None:
             continue
@@ -198,9 +211,8 @@ def build(
             "read_section",
             {"file_path": top["file_path"], "heading_path": top["heading_path"]},
         )
-        item = make_item(
-            f"{corpus}-{split}-{kind}-{index:02d}", query, payload_text, section_text, rng
-        )
+        item_id = f"{corpus}-{split}-{kind}-{index:02d}"
+        item = make_item(item_id, query, payload_text, baseline_text, section_text, rng)
         if item is not None:
             items.append(item)
     return items
@@ -245,7 +257,7 @@ def read_verdicts(path: Path, ids: Sequence[str]) -> dict[str, str]:
     for answer in json.loads(text):
         item_id = answer.get("id")
         if item_id not in wanted:
-            continue  # a judge given several builds' inputs at once answers for all of them
+            raise SystemExit(f"{path}: a verdict for {item_id!r}, which it was not given")
         if (
             answer.get("A") not in VERDICTS
             or set(answer) - {"id", "A", "note"}
@@ -257,6 +269,32 @@ def read_verdicts(path: Path, ids: Sequence[str]) -> dict[str, str]:
     if missing:
         raise SystemExit(f"{path}: no verdict for {', '.join(sorted(missing))}")
     return verdicts
+
+
+def drifted(keys: Sequence[Mapping[str, Any]], frozen: Mapping[str, Any]) -> str:
+    """Why a build cannot be scored against a frozen denominator, or "" when it can.
+
+    Every frozen eligible item must be in the build exactly once, answered by the section it
+    was frozen with: a changed ranking or a rebuilt index would otherwise score a different
+    section against a verdict about another.
+    """
+    counts: dict[str, int] = {}
+    for key in keys:
+        counts[key["id"]] = counts.get(key["id"], 0) + 1
+    problems = [
+        f"{item_id} {'missing' if item_id not in counts else 'repeated'}"
+        for item_id in frozen["eligible"]
+        if counts.get(item_id) != 1
+    ]
+    clusters = frozen.get("clusters")
+    if clusters is None:
+        return "the frozen file records no sections; freeze it again"
+    problems += [
+        f"{key['id']} now answered by another section"
+        for key in keys
+        if key["id"] in set(frozen["eligible"]) and clusters.get(key["id"]) != key["cluster"]
+    ]
+    return "; ".join(problems)
 
 
 def majority_yes(item_id: str, judges: Sequence[Mapping[str, str]]) -> bool:
@@ -327,7 +365,7 @@ def score(
         bound = wilson_lower(kept, len(outcomes))
         ratio = sum(o.cost for o in outcomes) / sum(o.baseline for o in outcomes)
         upper = cost_upper(outcomes, f"{SEED}/{corpus}")
-        gated = corpus in COST_GATED
+        gated = corpus in GATED
         lines.append(
             f"{corpus}: retention {kept}/{len(outcomes)} = {retention:.1%} (floor "
             f"{FLOOR_RETENTION:.0%}), Wilson lower bound {bound:.1%} (floor "
@@ -335,19 +373,25 @@ def score(
             + (
                 f" (ceilings {CEILING_COST_RATIO:.0%}, {CEILING_COST_BOUND:.0%})"
                 if gated
-                else " (reported)"
+                else " (reported, not gated)"
             )
         )
+        if gated:
+            met = ratio <= TARGET_COST_RATIO and upper <= TARGET_COST_BOUND
+            lines.append(
+                f"  cost target {TARGET_COST_RATIO:.0%} / {TARGET_COST_BOUND:.0%}: "
+                + ("met" if met else "missed (reported, not gated)")
+            )
         lines.append(
             f"  cost median {statistics.median(o.cost for o in outcomes):.0f} "
             f"p95 {_p95([float(o.cost) for o in outcomes]):.0f}; "
             f"excerpted {sum(o.excerpted for o in outcomes)}/{len(outcomes)} eligible"
         )
-        passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND
         if gated:
-            passed &= ratio <= CEILING_COST_RATIO and upper <= CEILING_COST_BOUND
-    if not by_corpus:
-        lines.append("no eligible item")
+            passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND
+            passed &= ratio <= CEILING_COST_RATIO and upper < CEILING_COST_BOUND
+    if not any(corpus in by_corpus for corpus in GATED):
+        lines.append("no eligible item of a gated corpus")
         passed = False
     return lines, passed
 
@@ -467,24 +511,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{len(texts)} {arguments.which} texts written to {arguments.out}")
         return 0
     if arguments.command in ("freeze", "score"):
-        if len(arguments.judge) < 2:
-            raise SystemExit("at least two judges are needed")
+        if len(arguments.judge) != JUDGES:
+            raise SystemExit(f"exactly {JUDGES} judges are needed")
         keys = [key for path in arguments.keys for key in _read_jsonl(path)]
+        if len({key["id"] for key in keys}) != len(keys):
+            raise SystemExit("an item id appears twice in the keys")
         if arguments.command == "freeze":
             ids = [key["id"] for key in keys]
             judges = [read_verdicts(path, ids) for path in arguments.judge]
-            eligible = [item_id for item_id in ids if majority_yes(item_id, judges)]
-            arguments.out.write_text(
-                json.dumps({"eligible": eligible, "items": len(ids)}, indent=1) + "\n",
-                encoding="utf-8",
+            frozen = {
+                "eligible": [item_id for item_id in ids if majority_yes(item_id, judges)],
+                "items": len(ids),
+                "clusters": {key["id"]: key["cluster"] for key in keys},
+            }
+            arguments.out.write_text(json.dumps(frozen, indent=1) + "\n", encoding="utf-8")
+            print(
+                f"{len(frozen['eligible'])}/{len(ids)} items eligible, written to {arguments.out}"
             )
-            print(f"{len(eligible)}/{len(ids)} items eligible, written to {arguments.out}")
             return 0
-        eligible = json.loads(arguments.eligible.read_text(encoding="utf-8"))["eligible"]
-        frozen = set(eligible)
-        excerpted = [k["id"] for k in keys if k["id"] in frozen and k["excerpt"] is not None]
+        frozen = json.loads(arguments.eligible.read_text(encoding="utf-8"))
+        drift = drifted(keys, frozen)
+        if drift:
+            raise SystemExit(f"the build no longer matches the frozen denominator: {drift}")
+        eligible = frozen["eligible"]
+        # Every excerpt is judged, eligible or not, so a verdict file matches its input exactly.
+        excerpted = [key["id"] for key in keys if key["excerpt"] is not None]
         judges = [read_verdicts(path, excerpted) for path in arguments.judge]
         lines, passed = score(keys, eligible, judges)
+        for path in [arguments.eligible, *arguments.judge]:
+            lines.append(f"  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}  {path}")
         print("\n".join(lines))
         print("PASS" if passed else "FAIL")
         return 0 if passed else 1

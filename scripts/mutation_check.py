@@ -1104,9 +1104,9 @@ MUTATIONS = (
         name="excerpt harness: pass a small sample on its point estimate alone",
         module="eval_excerpts.py",
         area="scripts",
-        old="        passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND",
-        new="        passed &= retention >= FLOOR_RETENTION",
-        tests="test_the_gates_count_only_frozen_items_and_cost_only_on_v2",
+        old="            passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND",
+        new="            passed &= retention >= FLOOR_RETENTION",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
     ),
     Mutation(
         name="excerpt harness: score items outside the frozen denominator",
@@ -1114,7 +1114,7 @@ MUTATIONS = (
         area="scripts",
         old='        if key["id"] in frozen:',
         new="        if True:",
-        tests="test_the_gates_count_only_frozen_items_and_cost_only_on_v2",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
     ),
     Mutation(
         name="excerpt harness: let a lost excerpt cost nothing more",
@@ -1123,6 +1123,45 @@ MUTATIONS = (
         old='    cost = key["payload_tokens"] + (0 if kept else key["read_tokens"])',
         new='    cost = key["payload_tokens"]',
         tests="test_a_lost_excerpt_costs_the_read_and_a_whole_section_is_kept_as_sent",
+    ),
+    Mutation(
+        name="excerpt harness: score a top hit that moved to another section",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            '        if key["id"] in set(frozen["eligible"]) and clusters.get(key["id"])'
+            ' != key["cluster"]'
+        ),
+        new='        if key["id"] in set(frozen["eligible"]) and False',
+        tests="test_a_build_that_drifted_from_the_frozen_denominator_is_not_scored",
+    ),
+    Mutation(
+        name="excerpt harness: price a baseline that names another top hit",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            '        raise RuntimeError(f"{item_id}: the whole-section response'
+            ' names another top hit")'
+        ),
+        new="        pass",
+        tests="test_the_baseline_is_the_whole_section_response_for_the_same_top_hit",
+    ),
+    Mutation(
+        name="excerpt harness: gate v1, which has no sealed set",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='GATED = ("v2",)',
+        new='GATED = ("v1", "v2")',
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
+    ),
+    Mutation(
+        name="excerpt harness: gate the hoped-for cost instead of a material saving",
+        module="eval_excerpts.py",
+        area="scripts",
+        old="CEILING_COST_RATIO = 0.90",
+        new="CEILING_COST_RATIO = 0.80",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2 "
+        "or test_the_cost_target_is_reported_but_does_not_gate",
     ),
     Mutation(
         name="diagram: print a token count the files stopped matching",
