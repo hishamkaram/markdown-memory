@@ -937,6 +937,179 @@ class TestEvalIndexCache:
             )
 
 
+class TestTheExcerptHarness:
+    """`scripts/eval_excerpts.py` (#76): what the judges see, and how their verdicts score."""
+
+    @staticmethod
+    def page(top: dict[str, Any], *pointers: dict[str, Any]) -> str:
+        return json.dumps(
+            {"results": [top, *pointers], "keyword_match": "matched", "index_status": {}},
+            separators=(",", ":"),
+        )
+
+    TOP = {"file_path": "a.md", "heading_path": "A > B", "lines": "3-5", "tokens": 90}
+
+    def test_an_excerpt_and_its_section_are_shown_in_a_seeded_random_order(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, excerpt=True, content="the passage"))
+        orders = set()
+        for seed in range(20):
+            item = eval_excerpts.make_item(
+                f"v2-dev-paraphrase-{seed:02d}",
+                "q",
+                text,
+                "# B\n\nthe section",
+                random.Random(seed),
+            )
+            assert item is not None
+            excerpt, section = item.key["excerpt"], item.key["section"]
+            assert {excerpt, section} == {"A", "B"}
+            assert item.judge["texts"][excerpt] == "the passage"
+            assert item.judge["texts"][section] == "# B\n\nthe section"
+            assert "excerpt" not in json.dumps(item.judge)  # nothing tells the judge which
+            orders.add(excerpt)
+        assert orders == {"A", "B"}
+        again = eval_excerpts.make_item("x", "q", text, "s", random.Random(3))
+        first = eval_excerpts.make_item("x", "q", text, "s", random.Random(3))
+        assert again is not None and first is not None and again.key == first.key
+
+    def test_a_whole_section_is_shown_once_and_its_baseline_is_its_own_payload(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, content="# B\n\nthe section"))
+        item = eval_excerpts.make_item(
+            "v1-dev-identifier-00", "q", text, "# B\n\nthe section", random.Random(0)
+        )
+        assert item is not None
+        assert item.judge["texts"] == {"A": "# B\n\nthe section"}
+        assert item.key["excerpt"] is None and item.key["section"] == "A"
+        assert item.key["payload_tokens"] == item.key["section_payload_tokens"]
+
+    def test_the_baseline_differs_from_the_payload_by_the_excerpt_alone(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        pointer = {"file_path": "b.md", "heading_path": "C", "lines": "1-2", "tokens": 7}
+        section = "# B\n\n" + "a long section " * 40
+        text = self.page(dict(self.TOP, excerpt=True, content="the passage"), pointer)
+        item = eval_excerpts.make_item("v2-dev-paraphrase-00", "q", text, section, random.Random(0))
+        assert item is not None
+        whole = self.page(dict(self.TOP, content=section), pointer)
+        assert item.key["section_payload_tokens"] == estimate_tokens(whole)
+        assert item.key["payload_tokens"] == estimate_tokens(text)
+        assert item.key["read_tokens"] == estimate_tokens(section)
+
+    @staticmethod
+    def key(item_id: str, excerpt: str | None, **tokens: int) -> dict[str, Any]:
+        section = "A" if excerpt is None else ("B" if excerpt == "A" else "A")
+        return {
+            "id": item_id,
+            "excerpt": excerpt,
+            "section": section,
+            "payload_tokens": tokens.get("payload", 100),
+            "section_payload_tokens": tokens.get("baseline", 200),
+            "read_tokens": tokens.get("read", 150),
+        }
+
+    def test_retention_counts_only_items_whose_section_answers(self) -> None:
+        import eval_excerpts
+
+        keys = [
+            self.key("v2-held_out-paraphrase-00", "A"),  # excerpt A yes, section B yes: kept
+            self.key("v2-held_out-paraphrase-01", "A"),  # excerpt A partial, section yes: lost
+            self.key("v2-held_out-paraphrase-02", "B"),  # section A no: outside the denominator
+        ]
+        verdicts = {
+            "v2-held_out-paraphrase-00": {"A": "yes", "B": "yes"},
+            "v2-held_out-paraphrase-01": {"A": "partial", "B": "yes"},
+            "v2-held_out-paraphrase-02": {"A": "no", "B": "yes"},
+        }
+        outcomes = [eval_excerpts.outcome(k, verdicts, verdicts, {}) for k in keys]
+        assert [o.eligible for o in outcomes] == [True, True, False]
+        assert [o.kept for o in outcomes] == [True, False, False]
+        # A lost answer costs the read the agent then makes; an item outside pays its payload.
+        assert [o.cost for o in outcomes] == [100, 250, 100]
+
+    def test_a_single_text_decides_eligibility_and_retention_and_is_never_charged_a_read(
+        self,
+    ) -> None:
+        import eval_excerpts
+
+        answered = eval_excerpts.outcome(
+            self.key("v1-dev-identifier-00", None, payload=300, baseline=300),
+            {"v1-dev-identifier-00": {"A": "yes"}},
+            {"v1-dev-identifier-00": {"A": "yes"}},
+            {},
+        )
+        assert answered == eval_excerpts.Outcome(True, True, 300, 300, False)
+        unanswered = eval_excerpts.outcome(
+            self.key("v1-dev-identifier-01", None, payload=300, baseline=300),
+            {"v1-dev-identifier-01": {"A": "partial"}},
+            {"v1-dev-identifier-01": {"A": "partial"}},
+            {},
+        )
+        assert not unanswered.eligible and unanswered.cost == 300
+
+    def test_a_split_verdict_needs_the_joint_pass_and_is_lost_without_it(self) -> None:
+        import eval_excerpts
+
+        key = self.key("v2-held_out-identifier-00", "A")
+        codex = {key["id"]: {"A": "yes", "B": "yes"}}
+        gemini = {key["id"]: {"A": "partial", "B": "yes"}}
+        assert eval_excerpts.disagreements([key], codex, gemini) == [key["id"]]
+        assert not eval_excerpts.outcome(key, codex, gemini, {}).kept
+        joint = {key["id"]: {"A": "yes"}}
+        assert eval_excerpts.outcome(key, codex, gemini, joint).kept
+
+    def test_the_gates_are_retention_everywhere_and_cost_on_v2(self) -> None:
+        import eval_excerpts
+
+        def run(corpus: str, kept: int, total: int, payload: int) -> bool:
+            keys = [
+                self.key(f"{corpus}-held_out-paraphrase-{n:02d}", "A", payload=payload)
+                for n in range(total)
+            ]
+            verdicts = {
+                k["id"]: {"A": "yes" if n < kept else "no", "B": "yes"} for n, k in enumerate(keys)
+            }
+            return eval_excerpts.score(keys, verdicts, verdicts, {})[1]
+
+        assert run("v2", 20, 20, 100)
+        assert not run("v2", 18, 20, 100)  # 90% retention
+        assert not run("v2", 20, 20, 170)  # 85% of the baseline's cost
+        assert run("v1", 20, 20, 170)  # v1's cost is reported, not gated
+
+    def test_a_malformed_or_missing_verdict_stops_the_score(self, tmp_path: Path) -> None:
+        import eval_excerpts
+
+        keys = {"v2-dev-paraphrase-00": self.key("v2-dev-paraphrase-00", "A")}
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"id": "v2-dev-paraphrase-00", "A": "yes", "B": "maybe"}]))
+        with pytest.raises(SystemExit, match="malformed"):
+            eval_excerpts.read_verdicts(bad, keys)
+        fenced = tmp_path / "fenced.json"
+        answer = [{"id": "v2-dev-paraphrase-00", "A": "yes", "B": "no", "note": "x"}]
+        fenced.write_text("```json\n" + json.dumps(answer) + "\n```")
+        assert eval_excerpts.read_verdicts(fenced, keys) == {
+            "v2-dev-paraphrase-00": {"A": "yes", "B": "no"}
+        }
+        with pytest.raises(SystemExit, match="no verdict"):
+            eval_excerpts.score(list(keys.values()), {}, {}, {})
+
+    def test_the_prompt_asks_for_the_letters_the_score_reads(self) -> None:
+        import eval_excerpts
+
+        assert '{"id": <id>, "A": "yes|partial|no", "B": "yes|partial|no"}' in (
+            eval_excerpts.JUDGE_PROMPT
+        )
+
+
 class _ReversedEmbedder(FakeEmbedder):
     """Another model, in the only way the storage layer can tell: different vectors."""
 

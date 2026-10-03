@@ -607,3 +607,27 @@ class TestLongBlocksKeepTheirTail:
         )  # fmt: skip
         embedded = [text for batch in fake_embedder.document_calls for text in batch]
         assert any("marker-23" in text for text in embedded), "the tail never reached the embedder"
+
+
+class TestPassagesKeepTheirCut:
+    """The span-aware passage core (#76) must cut every passage exactly as before.
+
+    Stored passage vectors are only valid while `extract_units` returns what it returned
+    when they were embedded. The digests below were computed with the parser as it stood
+    before the span core existed (0.5.1), so they are an oracle independent of the new code:
+    every section path, line range, section text and passage of both eval corpora.
+    """
+
+    EVAL_DATA = Path(__file__).parent.parent / "scripts" / "eval_data"
+
+    @pytest.mark.parametrize(
+        ("corpus", "digest"),
+        [
+            ("corpus", "50b7c677edb3375933837947ea72a12a0fad92caca57a612454208942da2335b"),
+            ("corpus_v2", "65eebdc8d1133b3f6e5646fcee243648a5abeb70b4e5a93c38d7142e7ccd7507"),
+        ],
+    )
+    def test_both_eval_corpora_cut_into_the_same_passages(self, corpus: str, digest: str) -> None:
+        import eval_cache
+
+        assert eval_cache.parse_fingerprint(self.EVAL_DATA / corpus) == digest
