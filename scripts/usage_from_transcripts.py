@@ -379,10 +379,19 @@ def _page(call: Call) -> dict[str, object] | None:
 
 
 def _hits(page: dict[str, object], cwd: str) -> set[str]:
+    """The files a search returned, absolute.
+
+    Since 0.6.0 a hit's path is relative to the page's `index_status.root` (#76); before
+    that, and for an answer from another work tree, it is absolute and the root is not
+    needed. `cwd` only stands in for a page that names no root.
+    """
     results = page["results"]
     assert isinstance(results, list)
+    status = page.get("index_status")
+    root = status.get("root") if isinstance(status, dict) else None
+    base = root if isinstance(root, str) and root else cwd
     return {
-        _norm(hit["file_path"], cwd)
+        _norm(hit["file_path"], base)
         for hit in results
         if isinstance(hit, dict) and isinstance(hit.get("file_path"), str)
     }

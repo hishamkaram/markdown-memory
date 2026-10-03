@@ -2584,15 +2584,15 @@ MUTATIONS = (
     Mutation(
         name="pointers: return every hit in full",
         module="server.py",
-        old="                hit.to_dict() if rank == 0 else hit.to_pointer()",
-        new="                hit.to_dict()",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_dict(), root)",
         tests="test_hits_after_the_first_are_pointers_that_read_section_follows",
     ),
     Mutation(
         name="pointers: return even the best hit as a pointer",
         module="server.py",
-        old="                hit.to_dict() if rank == 0 else hit.to_pointer()",
-        new="                hit.to_pointer()",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_pointer(), root)",
         tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
     ),
     Mutation(
@@ -2739,8 +2739,8 @@ MUTATIONS = (
     Mutation(
         name="trees: resolve a relative path without the agent's cwd",
         module="server.py",
-        old="[Path(cwd.strip()).expanduser() / path, self._config.docs_dir / path]",
-        new="[self._config.docs_dir / path]",
+        old="[Path(self._root) / path, Path(cwd.strip()).expanduser() / path]",
+        new="[Path(self._root) / path]",
         tests="test_a_relative_path_is_resolved_where_the_agent_is",
     ),
     Mutation(
@@ -3320,6 +3320,99 @@ MUTATIONS = (
             '            "excerpt": True,'
         ),
         tests="test_the_excerpt_is_verbatim_lines_of_the_file",
+    ),
+    Mutation(
+        name="paths: let the agent's cwd shadow the root's document again",
+        module="server.py",
+        old="[Path(self._root) / path, Path(cwd.strip()).expanduser() / path]",
+        new="[Path(cwd.strip()).expanduser() / path, Path(self._root) / path]",
+        tests="test_the_roots_document_wins_over_a_same_named_one_in_cwd",
+    ),
+    Mutation(
+        name="paths: follow a symlink before looking the path up as spelled",
+        module="server.py",
+        old=(
+            "            document = self._db.get_document(spelled)"
+            " or self._db.get_document(resolved)"
+        ),
+        new="            document = self._db.get_document(resolved)",
+        tests="test_an_indexed_symlink_is_found_under_its_own_name",
+        # The honest outcome: the suffix lookup finds two `shared.md` and says so.
+        fails_with="mcp.server.mcpserver.exceptions.ToolError",
+    ),
+    Mutation(
+        name="paths: shorten only the pointers' paths",
+        module="server.py",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                hit.to_dict() if rank == 0 else _relative(hit.to_pointer(), root)",
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: shorten only the top hit's path",
+        module="server.py",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_dict(), root) if rank == 0 else hit.to_pointer()",
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: list documents by their absolute paths",
+        module="server.py",
+        old="                    _relative(summary.to_dict(), root)",
+        new="                    summary.to_dict()",
+        tests=(
+            "test_every_listed_path_reads_back_its_own_document_from_any_cwd"
+            " or test_a_narrowed_listing_is_still_relative_to_the_root"
+        ),
+    ),
+    Mutation(
+        name="paths: leave a listing's failures absolute",
+        module="server.py",
+        old=(
+            '                "index_status": _relative_failures('
+            "service.index_status(scope).to_dict(), root),"
+        ),
+        new='                "index_status": service.index_status(scope).to_dict(),',
+        tests="test_a_search_over_a_damaged_index_says_so_in_its_answer",
+    ),
+    Mutation(
+        name="paths: leave a search's failures absolute",
+        module="server.py",
+        old='        payload["index_status"] = _relative_failures(status.to_dict(), root)',
+        new='        payload["index_status"] = status.to_dict()',
+        tests="test_a_search_over_a_damaged_index_says_so_in_its_answer",
+    ),
+    Mutation(
+        name="paths: shorten index_status.root too",
+        module="server.py",
+        old='    return {**status, "failures": shown}',
+        new='    return {**status, "failures": shown, "root": "."}',
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: shorten another work tree's paths",
+        module="server.py",
+        old="        return service.root if service is self._configured() else None",
+        new="        return service.root",
+        tests="test_a_worktree_answer_keeps_absolute_paths_that_route_without_cwd",
+    ),
+    Mutation(
+        name="paths: shorten a path that is not under the root",
+        module="server.py",
+        old=(
+            "    if root is None or not isinstance(path, str)"
+            " or not Path(path).is_relative_to(root):"
+        ),
+        new="    if root is None or not isinstance(path, str):",
+        tests="test_a_failure_outside_the_root_stays_absolute",
+        fails_with="ValueError",
+    ),
+    Mutation(
+        name="usage: read a relative hit against the project instead of the root",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old="    base = root if isinstance(root, str) and root else cwd",
+        new="    base = cwd",
+        tests="test_a_relative_hit_is_the_file_under_the_root_that_answered",
     ),
 )
 

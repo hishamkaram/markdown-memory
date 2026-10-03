@@ -456,11 +456,20 @@ async def test_a_pointer_to_a_split_part_reads_that_part_not_the_whole(
 async def test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it(
     server: MCPServer[None], service: MarkdownMemoryService, docs_dir: Path
 ) -> None:
-    """Pointers are a serialisation: ranking and `limit` stay the service's."""
+    """Pointers are a serialisation: ranking and `limit` stay the service's.
+
+    So are paths: the service keeps them absolute, the wire sends them relative to the root
+    `index_status` names (#76).
+    """
     await call(server, "index_directory", directory=str(docs_dir))
-    expected = [(h.file_path, h.heading_path) for h in service.search_docs("gateway timeout", 5)]
-    shown = (await call(server, "search_docs", query="gateway timeout"))["results"]
+    expected = [
+        (Path(h.file_path).relative_to(service.root).as_posix(), h.heading_path)
+        for h in service.search_docs("gateway timeout", 5)
+    ]
+    answer = await call(server, "search_docs", query="gateway timeout")
+    shown = answer["results"]
     assert [(r["file_path"], r["heading_path"]) for r in shown] == expected
+    assert answer["index_status"]["root"] == service.root  # the one path that stays absolute
     only = (await call(server, "search_docs", query="gateway timeout", limit=1))["results"]
     assert len(only) == 1 and "content" in only[0], "limit=1 must still answer in full"
 
@@ -483,12 +492,13 @@ async def test_a_search_over_a_damaged_index_says_so_in_its_answer(
         answer = await call(server, "search_docs", query="gateway", limit=3)
         status = answer["index_status"]
         assert status["coverage"] == "unknown"
-        assert [f["file_path"] for f in status["failures"]] == [str(broken)]
+        assert [f["file_path"] for f in status["failures"]] == ["unreadable.md"]
         assert status["message"] is not None and "could not be indexed" in status["message"]
         assert answer["results"], "the answer still comes, with the caveat attached"
 
         listed = await call(server, "list_documents")
         assert listed["index_status"]["coverage"] == "unknown"
+        assert [f["file_path"] for f in listed["index_status"]["failures"]] == ["unreadable.md"]
     finally:
         broken.chmod(0o644)
 

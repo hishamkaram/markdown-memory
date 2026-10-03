@@ -50,8 +50,9 @@ BUDGETS = {
     # check that decides when the whole section is sent instead.
     "search.py": 560,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
-    # and for #73: every result sent once, as compact JSON text.
-    "server.py": 510,
+    # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
+    # sent relative to the root, and a relative path resolved back under it first.
+    "server.py": 522,
     "trees.py": 70,
 }
 

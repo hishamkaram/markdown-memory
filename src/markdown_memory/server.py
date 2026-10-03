@@ -324,8 +324,11 @@ class MarkdownMemoryService:
     def _resolve_document(self, file_path: str, cwd: str = "") -> Document:
         """Find an indexed document by absolute path, relative path, or unique path suffix.
 
-        A relative path is the agent's when it says where it is (`cwd`); only otherwise is
-        the server's own working directory a guess worth trying.
+        A relative path is tried under the root first: it is how this server sends paths, and
+        one it sent must come back to the same document whatever the agent's directory holds.
+        Only then is it the agent's (`cwd`), or failing that the server's own working directory.
+        Each candidate is looked up as spelled before its symlinks are followed: a link the
+        index kept is stored under its own name.
         """
         requested = file_path.strip()
         if not requested:
@@ -333,16 +336,17 @@ class MarkdownMemoryService:
         path = headings._user_path(requested, DocumentNotFoundError)
         candidates = [path]
         if not path.is_absolute() and cwd.strip():
-            candidates = [Path(cwd.strip()).expanduser() / path, self._config.docs_dir / path]
+            candidates = [Path(self._root) / path, Path(cwd.strip()).expanduser() / path]
         elif not path.is_absolute():
-            candidates = [self._config.docs_dir / path]
+            candidates = [Path(self._root) / path]
             try:
                 candidates.append(Path.cwd() / path)
             except OSError:  # the working directory was deleted under the server
                 logger.debug("Working directory is gone; not resolving %s against it", requested)
-        for candidate in candidates:
-            resolved = headings._absolute(candidate, DocumentNotFoundError)
-            document = self._db.get_document(str(resolved))
+        for candidate in dict.fromkeys(candidates):
+            resolved = str(headings._absolute(candidate, DocumentNotFoundError))
+            spelled = os.path.abspath(candidate)
+            document = self._db.get_document(spelled) or self._db.get_document(resolved)
             if document is not None:
                 return document
         matches = self._db.find_documents_by_suffix(requested)
@@ -439,10 +443,11 @@ class _ServiceProvider:
     def get(self, cwd: str = "", path: str | None = None) -> MarkdownMemoryService:
         """The service that answers for ``path``, else for ``cwd``, else the configured one.
 
-        A path decides first, so a pointer a worktree search returned is read from that
-        worktree with or without `cwd`, and a worktree named to `index_directory` is never
-        written into the configured root's database. A tree that is not another checkout of
-        the configured root's repository is answered from the configured root, as before.
+        An absolute path decides first, so a pointer a worktree search returned - sent absolute,
+        see `relative_root` - is read from that worktree with or without `cwd`, and a worktree
+        named to `index_directory` is never written into the configured root's database. A
+        tree that is not another checkout of the configured root's repository is answered
+        from the configured root, as before.
         """
         configured = self._configured()
         probe = _probe(cwd, path)
@@ -455,6 +460,15 @@ class _ServiceProvider:
         if other.top == home.top:
             return configured
         return self._tree_service(configured, trees.counterpart(Path(configured.root), home, other))
+
+    def relative_root(self, service: MarkdownMemoryService) -> str | None:
+        """The root ``service``'s paths are sent relative to, or None to send them absolute (#76).
+
+        Only the configured root's: a relative path cannot say which work tree it belongs to,
+        so one from another tree, followed without `cwd`, would be read from the configured
+        checkout's copy of the same file. Another tree's answers keep their absolute paths.
+        """
+        return service.root if service is self._configured() else None
 
     def _configured(self) -> MarkdownMemoryService:
         if self._external is not None:
@@ -599,10 +613,14 @@ def create_server(
         directory = _anchored(directory, cwd) or ""
         service = services.get(cwd, directory)
         scope = directory if directory.strip() else None
+        root = services.relative_root(service)
         return _json(
             {
-                "documents": [summary.to_dict() for summary in service.list_documents(directory)],
-                "index_status": service.index_status(scope).to_dict(),
+                "documents": [
+                    _relative(summary.to_dict(), root)
+                    for summary in service.list_documents(directory)
+                ],
+                "index_status": _relative_failures(service.index_status(scope).to_dict(), root),
             }
         )
 
@@ -662,10 +680,11 @@ def create_server(
         comes from that worktree's own copy of the docs.
         """
         service = services.get(cwd)
+        root = services.relative_root(service)
         page = service.search_page(query, limit)
         payload: JsonDict = {
             "results": [
-                hit.to_dict() if rank == 0 else hit.to_pointer()
+                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)
                 for rank, hit in enumerate(page.results)
             ],
             "keyword_match": page.keyword_match,
@@ -674,10 +693,33 @@ def create_server(
         message = page.keyword_message(status)
         if message is not None:
             payload["keyword_message"] = message
-        payload["index_status"] = status.to_dict()
+        payload["index_status"] = _relative_failures(status.to_dict(), root)
         return _json(payload)
 
     return server
+
+
+def _relative(item: JsonDict, root: str | None) -> JsonDict:
+    """``item`` with its ``file_path`` relative to ``root`` (POSIX separators), when under it.
+
+    The wire is the only place a path is shortened (#76): everything inside the server - and
+    every script that calls the service directly - keeps the absolute path it stored.
+    """
+    path = item.get("file_path")
+    if root is None or not isinstance(path, str) or not Path(path).is_relative_to(root):
+        return item
+    return {**item, "file_path": Path(path).relative_to(root).as_posix()}
+
+
+def _relative_failures(status: JsonDict, root: str | None) -> JsonDict:
+    """An `index_status` whose failures name files relative to ``root``; ``root`` stays absolute."""
+    failures = status.get("failures")
+    if root is None or not isinstance(failures, list):
+        return status
+    shown = [
+        _relative(failure, root) if isinstance(failure, dict) else failure for failure in failures
+    ]
+    return {**status, "failures": shown}
 
 
 def _json(value: JsonValue) -> str:

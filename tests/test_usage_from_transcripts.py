@@ -68,10 +68,13 @@ def transcript(path: Path, *calls: tuple[Any, ...], session: str | None = None) 
     return path
 
 
-def page(*paths: str, keyword_match: str = "matched") -> dict[str, object]:
-    """A ``search_docs`` result envelope whose hits are ``paths``."""
+def page(*paths: str, keyword_match: str = "matched", root: str | None = None) -> dict[str, object]:
+    """A ``search_docs`` result envelope whose hits are ``paths``, from ``root`` if given."""
     results = [{"file_path": path, "heading_path": "A"} for path in paths]
-    return {"content": json.dumps({"results": results, "keyword_match": keyword_match})}
+    body: dict[str, object] = {"results": results, "keyword_match": keyword_match}
+    if root is not None:
+        body["index_status"] = {"root": root}
+    return {"content": json.dumps(body)}
 
 
 def text(value: str) -> dict[str, object]:
@@ -236,6 +239,19 @@ class TestBehaviourAfterASearch:
             tmp_path / "proj" / "a.jsonl",
             (SEARCH, {"query": "retry"}, page("/docs/retry.md")),
             ("Read", {"file_path": "/docs/retry.md"}),
+        )
+        report = measure(miner, tmp_path)
+        assert report.searches_followed_by_same_file_read == 1
+        assert report.searches_followed_by_other_markdown == 0
+
+    def test_a_relative_hit_is_the_file_under_the_root_that_answered(
+        self, miner: Any, tmp_path: Path
+    ) -> None:
+        # Hits are relative to `index_status.root` since 0.6.0 (#76), not to the project.
+        transcript(
+            tmp_path / "proj" / "a.jsonl",
+            (SEARCH, {"query": "retry"}, page("guides/retry.md", root="/docs")),
+            ("Read", {"file_path": "/docs/guides/retry.md"}),
         )
         report = measure(miner, tmp_path)
         assert report.searches_followed_by_same_file_read == 1
