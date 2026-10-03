@@ -16,9 +16,11 @@ Two refinements, both measured on a labelled query set, sit in front of the fusi
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import re
+import threading
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import pairwise
@@ -27,7 +29,22 @@ from typing import NamedTuple, NoReturn, TypeVar
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
-from markdown_memory.models import KeywordMatch, SearchPage, SearchResult, preview
+from markdown_memory.models import (
+    Excerpt,
+    KeywordMatch,
+    SearchPage,
+    SearchResult,
+    Section,
+    estimate_tokens,
+    preview,
+)
+from markdown_memory.parser import (
+    MAX_UNITS_PER_SECTION,
+    MarkdownParser,
+    Passage,
+    ends_inside_fence,
+    join_parts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +301,57 @@ def _bare(text: str) -> str:
     return text.replace("`", "").strip().removesuffix("()").strip().lower()
 
 
+def select_anchor(terms: Sequence[str], passages: Sequence[str], ordinal: int | None) -> int | None:
+    """Which passage of the top hit its excerpt is centred on, or None for the whole section.
+
+    An identifier lookup is anchored only where the identifier itself is: if no passage holds
+    it - it may be named by the heading alone - an excerpt would hide what was asked for.
+    Otherwise the passage that won the vector ranking, else the one holding the most terms.
+    A query of nothing but stopwords says nothing about where in a section to look.
+    """
+    if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):
+        return None
+    literals = [_Literal(term) for term in terms]
+    found = [sum(literal.found(text) for literal in literals) for text in passages]
+    known = ordinal is not None and 0 <= ordinal < len(passages)
+    if _is_identifier_lookup(terms):
+        if ordinal is not None and known and found[ordinal]:
+            return ordinal
+        return next((index for index, count in enumerate(found) if count), None)
+    if known:
+        return ordinal
+    best = max(found, default=0)
+    return found.index(best) if best else None
+
+
+def excerpt_lines(content: str, passages: Sequence[Passage], anchor: int) -> tuple[int, int] | None:
+    """The 0-based, end-exclusive lines of ``content`` an excerpt around ``anchor`` shows.
+
+    The anchor and the passage on either side, widened to whole lines; a table row brings its
+    table's header with it, contiguously. None whenever the excerpt would not be safe or
+    would not be smaller: few passages, a window covering all of them, a block without
+    lines, a fence left open.
+    """
+    window = passages[max(0, anchor - 1) : anchor + 2]
+    spans = [passage.lines for passage in window]
+    if len(passages) <= 3 or any(span is None for span in spans):
+        return None
+    first = min(span[0] for span in spans if span is not None)
+    end = max(span[1] for span in spans if span is not None)
+    first = min([first, *(passage.table for passage in window if passage.table is not None)])
+    lines = content.split("\n")
+    while end > first and not lines[end - 1].strip():
+        end -= 1  # markdown-it counts the blank line after a list item as part of it
+    while first < end and not lines[first].strip():
+        first += 1
+    if all(p.lines is not None and first <= p.lines[0] and p.lines[1] <= end for p in passages):
+        return None
+    text = "\n".join(lines[first:end])
+    if ends_inside_fence(text) or estimate_tokens(text) >= estimate_tokens(content):
+        return None
+    return first, end
+
+
 class _Keyword(NamedTuple):
     """One keyword ranking, and what an identifier lookup learnt making it (#75)."""
 
@@ -324,6 +392,8 @@ class HybridSearcher:
         # this, an agent working in one project gets confident answers out of another
         # project's documentation.
         self._scope = scope
+        # A parser per thread: `MarkdownParser` holds a `MarkdownIt` with mutable state.
+        self._parsers = threading.local()
         # Two long-lived workers so each keeps its own (per-thread) SQLite connection.
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mdmem-search")
 
@@ -421,11 +491,73 @@ class HybridSearcher:
                     score=scores[section_id],
                     fts_rank=fts_ranks.get(section_id),
                     vec_rank=vec_ranks.get(section_id),
-                    matched_passage=passages.get(section_id),
+                    matched_passage=passages[section_id][1] if section_id in passages else None,
                     part_preview=None if first is None else preview(first),
                 )
             )
+        if results:
+            section = hydrated[page[0]][0]
+            ordinal = passages[page[0]][0] if page[0] in passages else None
+            excerpt = self._excerpt(section, fts_terms(query), ordinal)
+            results[0] = dataclasses.replace(results[0], excerpt=excerpt)
         return SearchPage(tuple(results), keyword_match), stale or keyword.stale
+
+    def _excerpt(
+        self, section: Section, terms: Sequence[str], ordinal: int | None
+    ) -> Excerpt | None:
+        """The top hit's matched passage and its neighbours, when that is safe and smaller (#76).
+
+        The passages are cut again from the stored text, by the parser that cut them for
+        indexing, and used only while they are exactly what was stored: an index built by
+        another version, or a part whose passages were cut with a table header it does not
+        hold, gets the whole section, as does anything that raises.
+        """
+        try:
+            stored = self._db.units_of(section.id)
+            if not stored or len(stored) >= MAX_UNITS_PER_SECTION:
+                return None
+            parser = self._parser()
+            passages = None
+            for skip in (True, False):  # a preamble has no heading line to skip
+                cut = parser.passages(section.content, skip_heading=skip)
+                if [passage.text for passage in cut] == stored:
+                    passages = cut
+                    break
+            if passages is None or (section.part_index and self._cut_through(section, parser)):
+                return None
+            anchor = select_anchor(terms, stored, ordinal)
+            window = None if anchor is None else excerpt_lines(section.content, passages, anchor)
+        except Exception:  # an excerpt is an optimisation: whatever fails sends the section
+            logger.debug("No excerpt for section %s", section.id, exc_info=True)
+            return None
+        if window is None:
+            return None
+        first, end = window
+        text = "\n".join(section.content.split("\n")[first:end])
+        return Excerpt(section.start_line + first, section.start_line + end - 1, text)
+
+    def _cut_through(self, part: Section, parser: MarkdownParser) -> bool:
+        """True when a boundary of this part falls inside a block of the section it was cut from.
+
+        The splitter cuts a fence only when it alone exceeds a part, never tracks HTML, and
+        cuts an over-long line at a space: a piece from inside any of them parses as
+        something else, so its passages would point at the wrong lines.
+        """
+        parts = [s for s in self._db.get_sections(part.doc_id) if s.base_path == part.base_path]
+        offset = 0
+        for previous, current in zip([None, *parts], parts, strict=False):
+            if previous is not None:
+                offset += max(0, current.start_line - previous.end_line)
+            if current.id == part.id:
+                return parser.cuts_a_block(join_parts(parts), [offset, offset + len(part.content)])
+            offset += len(current.content)
+        return True  # the part is gone: nothing vouches for its lines
+
+    def _parser(self) -> MarkdownParser:
+        parser: MarkdownParser | None = getattr(self._parsers, "parser", None)
+        if parser is None:
+            parser = self._parsers.parser = MarkdownParser()
+        return parser
 
     def _keyword_pass(self, query: str, limit: int) -> _Keyword:
         """Keyword ranking; for an identifier lookup, of the sections that name it (#75).
@@ -560,7 +692,9 @@ class HybridSearcher:
 
         return [hit for hit in hits if hit in exact or coverage(hit) >= KEYWORD_GATE]
 
-    def _vector_ranking(self, query: str, limit: int) -> tuple[list[int], dict[int, str]]:
+    def _vector_ranking(
+        self, query: str, limit: int
+    ) -> tuple[list[int], dict[int, tuple[int, str]]]:
         """Sections by their closest vector, plus each section's best-matching passage.
 
         Empty when the stored vectors came from other weights than the ones answering
@@ -654,8 +788,8 @@ class HybridSearcher:
 
     def _nearest(
         self, embedding: list[float], limit: int
-    ) -> tuple[dict[int, float], dict[int, str]]:
-        """Closest sections and their best passages, restricted to this server's root.
+    ) -> tuple[dict[int, float], dict[int, tuple[int, str]]]:
+        """Closest sections and their best passages - ordinal and text - within this root.
 
         A vec0 KNN query applies its own ``k`` before anything can filter it, so a scoped
         search widens ``k`` until it has a full page or has seen the whole index. A fixed
@@ -672,17 +806,19 @@ class HybridSearcher:
             # way up to the size of the corpus, on every scoped query.
             if not best:
                 return {}, {}
-            passages: dict[int, str] = {}
-            for section_id, distance, passage in self._db.unit_search(
+            passages: dict[int, tuple[int, str]] = {}
+            for section_id, distance, passage, ordinal in self._db.unit_search(
                 embedding, fetch * _PASSAGES_PER_CANDIDATE
             ):
-                passages.setdefault(section_id, passage)  # closest first: keep the best one
+                passages.setdefault(section_id, (ordinal, passage))  # closest first: the best
                 if distance < best.get(section_id, math.inf):
                     best[section_id] = distance
             if self._scope is not None and best:
                 allowed = self._db.sections_under(list(best), self._scope)
                 best = {sid: distance for sid, distance in best.items() if sid in allowed}
-                passages = {sid: text for sid, text in passages.items() if sid in allowed}
+                passages = {
+                    sid: best_passage for sid, best_passage in passages.items() if sid in allowed
+                }
             if self._scope is None or len(best) >= limit or fetch >= ceiling:
                 return best, passages
             fetch = min(fetch * _SCOPED_OVERFETCH, ceiling)

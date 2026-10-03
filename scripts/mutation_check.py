@@ -2284,8 +2284,8 @@ MUTATIONS = (
     Mutation(
         name="part_preview: pay for it beside rank 1's full text",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "part_preview": self.part_preview,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "part_preview": self.part_preview,',
         tests="test_every_part_carries_its_first_passage_shortened",
     ),
     Mutation(
@@ -2547,8 +2547,8 @@ MUTATIONS = (
     Mutation(
         name="pointers: pay for the matched passage twice in the full result",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "matched_passage": self.matched_passage,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "matched_passage": self.matched_passage,',
         tests="test_best_passage_decides_and_is_reported",
     ),
     Mutation(
@@ -3113,8 +3113,8 @@ MUTATIONS = (
     Mutation(
         name="top hit: send the ranks an agent has no use for",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "fts_rank": self.fts_rank,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "fts_rank": self.fts_rank,',
         tests="test_search_docs_returns_sections_and_breadcrumbs",
     ),
     Mutation(
@@ -3124,6 +3124,202 @@ MUTATIONS = (
         old='            answer["index_status"]\n            == {',
         new='            True or answer["index_status"]\n            == {',
         tests="test_a_root_that_does_not_vouch_for_itself_fails_the_run",
+    ),
+    Mutation(
+        name="excerpt: let a table row lose the line its table starts on",
+        module="parser.py",
+        old='            rows.append(Passage("; ".join(labelled), row, table))',
+        new='            rows.append(Passage("; ".join(labelled), row, None))',
+        tests="test_a_table_row_brings_its_header_and_delimiter",
+    ),
+    Mutation(
+        name="excerpt: give a list item no lines",
+        module="parser.py",
+        old="            fragments, item = [], _span(token)",
+        new="            fragments, item = [], None",
+        tests="test_every_kind_of_block_names_the_lines_it_was_cut_from",
+    ),
+    Mutation(
+        name="excerpt: call no part boundary a cut through a block",
+        module="parser.py",
+        old="        return any(start < cut < end for cut in cuts for start, end in blocks)",
+        new="        return False",
+        tests=(
+            "test_a_cut_inside_a_fence_a_table_or_a_list_is_not"
+            " or test_a_part_cut_through_a_fence_is_sent_whole"
+            " or test_a_part_cut_inside_one_long_line_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: end a block on the next line's first character",
+        module="parser.py",
+        old="            (starts[token.map[0]], starts[token.map[1]] - 1)",
+        new="            (starts[token.map[0]], starts[token.map[1]])",
+        tests="test_a_cut_between_blocks_or_among_blank_lines_is_clean",
+    ),
+    Mutation(
+        name="excerpt: never see a fence left open",
+        module="parser.py",
+        old="    return open_fence is not None",
+        new="    return False",
+        tests=(
+            "test_an_unclosed_fence_is_seen or test_a_window_that_leaves_a_fence_open_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: anchor a query of stopwords",
+        module="search.py",
+        old='    if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):',
+        new="    if not terms:",
+        tests="test_a_query_of_stopwords_has_no_anchor_even_with_a_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: let backticks hide a stopword",
+        module="search.py",
+        old='    if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):',
+        new="    if not terms or all(_is_stopword(term) for term in terms):",
+        tests="test_a_query_of_stopwords_has_no_anchor_even_with_a_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: anchor an identifier lookup on a vector passage without it",
+        module="search.py",
+        old="        if ordinal is not None and known and found[ordinal]:",
+        new="        if ordinal is not None and known:",
+        tests="test_an_identifier_lookup_is_anchored_where_the_identifier_is",
+    ),
+    Mutation(
+        name="excerpt: fall through to the vector passage when only the heading names it",
+        module="search.py",
+        old="        return next((index for index, count in enumerate(found) if count), None)",
+        new="        return next((index for index, count in enumerate(found) if count), ordinal)",
+        tests="test_an_identifier_only_the_heading_names_gets_the_whole_section",
+    ),
+    Mutation(
+        name="excerpt: ignore the passage that won the vector ranking",
+        module="search.py",
+        old="    if known:\n        return ordinal",
+        new="    if False:\n        return ordinal",
+        tests="test_any_other_query_is_anchored_on_the_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: anchor on a passage that holds no term",
+        module="search.py",
+        old="    return found.index(best) if best else None",
+        new="    return found.index(best) if found else None",
+        tests="test_without_one_the_passage_holding_the_most_terms_lowest_first",
+    ),
+    Mutation(
+        name="excerpt: cut a section of three passages",
+        module="search.py",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if any(span is None for span in spans):",
+        tests="test_three_passages_or_fewer_are_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: cut by a passage that has no lines",
+        module="search.py",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if len(passages) <= 3:",
+        tests="test_a_passage_without_lines_sends_the_section_whole",
+    ),
+    Mutation(
+        name="excerpt: show a table row without its header",
+        module="search.py",
+        old=(
+            "    first = min([first, *(passage.table for passage in window"
+            " if passage.table is not None)])"
+        ),
+        new="    first = min([first])",
+        tests="test_a_table_row_brings_its_header_and_delimiter",
+    ),
+    Mutation(
+        name="excerpt: keep the blank line markdown-it gives a list item",
+        module="search.py",
+        old="        end -= 1  # markdown-it counts the blank line after a list item as part of it",
+        new="        break",
+        tests="test_a_list_item_does_not_bring_the_blank_line_after_it",
+    ),
+    Mutation(
+        name="excerpt: cut a window that covers every passage",
+        module="search.py",
+        old=(
+            "    if all(p.lines is not None and first <= p.lines[0] and p.lines[1] <= end"
+            " for p in passages):\n        return None"
+        ),
+        new=(
+            "    if False and all(p.lines is not None and first <= p.lines[0]"
+            " and p.lines[1] <= end for p in passages):\n        return None"
+        ),
+        tests="test_a_window_that_grows_over_every_passage_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: send a window no smaller than its section",
+        module="search.py",
+        old="    if ends_inside_fence(text) or estimate_tokens(text) >= estimate_tokens(content):",
+        new="    if ends_inside_fence(text):",
+        tests="test_a_window_no_smaller_than_the_section_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: trust passages that differ from the stored ones",
+        module="search.py",
+        old="                if [passage.text for passage in cut] == stored:",
+        new="                if True:",
+        tests="test_passages_that_differ_from_the_stored_ones_send_the_section",
+    ),
+    Mutation(
+        name="excerpt: cut a section at the passage cap",
+        module="search.py",
+        old="            if not stored or len(stored) >= MAX_UNITS_PER_SECTION:",
+        new="            if not stored:",
+        tests="test_a_section_at_the_passage_cap_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: cut a part without looking at the section it came from",
+        module="search.py",
+        old=(
+            "            if passages is None or (section.part_index"
+            " and self._cut_through(section, parser)):"
+        ),
+        new="            if passages is None:",
+        tests=(
+            "test_a_part_cut_through_a_fence_is_sent_whole"
+            " or test_a_part_cut_inside_one_long_line_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: let a failure while cutting fail the search",
+        module="search.py",
+        old=(
+            "        except Exception:  # an excerpt is an optimisation:"
+            " whatever fails sends the section"
+        ),
+        new="        except ValueError:  # narrowed",
+        tests="test_a_failure_while_cutting_sends_the_section",
+        fails_with="RuntimeError",
+    ),
+    Mutation(
+        name="excerpt: lose which passage of its section won the vector ranking",
+        module="search.py",
+        old="                passages.setdefault(section_id, (ordinal, passage))",
+        new="                passages.setdefault(section_id, (0, passage))",
+        tests="test_a_section_is_ranked_by_its_closest_passage_not_its_average",
+    ),
+    Mutation(
+        name="excerpt: send the whole section's line range with the excerpt",
+        module="models.py",
+        old='            "lines": f"{self.excerpt.start_line}-{self.excerpt.end_line}",',
+        new='            "lines": f"{self.start_line}-{self.end_line}",',
+        tests="test_the_excerpt_is_verbatim_lines_of_the_file",
+    ),
+    Mutation(
+        name="excerpt: price the excerpt instead of what read_section costs",
+        module="models.py",
+        old=('            "tokens": estimate_tokens(self.content),\n            "excerpt": True,'),
+        new=(
+            '            "tokens": estimate_tokens(self.excerpt.text),\n'
+            '            "excerpt": True,'
+        ),
+        tests="test_the_excerpt_is_verbatim_lines_of_the_file",
     ),
 )
 

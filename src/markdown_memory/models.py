@@ -179,6 +179,18 @@ class OutlineNode:
 
 
 @dataclass(slots=True, frozen=True)
+class Excerpt:
+    """The lines of a top hit that hold its matched passage and its neighbours (#76).
+
+    Verbatim stored lines, 1-based and inclusive like a section's own range.
+    """
+
+    start_line: int
+    end_line: int
+    text: str
+
+
+@dataclass(slots=True, frozen=True)
 class SearchResult:
     """A section matched by hybrid search, with its fused and per-index ranks."""
 
@@ -195,6 +207,7 @@ class SearchResult:
     vec_rank: int | None
     matched_passage: str | None = None
     part_preview: str | None = None  # how one part of a split section begins
+    excerpt: Excerpt | None = None  # the top hit's matched passage and neighbours (#76)
 
     def to_dict(self) -> JsonDict:
         """The best hit: where it is, what it costs, and its text - a pointer plus `content`.
@@ -202,13 +215,25 @@ class SearchResult:
         Nothing that ranks it (`score`, `fts_rank`, `vec_rank`) and no title fields: no tool
         takes them, and `heading_path` already names the section. No `matched_passage`
         either: it restates a passage of `content`, and would be paid for twice.
+
+        With an excerpt, `content` and `lines` are the excerpt's and `excerpt` is true, while
+        `tokens` stays what `read_section` of `heading_path` costs: the whole section or part.
         """
+        if self.excerpt is None:
+            return {
+                "file_path": self.file_path,
+                "heading_path": self.heading_path,
+                "lines": f"{self.start_line}-{self.end_line}",
+                "tokens": estimate_tokens(self.content),
+                "content": self.content,
+            }
         return {
             "file_path": self.file_path,
             "heading_path": self.heading_path,
-            "lines": f"{self.start_line}-{self.end_line}",
+            "lines": f"{self.excerpt.start_line}-{self.excerpt.end_line}",
             "tokens": estimate_tokens(self.content),
-            "content": self.content,
+            "excerpt": True,
+            "content": self.excerpt.text,
         }
 
     def to_pointer(self) -> JsonDict:

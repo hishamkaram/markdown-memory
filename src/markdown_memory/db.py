@@ -1289,25 +1289,37 @@ class Database:
             if distance is not None  # defensive: NaN distances surface as NULL
         ]
 
-    def unit_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float, str]]:
-        """``(section_id, cosine_distance, passage)`` for the nearest passages, closest first.
+    def unit_search(
+        self, embedding: Sequence[float], limit: int
+    ) -> list[tuple[int, float, str, int]]:
+        """``(section_id, cosine_distance, passage, ordinal)`` for the nearest passages.
 
-        A section appears once per matching passage; callers keep its best one.
+        Closest first. A section appears once per matching passage; callers keep its best one.
+        The ordinal says which of the section's passages it is: two passages of one section
+        can carry the same text, so the text alone cannot say where it sits.
         """
         self._check_vector(embedding, "Query embedding")
         with self._reading() as conn:
             rows = conn.execute(
                 "WITH nearest AS (SELECT unit_id, distance FROM units_vec "
                 "WHERE embedding MATCH ? AND k = ?) "
-                "SELECT u.section_id, nearest.distance, u.content FROM nearest "
+                "SELECT u.section_id, nearest.distance, u.content, u.ordinal FROM nearest "
                 "JOIN units u ON u.id = nearest.unit_id ORDER BY nearest.distance",
                 (serialize_embedding(embedding), limit),
             ).fetchall()
         return [
-            (int(section_id), float(distance), str(content))
-            for section_id, distance, content in rows
+            (int(section_id), float(distance), str(content), int(ordinal))
+            for section_id, distance, content, ordinal in rows
             if distance is not None
         ]
+
+    def units_of(self, section_id: int) -> list[str]:
+        """A section's stored passages, in their order: what its vectors were embedded from."""
+        with self._reading() as conn:
+            rows = conn.execute(
+                "SELECT content FROM units WHERE section_id = ? ORDER BY ordinal", (section_id,)
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def fts_matching(self, term: str, within: Sequence[int]) -> set[int]:
         """Which of the sections ``within`` match the single FTS5 ``term``."""

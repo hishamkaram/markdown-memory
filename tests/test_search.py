@@ -552,7 +552,7 @@ class TestPartPreview:
     def test_a_keyword_only_part_still_says_how_it_begins(
         self, db: Database, searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def offline(query: str, limit: int) -> tuple[list[int], dict[int, str]]:
+        def offline(query: str, limit: int) -> tuple[list[int], dict[int, tuple[int, str]]]:
             raise SearchError("vectors offline")
 
         monkeypatch.setattr(searcher, "_vector_ranking", offline)

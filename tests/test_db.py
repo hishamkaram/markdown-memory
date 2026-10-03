@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,20 @@ class TestSchema:
 
 
 class TestRepository:
+    def test_units_of_reads_a_sections_passages_in_ordinal_order(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        section = replace(draft("A", "## A\n\nfirst\n\nsecond"), units=("first", "second"))
+        document = store(db, fake_embedder, "/d/a.md", [section])
+        (stored,) = db.get_sections(document.id)
+        # Row ids follow insertion; the ordinal is what says where a passage sits.
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE units SET ordinal = 1 - ordinal WHERE section_id = ?", (stored.id,)
+            )
+        assert db.units_of(stored.id) == ["second", "first"]
+        assert db.units_of(stored.id + 1) == []
+
     def test_replace_document_populates_all_three_indexes(
         self, db: Database, fake_embedder: FakeEmbedder
     ) -> None:
