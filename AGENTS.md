@@ -39,7 +39,9 @@ section you need instead; it is typically 10-50x cheaper.
 worktree of the repository the server was started for, answers then come from that worktree's
 own copy of the docs, indexed into its own database the first time it is named; anywhere else
 it changes nothing. `index_status.root` names the documentation root that answered: when it is
-not the tree you are working in, you are reading another checkout's docs.
+not the tree you are working in, you are reading another checkout's docs. Every `file_path` in
+an answer is relative to that root (absolute when another worktree answered): pass it back
+verbatim, with the same `cwd`.
 
 Work in this order:
 
@@ -47,7 +49,10 @@ Work in this order:
    `{"results": [...], "keyword_match": ..., "index_status": {...}}`, plus a
    `keyword_message` whenever `keyword_match` is not `"matched"`. The first hit carries the
    full section `content` with its breadcrumb (`heading_path`), line range and token
-   estimate; the rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` and,
+   estimate - or, marked `excerpt: true`, only the passage that matched and its neighbours,
+   verbatim, with `lines` naming them and `tokens` still what the whole section costs: when
+   the excerpt is not enough, `read_section(file_path, heading_path)` returns the full
+   section. The rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` and,
    when a passage won the vector ranking, `matched_passage`: how that passage begins. Use exact
    identifiers verbatim (`--dry-run`, `HELIOS_BATCH`, `ENOSPC`): they are matched by
    keyword at 100% Top-1. Plain-language questions work too, but the

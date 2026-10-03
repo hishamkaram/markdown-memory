@@ -59,15 +59,15 @@ The first run downloads the embedding model (~218 MB) into
 
 | Path | Responsibility |
 | --- | --- |
-| `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult`, `FileFailure`, `IndexStatus`, `IndexReport` |
+| `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult` (+ `Excerpt`), `FileFailure`, `IndexStatus`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`, `WorkTreeError`) |
-| `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated) |
+| `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `passages` (each passage with the lines it came from) and its projection `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated), `cuts_a_block` |
 | `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v7), repository methods, `integrity_problems()` |
 | `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, `Scope` (exclusions, `git_ignored` -> `GitIgnore`, linked worktrees), `without_aliases` (symlinks to a file indexed anyway), symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
 | `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the graph file, the `.verified` stamp, `flock`, atomic writes |
 | `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds. `weights_revision` names the revision *and* the graph, because one revision publishes several |
 | `src/markdown_memory/indexer.py` | Incremental `Indexer`: the scan, SHA-256 change detection, the bounded window (workers embed, the driver writes), section/passage vectors |
-| `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF |
+| `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF, the top hit's excerpt (`select_anchor`, `excerpt_lines`) |
 | `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
 | `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, started by a search's `index_status` - the first after the server starts, then whenever one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
@@ -187,7 +187,9 @@ section you need instead; it is typically 10-50x cheaper.
 worktree of the repository the server was started for, answers then come from that worktree's
 own copy of the docs, indexed into its own database the first time it is named; anywhere else
 it changes nothing. `index_status.root` names the documentation root that answered: when it is
-not the tree you are working in, you are reading another checkout's docs.
+not the tree you are working in, you are reading another checkout's docs. Every `file_path` in
+an answer is relative to that root (absolute when another worktree answered): pass it back
+verbatim, with the same `cwd`.
 
 Work in this order:
 
@@ -195,7 +197,10 @@ Work in this order:
    `{"results": [...], "keyword_match": ..., "index_status": {...}}`, plus a
    `keyword_message` whenever `keyword_match` is not `"matched"`. The first hit carries the
    full section `content` with its breadcrumb (`heading_path`), line range and token
-   estimate; the rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` and,
+   estimate - or, marked `excerpt: true`, only the passage that matched and its neighbours,
+   verbatim, with `lines` naming them and `tokens` still what the whole section costs: when
+   the excerpt is not enough, `read_section(file_path, heading_path)` returns the full
+   section. The rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` and,
    when a passage won the vector ranking, `matched_passage`: how that passage begins. Use exact
    identifiers verbatim (`--dry-run`, `HELIOS_BATCH`, `ENOSPC`): they are matched by
    keyword at 100% Top-1. Plain-language questions work too, but the

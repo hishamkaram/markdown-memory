@@ -82,8 +82,12 @@ SERVER_INSTRUCTIONS = (
     "itself (unless started with --no-auto-index); call index_directory only when "
     "index_status says so. Use search_docs to locate relevant sections, or "
     "get_document_outline followed by read_section to fetch one heading's text. search_docs "
-    "returns the best section in full and pointers to the rest: follow a pointer with "
-    "read_section, heading_path verbatim, only when the first is not enough. When its "
+    "returns the best section in full - or, marked excerpt: true, the passage that matched "
+    "and its neighbours, when read_section(file_path, heading_path) returns the full "
+    "section at the tokens it states - and pointers to the rest: follow a pointer with "
+    "read_section, heading_path verbatim, only when the first is not enough. file_path is "
+    "relative to index_status.root (absolute when another work tree answered): pass it "
+    "verbatim, with the same cwd. When its "
     "keyword_match is no_match, no indexed section contains the searched terms: an identifier "
     "lookup then returns no results, and must be reported as not in the indexed docs - "
     "unless index_status.indexing is true and coverage unknown, when it may only not be "
@@ -606,7 +610,8 @@ def create_server(
 
         Returns JSON `{"documents": [...], "index_status": {...}}`. `index_status` is the one
         search_docs describes: `root`, `coverage`, `changed_files`, `message`, and `gitignore`
-        (`applied`, `off`, `no_repository`, `unavailable` or `unknown`).
+        (`applied`, `off`, `no_repository`, `unavailable` or `unknown`). Each `file_path` is
+        relative to `index_status.root`, as in search_docs.
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """
@@ -657,9 +662,12 @@ def create_server(
         sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
 
         Returns JSON `{"results": [...], "keyword_match": ..., "index_status": {...}}`, at most
-        `limit` hits, best first. The first carries the section's full `content`; the rest are
-        pointers - `file_path`, `heading_path`, `lines`, `tokens` (what reading it costs) and,
-        when a passage won the vector ranking, a `matched_passage` preview of it. Follow one with
+        `limit` hits, best first. The first carries the section's full `content`, or - marked
+        `excerpt: true`, with `lines` naming them - the passage that matched and its neighbours,
+        verbatim; `read_section(file_path, heading_path)` then returns the full section at its
+        `tokens`. The rest are pointers - `file_path`, `heading_path`, `lines`, `tokens` (what
+        reading it costs) and, when a passage won the vector ranking, a `matched_passage`
+        preview of it. Follow one with
         `read_section(file_path, heading_path)` only when the first hit does not answer, passing
         `heading_path` verbatim: for a `(Part n)` of a split section the base path returns every
         part, and the pointer carries a `part_preview` of how its part begins.
@@ -667,7 +675,9 @@ def create_server(
         semantic neighbours only. Only "no_match" means no indexed section contains the searched
         terms; a query made only of identifiers then returns no results at all, as the
         identifier is not in the indexed documentation - whatever its neighbours would say.
-        `index_status.root` is the documentation root that answered. `coverage` "unknown" means
+        `file_path` is relative to `index_status.root`, the documentation root that answered
+        (absolute when another work tree answered): pass it verbatim, with the same `cwd`.
+        `coverage` "unknown" means
         what you searched is missing part of its documentation, or was never indexed end to end:
         an answer drawn from it may be confidently incomplete. `changed_files` counts indexed
         documents that no longer match the index - a hit may quote text that is no longer there -
