@@ -352,9 +352,10 @@ class TestKeywordMatch:
         self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The best vector-only hit ties the best keyword hit at 1/61 and wins on section id.
+        # Words, not an identifier: an identifier lookup puts the section naming it first (#75).
         first = min(int(row[0]) for row in db.connection().execute("SELECT id FROM sections"))
         monkeypatch.setattr(fake_searcher, "_vector_ranking", lambda query, limit: ([first], {}))
-        page = fake_searcher.search_page("--drain-seconds", limit=1)
+        page = fake_searcher.search_page("drain seconds", limit=1)
         assert [r.fts_rank for r in page.results] == [None]
         assert page.keyword_match == "matched", "a keyword hit exists: no_match would be false"
 

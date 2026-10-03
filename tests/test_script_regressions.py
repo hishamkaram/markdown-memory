@@ -420,6 +420,21 @@ class TestTheRealDocsCorpus:
             "gh/docs/README.md::Guide > Setup",
         }
 
+    def test_the_churn_report_ranks_by_the_same_labels_as_the_gate(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        import cross_host_churn
+
+        root = tmp_path / "docs"
+        (root / "guides").mkdir(parents=True)
+        (root / "guides" / "a.md").write_text("# Guide\n\n## Setup\n\ninstall the tool\n")
+        service = self.service(tmp_path, fake_embedder, root)
+        try:
+            ranked = cross_host_churn._rank(service, "install the tool")
+        finally:
+            service.close()
+        assert "guides/a.md::Guide > Setup" in ranked[0]
+
     def test_every_v2_label_names_exactly_one_section(
         self, evaluation: object, tmp_path: Path, fake_embedder: FakeEmbedder
     ) -> None:

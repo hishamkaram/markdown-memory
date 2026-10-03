@@ -1096,7 +1096,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 10134),',
+        old='    ("README.md", 10332),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -1281,6 +1281,15 @@ MUTATIONS = (
         old='        return root if self.name == "v1" else root.with_name(f"eval-{self.name}")',
         new="        return root",
         tests="test_v2_keeps_its_own_index_and_baseline",
+    ),
+    Mutation(
+        name="v2: rank the churn report without the corpus root its labels need",
+        module="cross_host_churn.py",
+        area="scripts",
+        old="    return [_labels(hit, service.root) for hit in service.search_docs(query, TOP_N)]",
+        new="    return [_labels(hit) for hit in service.search_docs(query, TOP_N)]",
+        tests="test_the_churn_report_ranks_by_the_same_labels_as_the_gate",
+        fails_with="TypeError",
     ),
     Mutation(
         name="cost: look only at top-level headings for a label",
@@ -2339,9 +2348,179 @@ MUTATIONS = (
     Mutation(
         name="keyword_match: pass off a failed keyword index as a match",
         module="search.py",
-        old='_settle(fts_future, ([], "unavailable"))',
-        new='_settle(fts_future, ([], "matched"))',
+        old='_settle(fts_future, _Keyword([], "unavailable"))',
+        new='_settle(fts_future, _Keyword([], "matched"))',
         tests="test_a_failed_keyword_index_is_unavailable_while_vectors_answer",
+    ),
+    Mutation(
+        name="identifiers: check only the first twenty keyword hits for the identifier",
+        module="search.py",
+        old="LITERAL_CANDIDATES = 200",
+        new="LITERAL_CANDIDATES = 20",
+        tests="test_a_literal_beyond_the_first_twenty_keyword_hits_is_found",
+    ),
+    Mutation(
+        name="identifiers: find --pre inside --pre-glob",
+        module="search.py",
+        old='_IDENTIFIER_EDGE = "A-Za-z0-9_-"',
+        new='_IDENTIFIER_EDGE = "A-Za-z0-9_"',
+        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
+    ),
+    Mutation(
+        name="identifiers: find v1.2 inside v1.2.3",
+        module="search.py",
+        old=(
+            '        tail = r"(?=\\s*\\()" if call else '
+            'rf"(?![{_IDENTIFIER_EDGE}])(?!\\.[A-Za-z0-9_])"'
+        ),
+        new='        tail = r"(?=\\s*\\()" if call else rf"(?![{_IDENTIFIER_EDGE}])"',
+        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
+    ),
+    Mutation(
+        name="identifiers: read name() as the literal text, parentheses and all",
+        module="search.py",
+        old='        call = len(term) > 2 and term.endswith("()")',
+        new="        call = False",
+        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
+    ),
+    Mutation(
+        name="identifiers: miss gh_repo when GH_REPO is asked for",
+        module="search.py",
+        old="        self._loose = re.compile(pattern, re.IGNORECASE)",
+        new="        self._loose = re.compile(pattern)",
+        tests="test_exact_case_is_told_apart_from_a_case_folded_match",
+    ),
+    Mutation(
+        name="identifiers: forget the section headed by the identifier",
+        module="search.py",
+        old="                not heads,",
+        new="                False,",
+        tests="test_the_section_headed_by_the_identifier_comes_first_and_its_first_part_first",
+    ),
+    Mutation(
+        name="identifiers: rank the parts of the headed section by BM25 alone",
+        module="search.py",
+        old="                section.part_index if heads else 0,",
+        new="                0,",
+        tests="test_the_section_headed_by_the_identifier_comes_first_and_its_first_part_first",
+    ),
+    Mutation(
+        name="identifiers: ignore the spelling asked for",
+        module="search.py",
+        old="                not exact,",
+        new="                False,",
+        tests="test_the_spelling_asked_for_ranks_first_among_sections_naming_it",
+    ),
+    Mutation(
+        name="identifiers: let a vector-only neighbour win the tie on section id",
+        module="search.py",
+        old="        if keyword.literal:",
+        new="        if False:",
+        tests="test_the_section_naming_the_identifier_beats_prose_holding_its_words",
+    ),
+    Mutation(
+        name="identifiers: let mentions with vector support push the headed section down",
+        module="search.py",
+        old=(
+            "                *keyword.headings,\n"
+            "                *(sid for sid in ordered "
+            "if sid in keyword.literal - set(keyword.headings)),"
+        ),
+        new="                *(sid for sid in ordered if sid in keyword.literal),",
+        tests="test_the_section_headed_by_the_identifier_comes_first_and_its_first_part_first",
+    ),
+    Mutation(
+        name="identifiers: treat a term found everywhere as an identifier",
+        module="search.py",
+        old="            if found[literal] and len(found[literal]) * spread(term) <= rare",
+        new="            if found[literal]",
+        tests="test_an_identifier_named_everywhere_is_vocabulary",
+    ),
+    Mutation(
+        name="identifiers: judge rarity by the candidates checked alone",
+        module="search.py",
+        old="            if found[literal] and len(found[literal]) * spread(term) <= rare",
+        new="            if found[literal] and len(found[literal]) <= rare",
+        tests="test_a_term_common_beyond_the_candidates_checked_is_vocabulary",
+    ),
+    Mutation(
+        name="identifiers: judge rarity by the keyword index's count alone",
+        module="search.py",
+        old="            if found[literal] and len(found[literal]) * spread(term) <= rare",
+        new="            if found[literal] and self._db.fts_document_frequency(term) <= rare",
+        tests="test_an_identifier_whose_words_are_common_is_still_rare",
+    ),
+    Mutation(
+        name="identifiers: let one vocabulary term turn off the lookup of the others",
+        module="search.py",
+        old="        if not wanted:",
+        new="        if len(wanted) < len(literals):",
+        tests="test_rarity_is_judged_per_term",
+    ),
+    Mutation(
+        name="identifiers: hide a candidate that vanished while it was checked",
+        module="search.py",
+        old="        stale = len(texts) < len(ranking)",
+        new="        stale = False",
+        tests="test_a_section_vanishing_while_checked_asks_for_a_second_pass",
+    ),
+    Mutation(
+        name="identifiers: forget a vanished candidate when nothing left names the identifier",
+        module="search.py",
+        old=(
+            "                stale = literal.stale  "
+            "# a vanished candidate may have been the one naming it"
+        ),
+        new="                pass",
+        tests="test_losing_the_only_section_naming_it_still_asks_for_a_second_pass",
+    ),
+    Mutation(
+        name="identifiers: sample a term over the whole pool, not the candidates matching it",
+        module="search.py",
+        old="            checked = max(1, len(self._db.fts_matching(term, list(texts))))",
+        new="            checked = len(texts)",
+        tests="test_a_term_is_sampled_among_the_candidates_matching_it_not_the_whole_pool",
+    ),
+    Mutation(
+        name="identifiers: count another root's sections towards this one's rarity",
+        module="search.py",
+        old=(
+            "            return max(1.0, "
+            "len(self._db.fts_search(term, everywhere, self._scope)) / checked)"
+        ),
+        new="            return max(1.0, everywhere / checked)",
+        tests="test_rarity_in_one_root_is_not_judged_by_another_roots_words",
+    ),
+    Mutation(
+        name="identifiers: keep a backtick a sentence's full stop left behind",
+        module="search.py",
+        old='        term = term.rstrip("?!,;:").removesuffix(".").strip("\'`\\"")',
+        new='        term = term.rstrip("?!,;:").removesuffix(".")',
+        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
+    ),
+    Mutation(
+        name="identifiers: miss a heading that quotes only the name of a call",
+        module="search.py",
+        old='    return text.replace("`", "").strip().removesuffix("()").strip().lower()',
+        new='    return text.strip().strip("`").strip().removesuffix("()").lower()',
+        tests="test_a_heading_naming_the_call_heads_it_however_it_is_quoted",
+    ),
+    Mutation(
+        name="identifiers: return an empty page from a pass that lost sections as final",
+        module="search.py",
+        old="            return SearchPage((), keyword_match), keyword.stale",
+        new="            return SearchPage((), keyword_match), False",
+        tests="test_an_empty_page_from_a_pass_that_lost_sections_is_ranked_again",
+    ),
+    Mutation(
+        name="identifiers: keep the backtick of a call quoted as `name`()",
+        module="search.py",
+        old=(
+            '        self.name = term[:-2].strip("\'`\\"") if call else term  '
+            "# `name`() quotes the name only"
+        ),
+        new="        self.name = term[:-2] if call else term",
+        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
     ),
     Mutation(
         name="keyword_match: let a refused candidate claim nothing contains the terms",

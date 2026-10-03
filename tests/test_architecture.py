@@ -44,7 +44,8 @@ BUDGETS = {
     # Raised from 270 for #69: what a miss says while a fresh tree is still indexing.
     "models.py": 285,
     "parser.py": 722,
-    "search.py": 399,
+    # Raised from 399 for #75: an identifier lookup ranks the sections that name it.
+    "search.py": 460,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text.
     "server.py": 510,
