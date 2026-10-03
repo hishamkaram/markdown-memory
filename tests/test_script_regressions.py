@@ -1005,11 +1005,21 @@ class TestTheExcerptHarness:
         assert item.key["payload_tokens"] == estimate_tokens(text)
         assert item.key["read_tokens"] == estimate_tokens(section)
 
+    def test_a_key_names_the_section_its_query_was_answered_by(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, content="# B\n\nthe section"))
+        item = eval_excerpts.make_item("v2-dev-paraphrase-00", "q", text, "s", random.Random(0))
+        assert item is not None and item.key["cluster"] == "a.md :: A > B"
+
     @staticmethod
-    def key(item_id: str, excerpt: str | None, **tokens: int) -> dict[str, Any]:
+    def key(item_id: str, excerpt: str | None, cluster: str = "", **tokens: int) -> dict[str, Any]:
         section = "A" if excerpt is None else ("B" if excerpt == "A" else "A")
         return {
             "id": item_id,
+            "cluster": cluster or item_id,
             "excerpt": excerpt,
             "section": section,
             "payload_tokens": tokens.get("payload", 100),
@@ -1017,97 +1027,114 @@ class TestTheExcerptHarness:
             "read_tokens": tokens.get("read", 150),
         }
 
-    def test_retention_counts_only_items_whose_section_answers(self) -> None:
+    def test_a_judge_sees_one_text_the_section_or_the_excerpt(self) -> None:
         import eval_excerpts
 
-        keys = [
-            self.key("v2-held_out-paraphrase-00", "A"),  # excerpt A yes, section B yes: kept
-            self.key("v2-held_out-paraphrase-01", "A"),  # excerpt A partial, section yes: lost
-            self.key("v2-held_out-paraphrase-02", "B"),  # section A no: outside the denominator
+        keys = [self.key("v2-dev-paraphrase-00", "A"), self.key("v2-dev-paraphrase-01", None)]
+        judged = [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "ex", "B": "whole"}},
+            {"id": "v2-dev-paraphrase-01", "query": "q1", "texts": {"A": "whole 1"}},
         ]
-        verdicts = {
-            "v2-held_out-paraphrase-00": {"A": "yes", "B": "yes"},
-            "v2-held_out-paraphrase-01": {"A": "partial", "B": "yes"},
-            "v2-held_out-paraphrase-02": {"A": "no", "B": "yes"},
-        }
-        outcomes = [eval_excerpts.outcome(k, verdicts, verdicts, {}) for k in keys]
-        assert [o.eligible for o in outcomes] == [True, True, False]
-        assert [o.kept for o in outcomes] == [True, False, False]
-        # A lost answer costs the read the agent then makes; an item outside pays its payload.
-        assert [o.cost for o in outcomes] == [100, 250, 100]
+        assert eval_excerpts.judge_texts(judged, keys, "section") == [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "whole"}},
+            {"id": "v2-dev-paraphrase-01", "query": "q1", "texts": {"A": "whole 1"}},
+        ]
+        assert eval_excerpts.judge_texts(judged, keys, "excerpt") == [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "ex"}},
+        ]
 
-    def test_a_single_text_decides_eligibility_and_retention_and_is_never_charged_a_read(
-        self,
-    ) -> None:
+    def test_a_verdict_is_a_strict_majority_and_a_split_is_not_a_yes(self) -> None:
         import eval_excerpts
 
-        answered = eval_excerpts.outcome(
-            self.key("v1-dev-identifier-00", None, payload=300, baseline=300),
-            {"v1-dev-identifier-00": {"A": "yes"}},
-            {"v1-dev-identifier-00": {"A": "yes"}},
-            {},
+        def judges(*verdicts: str) -> list[dict[str, str]]:
+            return [{"x": verdict} for verdict in verdicts]
+
+        assert eval_excerpts.majority_yes("x", judges("yes", "yes", "partial"))
+        assert not eval_excerpts.majority_yes("x", judges("yes", "partial", "no"))
+        assert not eval_excerpts.majority_yes("x", judges("yes", "partial"))
+        assert eval_excerpts.majority_yes("x", judges("yes", "yes"))
+
+    def test_a_lost_excerpt_costs_the_read_and_a_whole_section_is_kept_as_sent(self) -> None:
+        import eval_excerpts
+
+        lost = self.key("v2-held_out-paraphrase-00", "A")
+        judges = [{lost["id"]: "partial"}, {lost["id"]: "yes"}, {lost["id"]: "no"}]
+        assert eval_excerpts.outcome(lost, judges) == eval_excerpts.Outcome(
+            False, 250, 200, True, lost["id"]
         )
-        assert answered == eval_excerpts.Outcome(True, True, 300, 300, False)
-        unanswered = eval_excerpts.outcome(
-            self.key("v1-dev-identifier-01", None, payload=300, baseline=300),
-            {"v1-dev-identifier-01": {"A": "partial"}},
-            {"v1-dev-identifier-01": {"A": "partial"}},
-            {},
+        whole = self.key("v2-held_out-paraphrase-01", None, payload=200)
+        assert eval_excerpts.outcome(whole, []) == eval_excerpts.Outcome(
+            True, 200, 200, False, whole["id"]
         )
-        assert not unanswered.eligible and unanswered.cost == 300
 
-    def test_a_split_verdict_needs_the_joint_pass_and_is_lost_without_it(self) -> None:
+    def test_the_wilson_bound_is_one_sided_at_95_percent(self) -> None:
         import eval_excerpts
 
-        key = self.key("v2-held_out-identifier-00", "A")
-        codex = {key["id"]: {"A": "yes", "B": "yes"}}
-        gemini = {key["id"]: {"A": "partial", "B": "yes"}}
-        assert eval_excerpts.disagreements([key], codex, gemini) == [key["id"]]
-        assert not eval_excerpts.outcome(key, codex, gemini, {}).kept
-        joint = {key["id"]: {"A": "yes"}}
-        assert eval_excerpts.outcome(key, codex, gemini, joint).kept
+        assert eval_excerpts.wilson_lower(20, 20) == pytest.approx(0.8808, abs=1e-4)
+        assert eval_excerpts.wilson_lower(114, 120) == pytest.approx(0.9062, abs=1e-4)
+        assert eval_excerpts.wilson_lower(0, 0) == 0.0
 
-    def test_the_gates_are_retention_everywhere_and_cost_on_v2(self) -> None:
+    def test_the_cost_bound_resamples_sections_not_queries(self) -> None:
         import eval_excerpts
 
-        def run(corpus: str, kept: int, total: int, payload: int) -> bool:
-            keys = [
-                self.key(f"{corpus}-held_out-paraphrase-{n:02d}", "A", payload=payload)
-                for n in range(total)
+        def outcomes(clusters: list[str]) -> list[Any]:
+            costs = [100, 300] * (len(clusters) // 2)
+            return [
+                eval_excerpts.Outcome(True, cost, 200, True, cluster)
+                for cost, cluster in zip(costs, clusters, strict=True)
             ]
-            verdicts = {
-                k["id"]: {"A": "yes" if n < kept else "no", "B": "yes"} for n, k in enumerate(keys)
-            }
-            return eval_excerpts.score(keys, verdicts, verdicts, {})[1]
 
-        assert run("v2", 20, 20, 100)
-        assert not run("v2", 18, 20, 100)  # 90% retention
-        assert not run("v2", 20, 20, 170)  # 85% of the baseline's cost
-        assert run("v1", 20, 20, 170)  # v1's cost is reported, not gated
+        # Eight queries of one section are one observation: nothing to resample.
+        assert eval_excerpts.cost_upper(outcomes(["s"] * 8), "x") == 1.0
+        spread = eval_excerpts.cost_upper(outcomes([f"s{n}" for n in range(8)]), "x")
+        assert 1.0 < spread <= 1.5
+        assert spread == eval_excerpts.cost_upper(outcomes([f"s{n}" for n in range(8)]), "x")
 
-    def test_a_malformed_or_missing_verdict_stops_the_score(self, tmp_path: Path) -> None:
+    def test_the_gates_count_only_frozen_items_and_cost_only_on_v2(self) -> None:
         import eval_excerpts
 
-        keys = {"v2-dev-paraphrase-00": self.key("v2-dev-paraphrase-00", "A")}
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([{"id": "v2-dev-paraphrase-00", "A": "yes", "B": "maybe"}]))
+        def run(corpus: str, kept: int, total: int, payload: int, extra: int = 0) -> bool:
+            keys = [
+                self.key(f"{corpus}-sealed-paraphrase-{n:03d}", "A", payload=payload)
+                for n in range(total + extra)
+            ]
+            judges = [{k["id"]: "yes" if n < kept else "no" for n, k in enumerate(keys)}] * 3
+            eligible = [k["id"] for k in keys[:total]]
+            return eval_excerpts.score(keys, eligible, judges)[1]
+
+        assert run("v2", 120, 120, 100)
+        assert run("v2", 114, 120, 100)  # 95.0%, Wilson bound 90.6%
+        assert not run("v2", 113, 120, 100)  # 94.2%
+        assert not run("v2", 20, 20, 100)  # 100%, but a bound of 88.1% on twenty items
+        assert not run("v2", 120, 120, 170)  # 85% of the baseline's cost
+        assert run("v1", 120, 120, 170)  # v1's cost is reported, not gated
+        assert run("v2", 120, 120, 100, extra=30)  # items outside the frozen list do not count
+
+    def test_a_malformed_missing_or_repeated_verdict_stops_the_score(self, tmp_path: Path) -> None:
+        import eval_excerpts
+
+        ids = ["v2-dev-paraphrase-00"]
+
+        def read(answer: object) -> dict[str, str]:
+            path = tmp_path / "judge.json"
+            path.write_text(answer if isinstance(answer, str) else json.dumps(answer))
+            return eval_excerpts.read_verdicts(path, ids)
+
         with pytest.raises(SystemExit, match="malformed"):
-            eval_excerpts.read_verdicts(bad, keys)
-        fenced = tmp_path / "fenced.json"
-        answer = [{"id": "v2-dev-paraphrase-00", "A": "yes", "B": "no", "note": "x"}]
-        fenced.write_text("```json\n" + json.dumps(answer) + "\n```")
-        assert eval_excerpts.read_verdicts(fenced, keys) == {
-            "v2-dev-paraphrase-00": {"A": "yes", "B": "no"}
-        }
+            read([{"id": ids[0], "A": "maybe"}])
+        with pytest.raises(SystemExit, match="malformed"):
+            read([{"id": ids[0], "A": "yes", "B": "no"}])
+        with pytest.raises(SystemExit, match="malformed"):
+            read([{"id": ids[0], "A": "yes"}, {"id": ids[0], "A": "no"}])
         with pytest.raises(SystemExit, match="no verdict"):
-            eval_excerpts.score(list(keys.values()), {}, {}, {})
+            read([{"id": "another", "A": "yes"}])
+        answer = [{"id": ids[0], "A": "yes", "note": "x"}]
+        assert read("```json\n" + json.dumps(answer) + "\n```") == {ids[0]: "yes"}
 
-    def test_the_prompt_asks_for_the_letters_the_score_reads(self) -> None:
+    def test_the_prompt_asks_for_the_letter_the_score_reads(self) -> None:
         import eval_excerpts
 
-        assert '{"id": <id>, "A": "yes|partial|no", "B": "yes|partial|no"}' in (
-            eval_excerpts.JUDGE_PROMPT
-        )
+        assert '{"id": <id>, "A": "yes|partial|no"}' in eval_excerpts.JUDGE_PROMPT
 
 
 class _ReversedEmbedder(FakeEmbedder):

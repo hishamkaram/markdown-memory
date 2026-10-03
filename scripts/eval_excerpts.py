@@ -5,17 +5,23 @@ neighbours - instead of the whole section. This script is how that change is jud
 
     uv run python scripts/eval_excerpts.py rankings --corpus v1 OUT.jsonl
     uv run python scripts/eval_excerpts.py build --corpus v2 --split dev OUTDIR
+    uv run python scripts/eval_excerpts.py texts OUTDIR section|excerpt OUT.jsonl
     uv run python scripts/eval_excerpts.py prompt
-    uv run python scripts/eval_excerpts.py disagree OUTDIR/key.jsonl CODEX.json GEMINI.json OUT
-    uv run python scripts/eval_excerpts.py score KEY [KEY ...] --codex C.json --gemini G.json
+    uv run python scripts/eval_excerpts.py freeze KEY [KEY ...] --judge J.json ... --out E.json
+    uv run python scripts/eval_excerpts.py score KEY [KEY ...] --eligible E.json --judge J.json ...
     uv run python scripts/eval_excerpts.py latency --corpus v1
 
 `rankings` writes what the searcher ranks for every query (20 hits, as the retrieval gate
 searches) so that a snapshot before and after a change can be compared byte for byte.
 `build` writes, for every labelled query, the top hit as sent and the whole section it
-comes from, as A/B texts in a seeded random order, plus a key that says which is which and
-what each costs. Two judges answer the prompt `prompt` prints; `score` turns their verdicts
-into answer retention and expected cost. Tune on `dev` only; `held_out` is run once, last.
+comes from, plus a key that says what each costs; `--queries` reads a query file other than
+the corpus's own, such as a sealed set. `texts` turns a build into what a judge sees: one
+text per item, either the whole section or the excerpt. Judges answer the prompt `prompt`
+prints, each in isolation. `freeze` records, once and before any change is tuned, which
+items' whole sections answer - a strict majority of the judges saying "yes" - so the
+denominator does not move with the change being measured. `score` then judges each excerpt
+by the same majority and reports answer retention and expected cost against the gates.
+Tune on `dev` only; a held-out set is run once, last.
 """
 
 from __future__ import annotations
@@ -48,28 +54,31 @@ RANKING_LIMIT = 20  # what eval_retrieval.evaluate searches
 KINDS = ("paraphrase", "identifier")
 VERDICTS = ("yes", "partial", "no")
 FLOOR_RETENTION = 0.95
+FLOOR_RETENTION_BOUND = 0.90  # one-sided 95% Wilson lower bound on retention
 CEILING_COST_RATIO = 0.80  # on corpus v2 only; v1 is reported
+CEILING_COST_BOUND = 0.85  # one-sided 95% bootstrap upper bound, resampling sections
 COST_GATED = ("v2",)
+Z_95 = 1.6448536269514722  # one-sided 95%
+BOOTSTRAP_ROUNDS = 2000
 
 JUDGE_PROMPT = """\
 You are judging a documentation-retrieval experiment. Do NOT run tests and change NO files.
 Only read the input file.
 
 Each line of the input is one JSON object with an "id", a "query" a coding agent sent to a
-documentation search tool, and "texts": one or two candidate texts ("A", and sometimes "B")
-the tool could return as its top answer. The texts are verbatim Markdown from the docs.
+documentation search tool, and "texts": {"A": ...}, the text the tool returned as its top
+answer, verbatim Markdown from the docs.
 
-For each item and each text present, judge whether an agent reading ONLY that text could act
-on the query without reading more:
+For each item, judge whether an agent reading ONLY that text could act on the query without
+reading more:
 - "yes": it answers the query
 - "partial": relevant, but the agent would need to read more to act
 - "no": does not answer
 
-Judge each text independently; do not assume a longer text is better. Be strict and literal.
+Be strict and literal.
 
 Output ONLY a JSON array, one object per item, nothing else (no prose, no code fences):
-{"id": <id>, "A": "yes|partial|no", "B": "yes|partial|no"}
-with "B" present exactly when the item has a text "B".
+{"id": <id>, "A": "yes|partial|no"}
 """
 
 
@@ -100,7 +109,7 @@ def _relative(file_path: str, root: str) -> str:
 def rankings(service: MarkdownMemoryService, queries: Mapping[str, Any]) -> list[str]:
     """One sorted-key JSON line per query: what was ranked, in order, and the keyword verdict."""
     lines: list[str] = []
-    for split in ("dev", "held_out"):
+    for split in (name for name in ("dev", "held_out", "sealed") if name in queries):
         for kind, index, case in _cases(queries, split, (*KINDS, "no_answer")):
             page = service.search_page(str(case["query"]), RANKING_LIMIT)
             record = {
@@ -156,6 +165,8 @@ def make_item(
     baseline = dict(page, results=[whole, *page["results"][1:]])
     key: dict[str, Any] = {
         "id": item_id,
+        # Queries answered by one section are not independent: the bootstrap resamples these.
+        "cluster": f"{top['file_path']} :: {top['heading_path']}",
         "payload_tokens": estimate_tokens(payload_text),
         "section_payload_tokens": estimate_tokens(_compact(baseline)),
         "read_tokens": estimate_tokens(section_text),
@@ -209,120 +220,135 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------- score
 
 
-def read_verdicts(path: Path, keys: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """A judge's answer, checked against the key: one object per item, the letters it showed."""
+def judge_texts(
+    judged: Sequence[Mapping[str, Any]], keys: Sequence[Mapping[str, Any]], which: str
+) -> list[dict[str, Any]]:
+    """One text per item for a judge: every whole section, or every excerpt there is."""
+    by_id = {key["id"]: key for key in keys}
+    texts: list[dict[str, Any]] = []
+    for item in judged:
+        letter = by_id[item["id"]][which]
+        if letter is not None:
+            texts.append(
+                {"id": item["id"], "query": item["query"], "texts": {"A": item["texts"][letter]}}
+            )
+    return texts
+
+
+def read_verdicts(path: Path, ids: Sequence[str]) -> dict[str, str]:
+    """One judge's answer: exactly one well-formed verdict for each of ``ids``, nothing else."""
     text = path.read_text(encoding="utf-8").strip()
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
-    answers = json.loads(text)
-    verdicts: dict[str, dict[str, str]] = {}
-    for answer in answers:
+    wanted = set(ids)
+    verdicts: dict[str, str] = {}
+    for answer in json.loads(text):
         item_id = answer.get("id")
-        if item_id not in keys:
+        if item_id not in wanted:
             continue  # a judge given several builds' inputs at once answers for all of them
-        letters = ("A",) if keys[item_id]["excerpt"] is None else ("A", "B")
-        shown = {letter: answer.get(letter) for letter in letters}
-        extra = set(answer) - {"id", "note", *letters}
-        if any(value not in VERDICTS for value in shown.values()) or extra:
+        if (
+            answer.get("A") not in VERDICTS
+            or set(answer) - {"id", "A", "note"}
+            or item_id in verdicts
+        ):
             raise SystemExit(f"{path}: malformed verdict {answer!r}")
-        verdicts[item_id] = {letter: str(value) for letter, value in shown.items()}
+        verdicts[item_id] = str(answer["A"])
+    missing = wanted - verdicts.keys()
+    if missing:
+        raise SystemExit(f"{path}: no verdict for {', '.join(sorted(missing))}")
     return verdicts
 
 
-def _agreed(
-    item_id: str,
-    letter: str,
-    codex: Mapping[str, Mapping[str, str]],
-    gemini: Mapping[str, Mapping[str, str]],
-    joint: Mapping[str, Mapping[str, str]],
-) -> str | None:
-    """Both judges' verdict on one text, else the joint pass's, else unresolved (None)."""
-    first, second = codex[item_id][letter], gemini[item_id][letter]
-    if first == second:
-        return first
-    return joint.get(item_id, {}).get(letter)
+def majority_yes(item_id: str, judges: Sequence[Mapping[str, str]]) -> bool:
+    """A strict majority of the judges said "yes": with two, both; a split is not a yes."""
+    return 2 * sum(judge[item_id] == "yes" for judge in judges) > len(judges)
+
+
+def wilson_lower(kept: int, total: int, z: float = Z_95) -> float:
+    if total == 0:
+        return 0.0
+    share = kept / total
+    centre = share + z * z / (2 * total)
+    spread = z * (share * (1 - share) / total + z * z / (4 * total * total)) ** 0.5
+    return (centre - spread) / (1 + z * z / total)
 
 
 @dataclass(slots=True, frozen=True)
 class Outcome:
-    eligible: bool  # the whole section answers
     kept: bool
     cost: int  # payload, plus the read the agent then needs
     baseline: int
     excerpted: bool
+    cluster: str
 
 
-def outcome(
-    key: Mapping[str, Any],
-    codex: Mapping[str, Mapping[str, str]],
-    gemini: Mapping[str, Mapping[str, str]],
-    joint: Mapping[str, Mapping[str, str]],
-) -> Outcome:
-    item_id = key["id"]
-    section = _agreed(item_id, key["section"], codex, gemini, joint) == "yes"
+def outcome(key: Mapping[str, Any], judges: Sequence[Mapping[str, str]]) -> Outcome:
+    """One eligible item: an excerpt is kept when a majority says it answers on its own."""
     if key["excerpt"] is None:
-        # One text, one verdict: it decides eligibility and retention, and the payload already
-        # is the whole section, so no read is ever charged.
         return Outcome(
-            section, section, key["payload_tokens"], key["section_payload_tokens"], False
+            True, key["payload_tokens"], key["section_payload_tokens"], False, key["cluster"]
         )
-    kept = section and _agreed(item_id, key["excerpt"], codex, gemini, joint) == "yes"
-    cost = key["payload_tokens"] + (key["read_tokens"] if section and not kept else 0)
-    return Outcome(section, kept, cost, key["section_payload_tokens"], True)
+    kept = majority_yes(key["id"], judges)
+    cost = key["payload_tokens"] + (0 if kept else key["read_tokens"])
+    return Outcome(kept, cost, key["section_payload_tokens"], True, key["cluster"])
 
 
-def disagreements(
-    keys: Sequence[Mapping[str, Any]],
-    codex: Mapping[str, Mapping[str, str]],
-    gemini: Mapping[str, Mapping[str, str]],
-) -> list[str]:
-    return [key["id"] for key in keys if codex[key["id"]] != gemini[key["id"]]]
+def cost_upper(outcomes: Sequence[Outcome], seed: str) -> float:
+    """The 95th percentile of the cost ratio over resampled sections, not resampled queries."""
+    clusters: dict[str, list[Outcome]] = {}
+    for item in outcomes:
+        clusters.setdefault(item.cluster, []).append(item)
+    groups = [(sum(o.cost for o in g), sum(o.baseline for o in g)) for g in clusters.values()]
+    rng = random.Random(seed)
+    ratios = []
+    for _ in range(BOOTSTRAP_ROUNDS):
+        drawn = [groups[rng.randrange(len(groups))] for _ in groups]
+        ratios.append(sum(c for c, _ in drawn) / sum(b for _, b in drawn))
+    ratios.sort()
+    return ratios[int(0.95 * len(ratios)) - 1]
 
 
 def score(
     keys: Sequence[Mapping[str, Any]],
-    codex: Mapping[str, Mapping[str, str]],
-    gemini: Mapping[str, Mapping[str, str]],
-    joint: Mapping[str, Mapping[str, str]],
+    eligible: Sequence[str],
+    judges: Sequence[Mapping[str, str]],
 ) -> tuple[list[str], bool]:
     """The report lines, and whether every gate held."""
-    missing = [key["id"] for key in keys if key["id"] not in codex or key["id"] not in gemini]
-    if missing:
-        raise SystemExit(f"no verdict from both judges for: {', '.join(missing)}")
     lines: list[str] = []
     passed = True
+    frozen = set(eligible)
     by_corpus: dict[str, list[Outcome]] = {}
     for key in keys:
-        by_corpus.setdefault(key["id"].split("-")[0], []).append(outcome(key, codex, gemini, joint))
+        if key["id"] in frozen:
+            by_corpus.setdefault(key["id"].split("-")[0], []).append(outcome(key, judges))
     for corpus, outcomes in sorted(by_corpus.items()):
-        eligible = [o for o in outcomes if o.eligible]
-        kept = sum(o.kept for o in eligible)
-        retention = kept / len(eligible) if eligible else 0.0
-        cost = statistics.mean(o.cost for o in eligible) if eligible else 0.0
-        baseline = statistics.mean(o.baseline for o in eligible) if eligible else 0.0
-        ratio = cost / baseline if baseline else 0.0
-        others = [o for o in outcomes if not o.eligible]
+        kept = sum(o.kept for o in outcomes)
+        retention = kept / len(outcomes)
+        bound = wilson_lower(kept, len(outcomes))
+        ratio = sum(o.cost for o in outcomes) / sum(o.baseline for o in outcomes)
+        upper = cost_upper(outcomes, f"{SEED}/{corpus}")
+        gated = corpus in COST_GATED
         lines.append(
-            f"{corpus}: retention {kept}/{len(eligible)} = {retention:.1%} "
-            f"(floor {FLOOR_RETENTION:.0%}); expected cost {cost:.0f} vs {baseline:.0f} "
-            f"= {ratio:.1%}"
-            + (f" (ceiling {CEILING_COST_RATIO:.0%})" if corpus in COST_GATED else " (reported)")
+            f"{corpus}: retention {kept}/{len(outcomes)} = {retention:.1%} (floor "
+            f"{FLOOR_RETENTION:.0%}), Wilson lower bound {bound:.1%} (floor "
+            f"{FLOOR_RETENTION_BOUND:.0%}); cost {ratio:.1%}, upper bound {upper:.1%}"
+            + (
+                f" (ceilings {CEILING_COST_RATIO:.0%}, {CEILING_COST_BOUND:.0%})"
+                if gated
+                else " (reported)"
+            )
         )
-        if eligible:
-            lines.append(
-                f"  cost median {statistics.median(o.cost for o in eligible):.0f} "
-                f"p95 {_p95([float(o.cost) for o in eligible]):.0f}; "
-                f"excerpted {sum(o.excerpted for o in outcomes)}/{len(outcomes)}"
-            )
-        if others:
-            lines.append(
-                f"  {len(others)} items whose section does not answer (outside the denominator): "
-                f"payload {statistics.mean(o.cost for o in others):.0f} "
-                f"vs {statistics.mean(o.baseline for o in others):.0f}"
-            )
-        passed &= bool(eligible) and retention >= FLOOR_RETENTION
-        if corpus in COST_GATED:
-            passed &= bool(eligible) and ratio <= CEILING_COST_RATIO
+        lines.append(
+            f"  cost median {statistics.median(o.cost for o in outcomes):.0f} "
+            f"p95 {_p95([float(o.cost) for o in outcomes]):.0f}; "
+            f"excerpted {sum(o.excerpted for o in outcomes)}/{len(outcomes)} eligible"
+        )
+        passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND
+        if gated:
+            passed &= ratio <= CEILING_COST_RATIO and upper <= CEILING_COST_BOUND
+    if not by_corpus:
+        lines.append("no eligible item")
+        passed = False
     return lines, passed
 
 
@@ -382,7 +408,8 @@ def _open(arguments: argparse.Namespace, corpus: Corpus) -> MarkdownMemoryServic
 
 def _with_service(arguments: argparse.Namespace, work: Any) -> int:
     corpus = corpora()[arguments.corpus]
-    queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
+    source = getattr(arguments, "queries", None) or corpus.queries
+    queries = json.loads(source.read_text(encoding="utf-8"))
     try:
         with eval_cache.lock(eval_cache.cache_root()):
             service = _open(arguments, corpus)
@@ -406,40 +433,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument("--rebuild", action="store_true")
         return command
 
-    indexed("rankings").add_argument("out", type=Path)
-    build_command = indexed("build")
-    build_command.add_argument("--split", required=True, choices=("dev", "held_out"))
-    build_command.add_argument("out", type=Path)
+    for name in ("rankings", "build"):
+        command = indexed(name)
+        command.add_argument("--queries", type=Path, help="a query file other than the corpus's")
+        if name == "build":
+            command.add_argument("--split", required=True, choices=("dev", "held_out", "sealed"))
+        command.add_argument("out", type=Path)
     indexed("latency").add_argument("--rounds", type=int, default=10)
     commands.add_parser("prompt")
-    disagree_command = commands.add_parser("disagree")
-    for name in ("key", "codex", "gemini", "out"):
-        disagree_command.add_argument(name, type=Path)
-    score_command = commands.add_parser("score")
-    score_command.add_argument("keys", type=Path, nargs="+")
-    score_command.add_argument("--codex", type=Path, required=True)
-    score_command.add_argument("--gemini", type=Path, required=True)
-    score_command.add_argument("--joint", type=Path)
+    texts_command = commands.add_parser("texts")
+    texts_command.add_argument("build_dir", type=Path)
+    texts_command.add_argument("which", choices=("section", "excerpt"))
+    texts_command.add_argument("out", type=Path)
+    for name in ("freeze", "score"):
+        command = commands.add_parser(name)
+        command.add_argument("keys", type=Path, nargs="+")
+        command.add_argument("--judge", type=Path, action="append", required=True)
+        if name == "freeze":
+            command.add_argument("--out", type=Path, required=True)
+        else:
+            command.add_argument("--eligible", type=Path, required=True)
     arguments = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
 
     if arguments.command == "prompt":
         print(JUDGE_PROMPT, end="")
         return 0
-    if arguments.command in ("score", "disagree"):
-        paths = arguments.keys if arguments.command == "score" else [arguments.key]
-        keys = [key for path in paths for key in _read_jsonl(path)]
-        by_id = {key["id"]: key for key in keys}
-        codex = read_verdicts(arguments.codex, by_id)
-        gemini = read_verdicts(arguments.gemini, by_id)
-        if arguments.command == "disagree":
-            split = set(disagreements(keys, codex, gemini))
-            judged = _read_jsonl(arguments.key.with_name("judge_input.jsonl"))
-            _write_jsonl(arguments.out, [item for item in judged if item["id"] in split])
-            print(f"{len(split)} items disagree; joint-pass input written to {arguments.out}")
+    if arguments.command == "texts":
+        keys = _read_jsonl(arguments.build_dir / "key.jsonl")
+        judged = _read_jsonl(arguments.build_dir / "judge_input.jsonl")
+        texts = judge_texts(judged, keys, arguments.which)
+        _write_jsonl(arguments.out, texts)
+        print(f"{len(texts)} {arguments.which} texts written to {arguments.out}")
+        return 0
+    if arguments.command in ("freeze", "score"):
+        if len(arguments.judge) < 2:
+            raise SystemExit("at least two judges are needed")
+        keys = [key for path in arguments.keys for key in _read_jsonl(path)]
+        if arguments.command == "freeze":
+            ids = [key["id"] for key in keys]
+            judges = [read_verdicts(path, ids) for path in arguments.judge]
+            eligible = [item_id for item_id in ids if majority_yes(item_id, judges)]
+            arguments.out.write_text(
+                json.dumps({"eligible": eligible, "items": len(ids)}, indent=1) + "\n",
+                encoding="utf-8",
+            )
+            print(f"{len(eligible)}/{len(ids)} items eligible, written to {arguments.out}")
             return 0
-        joint = read_verdicts(arguments.joint, by_id) if arguments.joint else {}
-        lines, passed = score(keys, codex, gemini, joint)
+        eligible = json.loads(arguments.eligible.read_text(encoding="utf-8"))["eligible"]
+        frozen = set(eligible)
+        excerpted = [k["id"] for k in keys if k["id"] in frozen and k["excerpt"] is not None]
+        judges = [read_verdicts(path, excerpted) for path in arguments.judge]
+        lines, passed = score(keys, eligible, judges)
         print("\n".join(lines))
         print("PASS" if passed else "FAIL")
         return 0 if passed else 1
