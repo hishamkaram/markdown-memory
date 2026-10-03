@@ -128,12 +128,15 @@ class Passage(NamedTuple):
     ``lines`` is the ``token.map`` of the block the passage came from, relative to the text
     given, or None when markdown-it left the token without a map. Every window of a long
     block inherits the whole block's lines. ``table`` is the first line of a body row's
-    table - its header - so that a window showing the row can show the header too.
+    table - its header - so that a window showing the row can show the header too. ``listing``
+    is the lines of the top-level list an item belongs to: an item rarely stands without the
+    sentence that introduces its list, so a window counts the list as one block.
     """
 
     text: str
     lines: Span
     table: int | None = None
+    listing: Span = None
 
 
 class MarkdownParser:
@@ -367,13 +370,13 @@ class MarkdownParser:
                 units.append(Passage(" ".join(_leaf_texts(block)), _span(token)))
             index = end + 1
         passages: list[Passage] = []
-        for unit, lines, table in units:
-            for window in _windows(unit):
+        for unit in units:
+            for window in _windows(unit.text):
                 if len(passages) >= MAX_UNITS_PER_SECTION:
                     return tuple(passages)
                 cleaned = _WHITESPACE.sub(" ", window.replace("|", " ")).strip()
                 if cleaned:
-                    passages.append(Passage(cleaned, lines, table))
+                    passages.append(unit._replace(text=cleaned))
         return tuple(passages)
 
     def cuts_a_block(self, text: str, cuts: Iterable[int]) -> bool:
@@ -623,13 +626,14 @@ def _list_items(block: Sequence[Token]) -> list[Passage]:
     items: list[Passage] = []
     fragments: list[str] = []
     item: Span = None
+    listing = _span(block[0])
     for token in block:
         if token.type == "list_item_open" and token.level == 1:
             fragments, item = [], _span(token)
         elif token.type in {"inline", "fence", "code_block", "html_block"}:
             fragments.extend(_leaf_texts([token]))
         elif token.type == "list_item_close" and token.level == 1:
-            items.append(Passage(" ".join(fragments), item))
+            items.append(Passage(" ".join(fragments), item, listing=listing))
     return items
 
 

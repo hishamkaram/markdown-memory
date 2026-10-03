@@ -301,24 +301,27 @@ def _bare(text: str) -> str:
     return text.replace("`", "").strip().removesuffix("()").strip().lower()
 
 
-def select_anchor(terms: Sequence[str], passages: Sequence[str], ordinal: int | None) -> int | None:
+def select_anchor(
+    terms: Sequence[str], passages: Sequence[str], ordinal: int | None, heading: str = ""
+) -> int | None:
     """Which passage of the top hit its excerpt is centred on, or None for the whole section.
 
-    An identifier lookup is anchored only where the identifier itself is: if no passage holds
-    it - it may be named by the heading alone - an excerpt would hide what was asked for.
-    Otherwise the passage that won the vector ranking, else the one holding the most terms.
-    A query of nothing but stopwords says nothing about where in a section to look.
+    A section whose heading names everything the query asks for is the answer as a whole,
+    and is not cut. An identifier lookup is anchored on the first passage that names the
+    identifier, which is where a document introduces it: if none does - the heading may name
+    it alone - an excerpt would hide what was asked for. Any other query is anchored on the
+    passage that won the vector ranking, else the one holding the most terms. A query of
+    nothing but stopwords says nothing about where in a section to look.
     """
     if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):
         return None
     literals = [_Literal(term) for term in terms]
+    if all(literal.found(heading) for literal in literals):
+        return None
     found = [sum(literal.found(text) for literal in literals) for text in passages]
-    known = ordinal is not None and 0 <= ordinal < len(passages)
     if _is_identifier_lookup(terms):
-        if ordinal is not None and known and found[ordinal]:
-            return ordinal
         return next((index for index, count in enumerate(found) if count), None)
-    if known:
+    if ordinal is not None and 0 <= ordinal < len(passages):
         return ordinal
     best = max(found, default=0)
     return found.index(best) if best else None
@@ -327,12 +330,17 @@ def select_anchor(terms: Sequence[str], passages: Sequence[str], ordinal: int | 
 def excerpt_lines(content: str, passages: Sequence[Passage], anchor: int) -> tuple[int, int] | None:
     """The 0-based, end-exclusive lines of ``content`` an excerpt around ``anchor`` shows.
 
-    The anchor and the passage on either side, widened to whole lines; a table row brings its
-    table's header with it, contiguously. None whenever the excerpt would not be safe or
-    would not be smaller: few passages, a window covering all of them, a block without
-    lines, a fence left open.
+    The anchor's block and the block on either side, widened to whole lines: the pieces of a
+    long block are one block, and so is a list, whose items rarely stand without the sentence
+    that introduces it (#76). A table row brings its table's header with it, contiguously.
+    None whenever the excerpt would not be safe or would not be smaller: few passages, a
+    window covering all of them, a block without lines, a fence left open.
     """
-    window = passages[max(0, anchor - 1) : anchor + 2]
+    keys = [passage.listing or passage.lines for passage in passages]
+    starts = [i for i in range(len(keys)) if i == 0 or keys[i] != keys[i - 1]]
+    at = max(index for index, start in enumerate(starts) if start <= anchor)
+    ends = [*starts[1:], len(passages)]
+    window = passages[starts[max(0, at - 1)] : ends[min(len(starts) - 1, at + 1)]]
     spans = [passage.lines for passage in window]
     if len(passages) <= 3 or any(span is None for span in spans):
         return None
@@ -525,7 +533,7 @@ class HybridSearcher:
                     break
             if passages is None or (section.part_index and self._cut_through(section, parser)):
                 return None
-            anchor = select_anchor(terms, stored, ordinal)
+            anchor = select_anchor(terms, stored, ordinal, section.heading_title)
             window = None if anchor is None else excerpt_lines(section.content, passages, anchor)
         except Exception:  # an excerpt is an optimisation: whatever fails sends the section
             logger.debug("No excerpt for section %s", section.id, exc_info=True)

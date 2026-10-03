@@ -46,13 +46,14 @@ BUDGETS = {
     "models.py": 289,
     "parser.py": 722,
     # Raised from 399 for #75: an identifier lookup ranks the sections that name it;
-    # and from 460 for #76: the top hit as its matched passage and neighbours, and every
-    # check that decides when the whole section is sent instead.
-    "search.py": 560,
+    # and from 460 for #76: the top hit as its matched passage and neighbours (a list
+    # counted as one block), and every check that decides when the whole section is sent.
+    "search.py": 568,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
-    # sent relative to the root, and a relative path resolved back under it first.
-    "server.py": 522,
+    # sent relative to the root, a relative path resolved back under it first, and the
+    # agent told what an excerpt is.
+    "server.py": 526,
     "trees.py": 70,
 }
 

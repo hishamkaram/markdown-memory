@@ -1027,14 +1027,35 @@ class TestTheExcerptAnchor:
         from markdown_memory.search import select_anchor
 
         terms = fts_terms("CARGO_INSTALL_ROOT")
-        assert select_anchor(terms, self.PASSAGES, 1) == 1  # the vector passage names it
-        assert select_anchor(terms, self.PASSAGES, 3) == 1  # it does not: the one that does
+        assert select_anchor(terms, self.PASSAGES, 1) == 1
+        assert select_anchor(terms, self.PASSAGES, 3) == 1  # the vector passage does not name it
         assert select_anchor(terms, self.PASSAGES, None) == 1
+
+    def test_an_identifier_lookup_is_anchored_where_it_is_first_named(self) -> None:
+        """Where a document introduces an identifier, not a later caveat the vector liked."""
+        from markdown_memory.search import select_anchor
+
+        passages = [*self.PASSAGES, "CARGO_INSTALL_ROOT only applies to this command."]
+        assert select_anchor(fts_terms("CARGO_INSTALL_ROOT"), passages, 4) == 1
 
     def test_an_identifier_only_the_heading_names_gets_the_whole_section(self) -> None:
         from markdown_memory.search import select_anchor
 
         assert select_anchor(fts_terms("CARGO_HOME"), self.PASSAGES, 2) is None
+
+    def test_a_section_whose_heading_names_the_whole_query_is_sent_whole(self) -> None:
+        """A section headed by what was asked for is the answer: an excerpt cut its definition."""
+        from markdown_memory.search import select_anchor
+
+        terms = fts_terms("CARGO_INSTALL_ROOT")
+        assert select_anchor(terms, self.PASSAGES, 1, "CARGO_INSTALL_ROOT") is None
+        assert select_anchor(terms, self.PASSAGES, 1, "Install roots") == 1
+        assert (
+            select_anchor(fts_terms("installs cached"), self.PASSAGES, 0, "Installs cached") is None
+        )
+        # A query asking for more than the heading names is still cut.
+        query = fts_terms("where are installs cached written")
+        assert select_anchor(query, self.PASSAGES, 0, "Installs cached") == 0
 
     def test_any_other_query_is_anchored_on_the_vector_passage(self) -> None:
         from markdown_memory.search import select_anchor
@@ -1125,8 +1146,19 @@ class TestTheExcerptWindow:
 
     def test_a_list_item_does_not_bring_the_blank_line_after_it(self) -> None:
         content = _section("Intro.", "- one\n- two\n\n- three", "Middle.", "Outro.")
-        shown = self.shown(content, 2)
-        assert shown is not None and shown[-1].strip()
+        assert self.shown(content, 0) == ["Intro.", "", "- one", "- two", "", "- three"]
+
+    def test_a_list_is_one_block_with_the_sentence_that_introduces_it(self) -> None:
+        """Three items cut from a longer list lost what the list was of (#76 dev check)."""
+        items = "\n".join(f"- item {n}" for n in range(5))
+        content = _section("Intro.", "The root is chosen from:", items, "After.", "Outro.")
+        assert self.shown(content, 4) == [
+            "The root is chosen from:",
+            "",
+            *(f"- item {n}" for n in range(5)),
+            "",
+            "After.",
+        ]
 
     def test_a_passage_without_lines_sends_the_section_whole(self) -> None:
         from markdown_memory.parser import MarkdownParser, Passage
@@ -1229,6 +1261,22 @@ class TestTheTopHitExcerpt:
     ) -> None:
         root = self.docs(tmp_path, self.BODY)
         assert self.top(db, fake_embedder, root, "what is the").excerpt is None
+
+    @pytest.mark.parametrize(("heading", "excerpted"), [("RENEW_DAYS", False), ("Rotation", True)])
+    def test_a_section_headed_by_the_identifier_looked_up_is_sent_whole(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        heading: str,
+        excerpted: bool,
+    ) -> None:
+        text = self.BODY.replace("## Rotation", f"## {heading}").replace(
+            "Renewal starts thirty days", "RENEW_DAYS sets when renewal starts, thirty days"
+        )
+        root = self.docs(tmp_path, text)
+        top = self.top(db, fake_embedder, root, "RENEW_DAYS")
+        assert (top.excerpt is not None) is excerpted
 
     def test_a_preamble_without_a_heading_line_is_excerpted_too(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -1359,4 +1407,4 @@ class TestEveryExcerptOfBothCorporaIsVerbatim:
                     )
                     assert not ends_inside_fence(shown), f"{path}: leaves a fence open"
                     checked += 1
-        assert checked > {"corpus": 30, "corpus_v2": 1000}[corpus]
+        assert checked > {"corpus": 25, "corpus_v2": 1000}[corpus]

@@ -1096,10 +1096,18 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 10332),',
+        old='    ("README.md", 10753),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
+    ),
+    Mutation(
+        name="diagram: claim an excerpt the anchored passage does not give",
+        module="make_diagram.py",
+        area="scripts",
+        old="EXCERPT_ANCHOR = 0",
+        new="EXCERPT_ANCHOR = 1",
+        tests="test_the_excerpt_the_worked_example_shows_is_the_size_it_claims",
     ),
     Mutation(
         name="diagram: let a machine with no browser report a half-redrawn picture as done",
@@ -1612,8 +1620,8 @@ MUTATIONS = (
     Mutation(
         name="units: throw away everything past the character limit again",
         module="parser.py",
-        old="            for window in _windows(unit):",
-        new="            for window in [unit[:MAX_UNIT_CHARS]]:",
+        old="            for window in _windows(unit.text):",
+        new="            for window in [unit.text[:MAX_UNIT_CHARS]]:",
         tests="test_no_line_of_a_long_block_is_dropped or test_the_tail_reaches_the_embedder",
     ),
     Mutation(
@@ -3181,11 +3189,12 @@ MUTATIONS = (
         tests="test_a_query_of_stopwords_has_no_anchor_even_with_a_vector_passage",
     ),
     Mutation(
-        name="excerpt: anchor an identifier lookup on a vector passage without it",
+        name="excerpt: anchor an identifier lookup on the vector passage",
         module="search.py",
-        old="        if ordinal is not None and known and found[ordinal]:",
-        new="        if ordinal is not None and known:",
-        tests="test_an_identifier_lookup_is_anchored_where_the_identifier_is",
+        old="    if _is_identifier_lookup(terms):\n        return next(",
+        new="    if _is_identifier_lookup(terms) and ordinal is None:\n        return next(",
+        tests="test_an_identifier_lookup_is_anchored_where_the_identifier_is "
+        "or test_an_identifier_lookup_is_anchored_where_it_is_first_named",
     ),
     Mutation(
         name="excerpt: fall through to the vector passage when only the heading names it",
@@ -3197,7 +3206,7 @@ MUTATIONS = (
     Mutation(
         name="excerpt: ignore the passage that won the vector ranking",
         module="search.py",
-        old="    if known:\n        return ordinal",
+        old="    if ordinal is not None and 0 <= ordinal < len(passages):\n        return ordinal",
         new="    if False:\n        return ordinal",
         tests="test_any_other_query_is_anchored_on_the_vector_passage",
     ),
@@ -3320,6 +3329,41 @@ MUTATIONS = (
             '            "excerpt": True,'
         ),
         tests="test_the_excerpt_is_verbatim_lines_of_the_file",
+    ),
+    Mutation(
+        name="excerpt: count each list item as a block of its own",
+        module="search.py",
+        old="    keys = [passage.listing or passage.lines for passage in passages]",
+        new="    keys = [passage.lines for passage in passages]",
+        tests="test_a_list_is_one_block_with_the_sentence_that_introduces_it",
+    ),
+    Mutation(
+        name="excerpt: let a list item forget which list it is in",
+        module="parser.py",
+        old="    listing = _span(block[0])",
+        new="    listing = None",
+        tests="test_a_list_is_one_block_with_the_sentence_that_introduces_it",
+    ),
+    Mutation(
+        name="excerpt: cut a section whose heading names the whole query",
+        module="search.py",
+        old="    if all(literal.found(heading) for literal in literals):",
+        new="    if False:",
+        tests="test_a_section_whose_heading_names_the_whole_query_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: send whole every section whose heading shares a query term",
+        module="search.py",
+        old="    if all(literal.found(heading) for literal in literals):",
+        new="    if any(literal.found(heading) for literal in literals):",
+        tests="test_a_section_whose_heading_names_the_whole_query_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: anchor the top hit without telling it its heading",
+        module="search.py",
+        old="            anchor = select_anchor(terms, stored, ordinal, section.heading_title)",
+        new="            anchor = select_anchor(terms, stored, ordinal)",
+        tests="test_a_section_headed_by_the_identifier_looked_up_is_sent_whole",
     ),
     Mutation(
         name="paths: let the agent's cwd shadow the root's document again",
