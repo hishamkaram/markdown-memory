@@ -142,6 +142,12 @@ accepted change, record the new numbers with `--update-baseline` and update the 
 `README.md`. Rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: all lowered accuracy and cost 2-12 s per query.
 
+`--corpus v2` scores the same way over `scripts/eval_data/corpus_v2` - 97 real upstream
+docs (cargo, compose-spec, gh, prometheus, ripgrep) with `queries_v2.json` - and is
+report-only: it has no floors and exits zero, and its baseline is `<preset>@v2`. Run it
+alongside the gate for any ranking change. The same rule holds there: tune on its `dev`
+queries only, never on `held_out`.
+
 A passage vector is reused across work trees on the exact embedded text, the weights stamp
 and `VECTOR_FORMAT` - the prompts are not part of the stamp, so **changing an embedding prompt
 bumps `VECTOR_FORMAT`**, which makes every document re-embed itself.

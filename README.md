@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 18,214
+       alt="One question asked of four documentation files. Reading them whole costs 18,310
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 18,214 tokens in all:
+`docs/evaluation-protocol.md`, 18,310 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 18,214**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 18,310**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.

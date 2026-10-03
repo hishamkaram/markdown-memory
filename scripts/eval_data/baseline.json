@@ -74,5 +74,43 @@
       "top3": 0.9706,
       "top5": 0.9706
     }
+  },
+  "embeddinggemma@v2": {
+    "dev/identifier": {
+      "any_valid_top1": 0.8,
+      "median_ms": 163.7976,
+      "ndcg5": 0.8103,
+      "p95_ms": 261.8056,
+      "top1": 0.55,
+      "top3": 0.95,
+      "top5": 0.95
+    },
+    "dev/paraphrase": {
+      "any_valid_top1": 0.65,
+      "median_ms": 175.0199,
+      "ndcg5": 0.7925,
+      "p95_ms": 193.536,
+      "top1": 0.6,
+      "top3": 0.95,
+      "top5": 0.95
+    },
+    "held_out/identifier": {
+      "any_valid_top1": 0.9,
+      "median_ms": 158.6498,
+      "ndcg5": 0.8986,
+      "p95_ms": 190.8625,
+      "top1": 0.75,
+      "top3": 0.9,
+      "top5": 0.9
+    },
+    "held_out/paraphrase": {
+      "any_valid_top1": 0.75,
+      "median_ms": 176.5908,
+      "ndcg5": 0.8342,
+      "p95_ms": 243.2152,
+      "top1": 0.7,
+      "top3": 0.95,
+      "top5": 0.95
+    }
   }
 }

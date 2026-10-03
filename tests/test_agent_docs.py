@@ -175,7 +175,8 @@ class TestDocsMatchTheCode:
 
     def test_documented_baseline_is_the_frozen_baseline(self) -> None:
         baseline = json.loads((ROOT / "scripts/eval_data/baseline.json").read_text())
-        assert set(baseline) == {"embeddinggemma", "bge-small"}
+        # `@v2` is corpus_v2's report-only baseline: no floor, so no document quotes it.
+        assert set(baseline) == {"embeddinggemma", "bge-small", "embeddinggemma@v2"}
         held_out = baseline["embeddinggemma"]["held_out/paraphrase"]
         quoted = (f"{held_out['top1']:.0%}", f"{held_out['top5']:.0%}")
         for name in ("CLAUDE.md", ".claude/skills/run-eval/SKILL.md"):
@@ -210,14 +211,17 @@ class TestDocsMatchTheCode:
                 f"README.md's `{preset}` row reads {line.group(0)!r}, "
                 f"but the baseline says {printed}"
             )
-        for preset in baseline.values():
+        for name, preset in baseline.items():
             assert set(preset) == {
                 "dev/paraphrase",
                 "dev/identifier",
                 "held_out/paraphrase",
                 "held_out/identifier",
             }
-            assert preset["dev/identifier"]["top1"] == preset["held_out/identifier"]["top1"] == 1
+            if "@" not in name:  # the identifier floor is the gate's, not corpus_v2's
+                assert (
+                    preset["dev/identifier"]["top1"] == preset["held_out/identifier"]["top1"] == 1
+                )
 
     def test_every_referenced_repository_path_exists(self) -> None:
         pattern = re.compile(r"(?<![\w/.-])((?:src|scripts|tests|\.claude)/[\w./-]+\w)")

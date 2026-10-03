@@ -8,6 +8,7 @@ against the labelled queries in ``scripts/eval_data/queries.json``:
     uv run python scripts/eval_retrieval.py --show-misses   # list queries missed at Top-1
     uv run python scripts/eval_retrieval.py --show-costs    # what each default call costs
     uv run python scripts/eval_retrieval.py --update-baseline   # after an ACCEPTED change
+    uv run python scripts/eval_retrieval.py --corpus v2     # real upstream docs, report-only
 
 Scores are compared with the frozen baseline in ``scripts/eval_data/baseline.json``
 (accuracy in percentage points, latency in ms; latency is informational - it depends on
@@ -19,6 +20,10 @@ default `search_docs` call costs in estimated tokens against the section that an
 that is informational and never gates, never enters the baseline. So is the no-answer stratum:
 queries the corpus cannot answer, scored by how often the default call abstains. The held-out
 queries were written before any tuning: tune on ``dev`` only, never on ``held_out``.
+
+``--corpus v2`` scores the pinned upstream documentation in ``scripts/eval_data/corpus_v2``
+against ``queries_v2.json`` instead (#75). It has its own baseline entry and no floors: it
+reports, and the gate stays the v1 corpus until v2's numbers have held across runs.
 """
 
 from __future__ import annotations
@@ -44,7 +49,6 @@ from markdown_memory.models import OutlineNode, SearchResult, estimate_tokens
 from markdown_memory.server import MarkdownMemoryService, create_server
 
 DATA = Path(__file__).parent / "eval_data"
-CORPUS = DATA / "corpus"
 BASELINE = DATA / "baseline.json"
 ACCURACY_FIELDS = ("top1", "top3", "top5", "any_valid_top1")
 PRIMARY_GRADE = 3
@@ -53,6 +57,40 @@ FLOOR_PARAPHRASE_TOP1 = 0.80
 FLOOR_PARAPHRASE_TOP5 = 0.90
 FLOOR_IDENTIFIER_TOP1 = 1.00
 NO_ANSWER_SHAPES = ("identifier", "question")
+
+
+@dataclass(slots=True, frozen=True)
+class Corpus:
+    """One labelled corpus: its documents, its queries, and where its index is cached."""
+
+    name: str
+    root: Path
+    queries: Path
+
+    def cache(self) -> Path:
+        """v1 keeps the directory it always had; any other corpus gets one of its own.
+
+        Each directory holds one current index (`eval_cache.prune` drops the rest), so two
+        corpora sharing one would rebuild each other on every alternate run.
+        """
+        root = eval_cache.cache_root()
+        return root if self.name == "v1" else root.with_name(f"eval-{self.name}")
+
+    def baseline_key(self, preset: str) -> str:
+        return preset if self.name == "v1" else f"{preset}@{self.name}"
+
+
+CORPUS = DATA / "corpus"
+CORPUS_V2 = DATA / "corpus_v2"
+CORPUS_NAMES = ("v1", "v2")
+
+
+def corpora() -> dict[str, Corpus]:
+    """Built when asked, not at import: a caller that points `CORPUS` elsewhere is honoured."""
+    return {
+        "v1": Corpus("v1", CORPUS, DATA / "queries.json"),
+        "v2": Corpus("v2", CORPUS_V2, DATA / "queries_v2.json"),
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -105,9 +143,21 @@ def _base(heading_path: str) -> str:
     return heading_path.split(" (Part ")[0]
 
 
-def _labels(result: SearchResult) -> set[str]:
+def _names(file_path: str, root: str) -> tuple[str, str]:
+    """What a label may name a file by: its name, or its whole path from the corpus root.
+
+    `configuration.md::X` names a file by its name; `gh/docs/README.md::X` by its path -
+    corpus_v2 holds several README.md files. Nothing in between: `docs/README.md` would name
+    every `docs/README.md` at any depth.
+    """
+    path = Path(file_path)
+    return path.name, path.relative_to(root).as_posix()
+
+
+def _labels(result: SearchResult, root: str) -> set[str]:
+    """The bare heading path, and that path qualified by each name of its file."""
     base = _base(result.heading_path)
-    return {base, f"{Path(result.file_path).name}::{base}"}
+    return {base} | {f"{name}::{base}" for name in _names(result.file_path, root)}
 
 
 def _p95(values: Sequence[float]) -> float:
@@ -128,7 +178,8 @@ def resolve_answers(
 
     Part of loading the fixture, like parsing it: a label that names no section, or more than
     one, is a broken fixture, and scoring it would score nothing.
-    `file.md::path` names the file; a bare path must be unique across the corpus.
+    `file.md::path` (or `dir/file.md::path`) names the file by the end of its path; a bare path
+    must be unique across the corpus.
     """
     owners: dict[str, list[str]] = {}
     for document in service.list_documents():
@@ -145,7 +196,7 @@ def resolve_answers(
                 found = [
                     file_path
                     for file_path in owners.get(path, [])
-                    if not qualified or Path(file_path).name == name
+                    if not qualified or name in _names(file_path, service.root)
                 ]
                 if len(found) != 1:
                     raise SystemExit(f"fixture: {label!r} names {len(found)} sections, not one")
@@ -315,10 +366,14 @@ def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> 
         credited: set[str] = set()
         relevance: list[int] = []
         for result in results:
-            fresh = _labels(result) - credited
-            relevance.append(max((grades.get(label, 0) for label in fresh), default=0))
-            credited |= _labels(result)
-        ranks.append(next((i for i, r in enumerate(results, 1) if expected in _labels(r)), None))
+            labels = _labels(result, service.root)
+            relevance.append(max((grades.get(label, 0) for label in labels - credited), default=0))
+            credited |= labels
+        ranks.append(
+            next(
+                (i for i, r in enumerate(results, 1) if expected in _labels(r, service.root)), None
+            )
+        )
         valid_first += bool(relevance and relevance[0] > 0)
         ideal = sorted(grades.values(), reverse=True)[:5]
         ndcg.append(_dcg(relevance[:5]) / _dcg(ideal))
@@ -380,7 +435,10 @@ def _probes(corpus: Path) -> tuple[eval_cache.Probe, ...]:
 
 
 def open_service(
-    arguments: argparse.Namespace, base: ServerConfig, probes: Sequence[eval_cache.Probe]
+    arguments: argparse.Namespace,
+    base: ServerConfig,
+    probes: Sequence[eval_cache.Probe],
+    corpus: Corpus | None = None,
 ) -> tuple[MarkdownMemoryService, bool]:
     """Return a service over the cached index, building it only when it cannot be reused.
 
@@ -391,15 +449,18 @@ def open_service(
     # first run downloads - otherwise every machine's second run would find a different
     # key and rebuild the index it just built.
     embedder = create_embedder(arguments.embedder, cache_dir=base.model_cache_dir)
+    corpus = corpus or corpora()["v1"]
     embedder.embed_query("load the model")  # downloads it on a first run; `warm_up` is
     # not part of the Embedder protocol, and one query is enough to put the files on disk
-    key = eval_cache.build_key(CORPUS, arguments.embedder, model_cache_dir=base.model_cache_dir)
-    root = eval_cache.cache_root()
+    key = eval_cache.build_key(
+        corpus.root, arguments.embedder, model_cache_dir=base.model_cache_dir
+    )
+    root = corpus.cache()
     workspace = root / key.digest
     workspace.mkdir(parents=True, exist_ok=True)
     eval_cache.prune(root, key.digest)
     db_path = workspace / "eval.db"
-    fingerprint = eval_cache.parse_fingerprint(CORPUS)
+    fingerprint = eval_cache.parse_fingerprint(corpus.root)
     if arguments.rebuild:
         eval_cache.discard(db_path)
         reason: str | None = "--rebuild"
@@ -411,7 +472,7 @@ def open_service(
             eval_cache.discard(db_path)
             reason = str(stale)
 
-    service = _service(arguments, base, db_path, embedder)
+    service = _service(arguments, base, db_path, embedder, corpus.root)
     if reason is None:
         try:
             eval_cache.check_integrity(service.db)
@@ -421,7 +482,7 @@ def open_service(
             reason = str(stale)
             service.close()
             eval_cache.discard(db_path)
-            service = _service(arguments, base, db_path, embedder)
+            service = _service(arguments, base, db_path, embedder, corpus.root)
     print(f"index: building ({reason})")
     report = service.index_directory()
     print(report.summary())
@@ -433,7 +494,7 @@ def open_service(
         raise SystemExit(f"indexing failed for {len(report.errors)} file(s); not scoring this run")
     eval_cache.check_vectors(service.db, service.embedder, probes)
     try:
-        eval_cache.confirm_stable(CORPUS, fingerprint)
+        eval_cache.confirm_stable(corpus.root, fingerprint)
     except eval_cache.StaleCacheError as unstable:
         service.close()
         eval_cache.discard(db_path)
@@ -443,12 +504,16 @@ def open_service(
 
 
 def _service(
-    arguments: argparse.Namespace, base: ServerConfig, db_path: Path, embedder: Embedder
+    arguments: argparse.Namespace,
+    base: ServerConfig,
+    db_path: Path,
+    embedder: Embedder,
+    docs_dir: Path | None = None,
 ) -> MarkdownMemoryService:
     return MarkdownMemoryService(
         ServerConfig(
             db_path=db_path,
-            docs_dir=CORPUS,
+            docs_dir=CORPUS if docs_dir is None else docs_dir,
             embedder=arguments.embedder,
             model_cache_dir=base.model_cache_dir,
         ),
@@ -461,11 +526,13 @@ def run(
     arguments: argparse.Namespace,
     base: ServerConfig,
     probes: Sequence[eval_cache.Probe],
+    corpus: Corpus | None = None,
 ) -> dict[str, Scores]:
-    service, built = open_service(arguments, base, probes)
+    corpus = corpus or corpora()["v1"]
+    service, built = open_service(arguments, base, probes, corpus)
     try:
         answers = resolve_answers(service, queries)
-        check_no_answer(queries, CORPUS)
+        check_no_answer(queries, corpus.root)
         print(f"embedder: {service.embedder.model_name}")
         if not built:
             print("index: reused from cache (fingerprint, integrity and vectors verified)")
@@ -522,21 +589,35 @@ def main() -> int:
         action="store_true",
         help="record these scores as the new frozen baseline for this embedder",
     )
+    parser.add_argument(
+        "--corpus",
+        default="v1",
+        choices=CORPUS_NAMES,
+        help="v1 (default) is the gate; v2 is the pinned upstream documentation, report-only",
+    )
     arguments = parser.parse_args()
     logging.disable(logging.CRITICAL)
 
-    queries = json.loads((DATA / "queries.json").read_text(encoding="utf-8"))
+    corpus = corpora()[arguments.corpus]
+    queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
     base = ServerConfig.from_env()
-    probes = _probes(CORPUS)
+    probes = _probes(corpus.root)
     try:
+        # One lock for every corpus: a second evaluation on the same CPU moves the latency
+        # either one reports, whichever corpus it scores.
         with eval_cache.lock(eval_cache.cache_root()):
-            scores = run(queries, arguments, base, probes)
+            scores = run(queries, arguments, base, probes, corpus)
     except eval_cache.BusyError as busy:
         print(f"REFUSING TO RUN: {busy}", file=sys.stderr)
         return 1
 
     preset = arguments.embedder
-    print_deltas(preset, scores)
+    print_deltas(corpus.baseline_key(preset), scores)
+    if corpus.name != "v1":
+        if arguments.update_baseline:
+            update_baseline(corpus.baseline_key(preset), scores)
+        print(f"\nREPORT ONLY: corpus {corpus.name!r} has no floors; the gate is corpus 'v1'")
+        return 0
     if preset != DEFAULT_EMBEDDER:
         if arguments.update_baseline:
             update_baseline(preset, scores)
