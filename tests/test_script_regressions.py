@@ -360,6 +360,114 @@ class TestTheCostReport:
         assert evaluation._p95([float(n) for n in range(1, 21)]) == 19.0  # type: ignore[attr-defined]
 
 
+class TestTheRealDocsCorpus:
+    """#75: corpus_v2 is scored by the same script, apart from the gate and its baseline."""
+
+    @pytest.fixture
+    def evaluation(self) -> object:
+        import eval_retrieval
+
+        return eval_retrieval
+
+    @staticmethod
+    def service(tmp_path: Path, fake_embedder: FakeEmbedder, root: Path) -> MarkdownMemoryService:
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "v.db", docs_dir=root), embedder=fake_embedder
+        )
+        service.index_directory()
+        return service
+
+    def test_a_label_names_a_file_by_its_whole_path_from_the_corpus_root(
+        self, evaluation: object, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        root = tmp_path / "docs"
+        for folder in ("x", "p/x"):
+            (root / folder).mkdir(parents=True)
+            (root / folder / "README.md").write_text(f"# Guide\n\n## Setup\n\n{folder} setup\n")
+        service = self.service(tmp_path, fake_embedder, root)
+        try:
+            try:
+                answers = evaluation.resolve_answers(
+                    service, _queries("x/README.md::Guide > Setup")
+                )  # type: ignore[attr-defined]
+            except SystemExit as exc:
+                raise AssertionError(f"a whole path was taken for two files: {exc}") from exc
+            with pytest.raises(SystemExit, match="names 2 sections"):
+                evaluation.resolve_answers(service, _queries("README.md::Guide > Setup"))  # type: ignore[attr-defined]
+        finally:
+            service.close()
+        assert answers["x/README.md::Guide > Setup"].file_path == str(root / "x" / "README.md")
+
+    def test_a_hit_answers_to_its_file_name_and_its_whole_path_only(
+        self, evaluation: object, tmp_path: Path
+    ) -> None:
+        hit = SearchResult(
+            section_id=1,
+            file_path=str(tmp_path / "gh" / "docs" / "README.md"),
+            document_title="Guide",
+            heading_title="Setup",
+            heading_path="Guide > Setup (Part 2)",
+            content="",
+            start_line=1,
+            end_line=2,
+            score=1.0,
+            fts_rank=1,
+            vec_rank=None,
+        )
+        assert evaluation._labels(hit, str(tmp_path)) == {  # type: ignore[attr-defined]
+            "Guide > Setup",
+            "README.md::Guide > Setup",
+            "gh/docs/README.md::Guide > Setup",
+        }
+
+    def test_the_churn_report_ranks_by_the_same_labels_as_the_gate(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        import cross_host_churn
+
+        root = tmp_path / "docs"
+        (root / "guides").mkdir(parents=True)
+        (root / "guides" / "a.md").write_text("# Guide\n\n## Setup\n\ninstall the tool\n")
+        service = self.service(tmp_path, fake_embedder, root)
+        try:
+            ranked = cross_host_churn._rank(service, "install the tool")
+        finally:
+            service.close()
+        assert "guides/a.md::Guide > Setup" in ranked[0]
+
+    def test_every_v2_label_names_exactly_one_section(
+        self, evaluation: object, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        corpus = evaluation.corpora()["v2"]  # type: ignore[attr-defined]
+        queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
+        for split in ("dev", "held_out"):
+            assert [len(queries[split][kind]) for kind in ("paraphrase", "identifier")] == [20, 20]
+        graded = [
+            label
+            for split in ("dev", "held_out")
+            for kind in ("paraphrase", "identifier")
+            for case in queries[split][kind]
+            for label in case.get("also_valid", {})
+        ]
+        service = self.service(tmp_path, fake_embedder, corpus.root)
+        try:
+            evaluation.resolve_answers(service, queries)  # type: ignore[attr-defined]
+            evaluation.resolve_answers(service, _queries(*graded))  # type: ignore[attr-defined]
+        finally:
+            service.close()
+
+    def test_v2_keeps_its_own_index_and_baseline(self, evaluation: object) -> None:
+        import eval_cache
+
+        v1, v2 = (evaluation.corpora()[name] for name in ("v1", "v2"))  # type: ignore[attr-defined]
+        assert v1.cache() == eval_cache.cache_root()
+        assert v2.cache() != v1.cache() and v2.cache().parent == v1.cache().parent
+        assert (v1.baseline_key("embeddinggemma"), v2.baseline_key("embeddinggemma")) == (
+            "embeddinggemma",
+            "embeddinggemma@v2",
+        )
+
+
 class TestTheNoAnswerStratum:
     """#41: queries the corpus cannot answer, scored by abstention - reported, never gated."""
 

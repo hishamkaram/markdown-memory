@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import pairwise
-from typing import NoReturn, TypeVar
+from typing import NamedTuple, NoReturn, TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import Embedder, short_weights
@@ -42,6 +43,10 @@ KEYWORD_GATE = 0.5  # minimum IDF-weighted share of the query a keyword hit must
 IDENTIFIER_MAX_SECTIONS = 3
 IDENTIFIER_MAX_SHARE = 0.05
 _STALE_RETRIES = 1  # re-rank once when a concurrent re-index replaced ranked sections
+# Keyword candidates an identifier lookup checks for the identifier itself (#75). The tokenizer
+# reads `--pre` as `pre`, so prose about `pre_start` can fill the first 20; the `--pre` section
+# of the measured corpus sat at 25.
+LITERAL_CANDIDATES = 200
 _PASSAGES_PER_CANDIDATE = 10  # passage neighbours fetched per wanted section
 
 
@@ -239,6 +244,56 @@ def _is_stopword(term: str) -> bool:
     return word.lower() in _STOPWORDS
 
 
+# Characters that continue an identifier: `--pre` is not found inside `--pre-glob`.
+_IDENTIFIER_EDGE = "A-Za-z0-9_-"
+
+
+class _Literal:
+    """Where an identifier term occurs as itself, rather than as the words the tokenizer sees.
+
+    FTS5 splits `GH_REPO` into the phrase `gh repo` and stems `histogram_quantiles` like
+    `histogram_quantile`, so a keyword hit for an identifier can be prose that never names it.
+    Matched without regard to case; `exact` says whether the spelling agreed too.
+    """
+
+    def __init__(self, quoted_term: str) -> None:
+        # `fts_terms` quotes each term FTS5-style; an agent may add quotes or backticks, and
+        # end a sentence after them (`GH_REPO`.), so they are stripped on both sides of that.
+        term = quoted_term[1:-1].replace('""', '"').strip("'`\"")
+        term = term.rstrip("?!,;:").removesuffix(".").strip("'`\"")
+        call = len(term) > 2 and term.endswith("()")
+        self.name = term[:-2].strip("'`\"") if call else term  # `name`() quotes the name only
+        # `name()` is a call: `histogram_quantile(φ, v)` names it, `histogram_quantiles(` does
+        # not. Otherwise a `.` may follow (a sentence ends) but not start another component.
+        tail = r"(?=\s*\()" if call else rf"(?![{_IDENTIFIER_EDGE}])(?!\.[A-Za-z0-9_])"
+        pattern = rf"(?<![{_IDENTIFIER_EDGE}]){re.escape(self.name)}{tail}"
+        self._loose = re.compile(pattern, re.IGNORECASE)
+        self._exact = re.compile(pattern)
+
+    def found(self, text: str) -> bool:
+        return self._loose.search(text) is not None
+
+    def exact(self, text: str) -> bool:
+        return self._exact.search(text) is not None
+
+    def heads(self, title: str) -> bool:
+        return _bare(title) == _bare(self.name)
+
+
+def _bare(text: str) -> str:
+    return text.replace("`", "").strip().removesuffix("()").strip().lower()
+
+
+class _Keyword(NamedTuple):
+    """One keyword ranking, and what an identifier lookup learnt making it (#75)."""
+
+    ranking: list[int]
+    match: KeywordMatch
+    literal: frozenset[int] = frozenset()  # sections that contain the identifier itself
+    headings: tuple[int, ...] = ()  # those headed by it, in keyword order
+    stale: bool = False  # a candidate vanished while it was being checked
+
+
 def reciprocal_rank_fusion(rankings: Sequence[Sequence[int]], k: int = RRF_K) -> dict[int, float]:
     """``RRF(d) = sum over rankings of 1 / (k + rank(d))`` with 1-based ranks."""
     scores: dict[int, float] = {}
@@ -299,19 +354,20 @@ class HybridSearcher:
         """One ranking pass: the page, and whether a better-ranked section had vanished."""
         candidates = max(self._candidates, limit)
         try:
-            fts_future = self._pool.submit(self._keyword_ranking, query, candidates)
+            fts_future = self._pool.submit(self._keyword_pass, query, candidates)
             vec_future = self._pool.submit(self._vector_ranking, query, candidates)
         except RuntimeError as exc:  # the executor refuses work after close()
             raise SearchError("The search engine has been shut down") from exc
         # A failed keyword index says so in the state it hands back instead of a ranking.
-        (fts_ranking, keyword_match), fts_error = _settle(fts_future, ([], "unavailable"))
+        keyword, fts_error = _settle(fts_future, _Keyword([], "unavailable"))
+        fts_ranking, keyword_match = keyword.ranking, keyword.match
         (vec_ranking, passages), vec_error = _settle(vec_future, ([], {}))
         if fts_error is not None and vec_error is not None:
             raise fts_error
         if keyword_match == "no_match" and _is_identifier_lookup(fts_terms(query)):
             # No indexed section contains the identifier: its semantic neighbours name other
             # things, and an agent handed them answers from them (#33). An empty page says so.
-            return SearchPage((), keyword_match), False
+            return SearchPage((), keyword_match), keyword.stale
         for name, error in (("keyword", fts_error), ("vector", vec_error)):
             if error is not None:
                 logger.warning("%s search failed; using the other index only: %s", name, error)
@@ -320,6 +376,15 @@ class HybridSearcher:
         fts_ranks = {section_id: rank for rank, section_id in enumerate(fts_ranking, start=1)}
         vec_ranks = {section_id: rank for rank, section_id in enumerate(vec_ranking, start=1)}
         ordered = sorted(scores, key=lambda section_id: (-scores[section_id], section_id))
+        if keyword.literal:
+            # An identifier lookup is answered by a section that names the identifier: a
+            # vector-only neighbour must not tie with one at 1/61 and win on its id. One
+            # headed by it comes first, so mentions with vector support cannot push it off.
+            ordered = [
+                *keyword.headings,
+                *(sid for sid in ordered if sid in keyword.literal - set(keyword.headings)),
+                *(sid for sid in ordered if sid not in keyword.literal),
+            ]
 
         hydrated = self._db.get_sections_with_documents(ordered[:limit])
         if len(hydrated) < len(ordered[:limit]):
@@ -360,7 +425,94 @@ class HybridSearcher:
                     part_preview=None if first is None else preview(first),
                 )
             )
-        return SearchPage(tuple(results), keyword_match), stale
+        return SearchPage(tuple(results), keyword_match), stale or keyword.stale
+
+    def _keyword_pass(self, query: str, limit: int) -> _Keyword:
+        """Keyword ranking; for an identifier lookup, of the sections that name it (#75).
+
+        Anything that finds no such section - or finds the identifier everywhere, which
+        makes it vocabulary - is answered exactly as before, with the limit asked for.
+        """
+        terms = fts_terms(query)
+        stale = False
+        if _is_identifier_lookup(terms):
+            wide, match = self._keyword_ranking(query, max(limit, LITERAL_CANDIDATES))
+            if match == "no_match":  # nothing in scope contains the terms, at any limit
+                return _Keyword(wide, match)
+            if match == "matched":
+                literal = self._literal_ranking(terms, wide, limit)
+                if literal.ranking:
+                    return literal
+                stale = literal.stale  # a vanished candidate may have been the one naming it
+        return _Keyword(*self._keyword_ranking(query, limit), stale=stale)
+
+    def _literal_ranking(self, terms: Sequence[str], ranking: list[int], limit: int) -> _Keyword:
+        """The candidates that contain an identifier term itself, best first; empty if none do.
+
+        Its own heading and text only: a breadcrumb names every section under it. A term
+        found in more sections than an identifier may be (the gate's rarity rule) is
+        vocabulary - `HTTP`, `API` - and is not looked for.
+        """
+        hydrated = self._db.get_sections_with_documents(ranking)
+        texts = {
+            sid: (
+                hydrated[sid][0],
+                hydrated[sid][0].heading_title + "\n" + hydrated[sid][0].content,
+            )
+            for sid in ranking
+            if sid in hydrated
+        }
+        stale = len(texts) < len(ranking)
+        if not texts:
+            return _Keyword([], "matched", stale=stale)
+        total = self._db.count_rows("sections")
+        rare = max(IDENTIFIER_MAX_SECTIONS, int(total * IDENTIFIER_MAX_SHARE))
+        literals = [_Literal(term) for term in terms]
+        found = {
+            literal: {sid for sid, (_, text) in texts.items() if literal.found(text)}
+            for literal in literals
+        }
+
+        def spread(term: str) -> float:
+            """Sections in scope matching the term, per checked candidate matching it.
+
+            The candidates are a sample when the keyword index matched more sections than
+            were checked; what the sample found scales up by this. The index's count alone
+            cannot judge rarity - `--files` matches "files" 495 times and names the flag 7.
+            """
+            checked = max(1, len(self._db.fts_matching(term, list(texts))))
+            everywhere = self._db.fts_document_frequency(term)  # every root in the database
+            if everywhere <= checked:
+                return 1.0
+            return max(1.0, len(self._db.fts_search(term, everywhere, self._scope)) / checked)
+
+        wanted = [
+            literal
+            for literal, term in zip(literals, terms, strict=True)
+            if found[literal] and len(found[literal]) * spread(term) <= rare
+        ]
+        if not wanted:
+            return _Keyword([], "matched", stale=stale)
+        order = {sid: rank for rank, sid in enumerate(ranking)}
+
+        def key(sid: int) -> tuple[bool, int, int, bool, int]:
+            section, text = texts[sid]
+            named = [literal for literal in wanted if sid in found[literal]]
+            heads = any(literal.heads(section.heading_title) for literal in named)
+            exact = any(literal.exact(text) for literal in named)
+            # Headed by the identifier first, the first part of a split one first among
+            # those; then naming more of the terms, in the spelling asked for, then BM25.
+            return (
+                not heads,
+                section.part_index if heads else 0,
+                -len(named),
+                not exact,
+                order[sid],
+            )
+
+        best = sorted(set().union(*(found[literal] for literal in wanted)), key=key)[:limit]
+        headings = tuple(sid for sid in best if not key(sid)[0])
+        return _Keyword(best, "matched", frozenset(best), headings, stale)
 
     def _keyword_ranking(self, query: str, limit: int) -> tuple[list[int], KeywordMatch]:
         """BM25 ranking after the gate, and which of the ways to find nothing this was."""

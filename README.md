@@ -12,14 +12,14 @@ back as the section that answers it, quoted verbatim, with pointers to the next 
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 18,214
+       alt="One question asked of four documentation files. Reading them whole costs 18,508
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the section that answers in full, 407
             tokens, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 18,214 tokens in all:
+`docs/evaluation-protocol.md`, 18,508 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -31,7 +31,7 @@ search_docs("where does the embedding model get downloaded")
   383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
 ```
 
-**One section in full - 407 tokens - instead of 18,214**: the one that answers, first. The
+**One section in full - 407 tokens - instead of 18,508**: the one that answers, first. The
 other four come back as pointers - where each section is, what reading it costs, and the
 passage that matched - so when the first is not the answer, one `read_section` fetches the
 one that is.
@@ -569,6 +569,15 @@ costs only the time to index again.
    section is ranked by its closest vector, so one relevant table row is enough.
    Heading-only sections have no vectors and are never returned ahead of their children.
 3. **Reciprocal Rank Fusion** of the two rankings.
+4. **Identifier lookups.** The tokenizer splits `GH_REPO` into `gh repo` and `--pre` into
+   `pre`, so prose holding those words ranks like the identifier itself. When every term of
+   a query is spelled like an identifier, the top 200 keyword hits are checked for the term
+   as written, at identifier boundaries (`--pre` is not found in `--pre-glob`,
+   `histogram_quantile()` means a call). Sections headed by the identifier come first
+   (first part of a split section first), then the other sections naming it, by fused
+   score, then everything else. A term found nowhere as written, or in more sections than
+   the keyword gate allows an identifier (`HTTP`, `API`: counted over the hits checked,
+   scaled up when the keyword index matched more), leaves the ranking exactly as it was.
 
 Cross-encoder rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: every one lowered accuracy on technical documentation and cost 2-12 s a query.

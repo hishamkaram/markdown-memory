@@ -229,7 +229,7 @@ def export(path: Path, embedder_name: str) -> int:
 
 
 def _rank(service: MarkdownMemoryService, query: str) -> list[set[str]]:
-    return [_labels(hit) for hit in service.search_docs(query, TOP_N)]
+    return [_labels(hit, service.root) for hit in service.search_docs(query, TOP_N)]
 
 
 def _compare(

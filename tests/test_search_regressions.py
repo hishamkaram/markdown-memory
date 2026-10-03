@@ -21,7 +21,7 @@ from markdown_memory.models import (
     Section,
     SectionDraft,
 )
-from markdown_memory.search import HybridSearcher, build_fts_query
+from markdown_memory.search import HybridSearcher, _Keyword, _Literal, build_fts_query, fts_terms
 
 
 class TestQueryBuilding:
@@ -589,3 +589,413 @@ def test_a_revoked_index_keeps_the_reason_the_indexer_gave(
         assert results and all(result.vec_rank is None for result in results)
         assert db.get_meta("embedding_weights_mismatch") == "re-embedding under /d"
     assert "being re-embedded" in caplog.text
+
+
+class TestIdentifierLookups:
+    """#75: an identifier lookup is answered by sections that name the identifier itself.
+
+    The tokenizer reads `GH_REPO` as the words `gh repo` and `--pre` as `pre`, so prose
+    holding those words used to rank like the identifier - `GH_REPO` returned a page that
+    never named it.
+    """
+
+    @staticmethod
+    def searcher(
+        db: Database, fake_embedder: FakeEmbedder, root: Path, files: dict[str, str]
+    ) -> HybridSearcher:
+        root.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():  # in order: the first file gets the lowest ids
+            (root / name).write_text(text)
+            Indexer(db, fake_embedder).index_directory(root)
+        return HybridSearcher(db, fake_embedder)
+
+    @staticmethod
+    def vectors_rank(
+        searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch, *paths: str
+    ) -> None:
+        """Make the vector side rank these heading paths first, whatever the fake embedder says."""
+        rows = searcher._db.connection().execute("SELECT id, heading_path FROM sections")
+        ids = {path: int(sid) for sid, path in rows}
+        ranking = [ids[path] for path in paths]
+        monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: (ranking, {}))
+
+    @pytest.mark.parametrize(
+        ("query", "text", "found"),
+        [
+            ("--pre", "run with --pre-glob '*.gz'", False),
+            ("--pre", "run with --prefix", False),
+            ("--pre", "run with --pre=cat", True),
+            ("--pre", "flags (--pre) and more", True),
+            ("GH_REPO", "set GH_REPOSITORY instead", False),
+            ("GH_REPO", "export gh_repo=cli/cli", True),
+            ("restart_policy", "see deploy.restart_policy below", True),
+            ("v1.2", "since v1.2.3 only", False),
+            ("v1.2", "since v1.2.", True),
+            ("os.path", "call os.path.join", False),
+            ("foo_bar", "then foo_bar..baz", True),
+            ("foo_bar", "then foo_bar.-baz", True),
+            ("histogram_quantile()", "histogram_quantile(0.9, rate(x[5m]))", True),
+            ("histogram_quantile()", "histogram_quantile (0.9, x)", True),
+            ("histogram_quantile()", "histogram_quantiles(x)", False),
+            ("histogram_quantile()", "a bare histogram_quantile here", False),
+            ("ENOSPC.", "fails with ENOSPC when full", True),
+            ("`--pre`", "run with --pre cat", True),
+            ("`GH_REPO`.", "export GH_REPO=cli/cli", True),
+            ('"GH_REPO",', "export GH_REPO=cli/cli", True),
+            ("'--pre'?", "run with --pre cat", True),
+            ("`histogram_quantile`()", "histogram_quantile(0.9, x)", True),
+        ],
+    )
+    def test_an_identifier_is_found_as_itself_and_not_inside_another(
+        self, query: str, text: str, found: bool
+    ) -> None:
+        literal = _Literal(fts_terms(query)[0])
+        assert literal.found(text) is found
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "histogram_quantile()",
+            "`histogram_quantile()`",
+            "`histogram_quantile`()",
+            "`histogram_quantile` ()",
+        ],
+    )
+    def test_a_heading_naming_the_call_heads_it_however_it_is_quoted(self, title: str) -> None:
+        assert _Literal(fts_terms("histogram_quantile()")[0]).heads(title)
+
+    def test_exact_case_is_told_apart_from_a_case_folded_match(self) -> None:
+        literal = _Literal(fts_terms("GH_REPO")[0])
+        assert literal.found("export gh_repo=x") and not literal.exact("export gh_repo=x")
+        assert literal.exact("export GH_REPO=x")
+        assert not literal.exact("export GH_REPOSITORY=x"), "case is checked at the same edges"
+
+    def test_the_section_naming_the_identifier_beats_prose_holding_its_words(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Primer\n\n## Language\n\nRun gh repo view, then gh repo clone: gh repo.\n",
+            "b.md": "# Hosts\n\n## Choose the host\n\nSet GH_REPO to pick the repository.\n",
+        })  # fmt: skip
+        try:
+            # Vectors prefer the prose; on its own the keyword hit would tie at 1/61 and the
+            # prose, holding the lower id, would win.
+            self.vectors_rank(searcher, monkeypatch, "Primer > Language")
+            page = searcher.search_page("GH_REPO", limit=1)
+        finally:
+            searcher.close()
+        assert [r.heading_path for r in page.results] == ["Hosts > Choose the host"]
+        assert page.keyword_match == "matched"
+
+    def test_a_literal_beyond_the_first_twenty_keyword_hits_is_found(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        prose = "".join(
+            f"## pre_start {n}\n\nThe pre_start hook {n} runs pre tasks, pre first.\n\n"
+            for n in range(25)
+        )
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "compose.md": f"# Compose\n\n{prose}",
+            "guide.md": "# Guide\n\n## Preprocessor\n\nRun a command on each file with --pre.\n",
+        })  # fmt: skip
+        try:
+            monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: ([], {}))
+            assert "Guide > Preprocessor" not in [
+                r.heading_path for r in searcher.search("pre", limit=20)
+            ], "the fixture must bury the literal past the first twenty keyword hits"
+            results = searcher.search("--pre", limit=5)
+        finally:
+            searcher.close()
+        assert results[0].heading_path == "Guide > Preprocessor"
+
+    def test_the_section_headed_by_the_identifier_comes_first_and_its_first_part_first(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Later paragraphs name the function more often, so BM25 alone would put Part 2 first.
+        definition = "\n\n".join(
+            f"histogram_quantile(φ, b) paragraph {n}: "
+            + "histogram_quantile() " * (n // 4)
+            + "quantile words " * 30
+            for n in range(12)
+        )
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "functions.md": "# Functions\n\n## `histogram_quantiles()`\n\n"
+            "Like histogram_quantile(), for several quantiles at once.\n\n"
+            f"## `histogram_quantile()`\n\n{definition}\n",
+        })  # fmt: skip
+        try:
+            parts = [
+                path
+                for (path,) in db.connection().execute("SELECT heading_path FROM sections")
+                if path.startswith("Functions > histogram_quantile() (Part")
+            ]
+            assert len(parts) >= 2, "the fixture must split the definition into parts"
+            # Vectors prefer the neighbour and the last part.
+            self.vectors_rank(
+                searcher, monkeypatch, "Functions > histogram_quantiles()", sorted(parts)[-1]
+            )
+            results = searcher.search("histogram_quantile()", limit=3)
+        finally:
+            searcher.close()
+        assert results[0].heading_path == "Functions > histogram_quantile() (Part 1)"
+        assert "Functions > histogram_quantiles()" not in [r.heading_path for r in results[:2]]
+
+    def test_the_spelling_asked_for_ranks_first_among_sections_naming_it(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Env\n\n## Lower\n\nexport gh_repo=cli/cli for scripts, gh_repo again.\n",
+            "b.md": "# Env\n\n## Upper\n\nSet GH_REPO once.\n",
+        })  # fmt: skip
+        try:
+            monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: ([], {}))
+            results = searcher.search("GH_REPO", limit=2)
+        finally:
+            searcher.close()
+        assert [r.heading_path for r in results] == ["Env > Upper", "Env > Lower"]
+
+    def test_an_identifier_named_nowhere_is_ranked_exactly_as_before(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Notes\n\n## Words\n\nA non existent value is non existent.\n",
+        })  # fmt: skip
+        try:
+            assert searcher._keyword_pass("NON_EXISTENT", 20) == _Keyword(
+                *searcher._keyword_ranking("NON_EXISTENT", 20)
+            )
+        finally:
+            searcher.close()
+
+    def test_an_identifier_named_everywhere_is_vocabulary(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        sections = "".join(f"## Part {n}\n\nServe HTTP on port {n}.\n\n" for n in range(6))
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Server\n\n{sections}",
+        })  # fmt: skip
+        try:
+            plain = _Keyword(*searcher._keyword_ranking("HTTP", 20))
+            assert searcher._keyword_pass("HTTP", 20) == plain
+        finally:
+            searcher.close()
+
+    def test_a_term_common_beyond_the_candidates_checked_is_vocabulary(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Three candidates checked, all naming HTTP, of eight that do: the sample scales up."""
+        import markdown_memory.search as search
+
+        monkeypatch.setattr(search, "LITERAL_CANDIDATES", 3)
+        sections = "".join(f"## Part {n}\n\nServe HTTP on port {n}.\n\n" for n in range(8))
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Server\n\n{sections}",
+        })  # fmt: skip
+        try:
+            assert searcher._keyword_pass("HTTP", 2) == _Keyword(
+                *searcher._keyword_ranking("HTTP", 2)
+            )
+        finally:
+            searcher.close()
+
+    def test_an_identifier_whose_words_are_common_is_still_rare(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """`--files` matches every "files" in the keyword index; one section names the flag."""
+        sections = "".join(f"## Part {n}\n\nList the files of part {n}.\n\n" for n in range(6))
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Guide\n\n{sections}## Listing\n\nPass --files to list them.\n",
+        })  # fmt: skip
+        try:
+            ranked = searcher._keyword_pass("--files", 20)
+        finally:
+            searcher.close()
+        titles = {
+            int(sid): path
+            for sid, path in db.connection().execute("SELECT id, heading_path FROM sections")
+        }
+        assert [titles[sid] for sid in ranked.ranking] == ["Guide > Listing"]
+
+    def test_rarity_is_judged_per_term(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        # Every section survives the gate holding both terms' words; only one names GH_REPO.
+        sections = "".join(
+            f"## Part {n}\n\nServe HTTP from the gh repo on port {n}.\n\n" for n in range(6)
+        )
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Server\n\n{sections}## Repo\n\nSet GH_REPO to serve HTTP.\n",
+        })  # fmt: skip
+        try:
+            ranked = searcher._keyword_pass("HTTP GH_REPO", 20)
+        finally:
+            searcher.close()
+        titles = {
+            int(sid): path
+            for sid, path in db.connection().execute("SELECT id, heading_path FROM sections")
+        }
+        assert [titles[sid] for sid in ranked.ranking] == ["Server > Repo"]
+
+    def test_a_section_vanishing_while_checked_asks_for_a_second_pass(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Hosts\n\n## One\n\nSet GH_REPO.\n\n## Two\n\nGH_REPO again.\n",
+        })  # fmt: skip
+        hydrate = searcher._db.get_sections_with_documents
+
+        def lose_one(ids: Sequence[int]) -> dict[int, tuple[Section, Document]]:
+            found = hydrate(ids)
+            found.pop(next(iter(found)))  # replaced by a concurrent re-index
+            return found
+
+        try:
+            monkeypatch.setattr(searcher._db, "get_sections_with_documents", lose_one)
+            assert searcher._keyword_pass("GH_REPO", 20).stale
+        finally:
+            searcher.close()
+
+    def test_losing_the_only_section_naming_it_still_asks_for_a_second_pass(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Hosts\n\n## One\n\nSet GH_REPO.\n\n## Two\n\nRun gh repo view.\n",
+        })  # fmt: skip
+        hydrate = searcher._db.get_sections_with_documents
+
+        def lose_the_literal(ids: Sequence[int]) -> dict[int, tuple[Section, Document]]:
+            found = hydrate(ids)
+            for sid, (section, _) in list(found.items()):
+                if "GH_REPO" in section.content:
+                    del found[sid]  # replaced by a concurrent re-index
+            return found
+
+        try:
+            monkeypatch.setattr(searcher._db, "get_sections_with_documents", lose_the_literal)
+            ranked = searcher._keyword_pass("GH_REPO", 20)
+        finally:
+            searcher.close()
+        assert ranked.stale and not ranked.literal
+
+    def test_an_empty_page_from_a_pass_that_lost_sections_is_ranked_again(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The section naming it vanished, then nothing matched: the replacement is coming."""
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Hosts\n\n## One\n\nSet GH_REPO.\n",
+        })  # fmt: skip
+        real = searcher._keyword_pass
+        passes: list[str] = []
+
+        def first_pass_raced(query: str, limit: int) -> _Keyword:
+            passes.append(query)
+            return _Keyword([], "no_match", stale=True) if len(passes) == 1 else real(query, limit)
+
+        monkeypatch.setattr(searcher, "_keyword_pass", first_pass_raced)
+        try:
+            page = searcher.search_page("GH_REPO", 5)
+        finally:
+            searcher.close()
+        assert len(passes) == 2 and [r.heading_path for r in page.results] == ["Hosts > One"]
+
+    def test_a_term_is_sampled_among_the_candidates_matching_it_not_the_whole_pool(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        """HTTP is named in 8 of 30 sections (rare is 3); the pool checked holds only 2."""
+        serve = "".join(f"## Serve {n}\n\nServe HTTP on port {n}.\n\n" for n in range(8))
+        words = "".join(f"## Words {n}\n\nThe gh repo command, take {n}.\n\n" for n in range(20))
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Guide\n\n{serve}{words}## Repo\n\nSet GH_REPO.\n",
+        })  # fmt: skip
+        rows = db.connection().execute("SELECT id, heading_path FROM sections").fetchall()
+        ids = {path: int(sid) for sid, path in rows}
+        pool = [ids["Guide > Repo"], ids["Guide > Serve 0"], ids["Guide > Serve 1"]]
+        pool += [ids[f"Guide > Words {n}"] for n in range(17)]
+        try:
+            ranked = searcher._literal_ranking(fts_terms("GH_REPO HTTP"), pool, 20)
+        finally:
+            searcher.close()
+        assert ranked.ranking == [ids["Guide > Repo"]]
+
+    def test_rarity_in_one_root_is_not_judged_by_another_roots_words(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        words = "".join(f"## Words {n}\n\nThe gh repo command, take {n}.\n\n" for n in range(10))
+        self.searcher(db, fake_embedder, tmp_path / "other", {
+            "b.md": f"# Other\n\n{words}",
+        }).close()  # fmt: skip
+        mine = tmp_path / "mine"
+        self.searcher(db, fake_embedder, mine, {
+            "a.md": "# Mine\n\n## Host\n\nSet GH_REPO here.\n",
+        }).close()  # fmt: skip
+        scoped = HybridSearcher(db, fake_embedder, scope=str(mine))
+        try:
+            ranked = scoped._keyword_pass("GH_REPO", 20)
+        finally:
+            scoped.close()
+        assert ranked.literal and len(ranked.ranking) == 1
+
+    def test_a_scoped_search_never_answers_from_another_root(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        self.searcher(db, fake_embedder, tmp_path / "other", {
+            "b.md": "# Other\n\n## Host\n\nSet GH_REPO here.\n",
+        }).close()  # fmt: skip
+        mine = tmp_path / "mine"
+        searcher = self.searcher(db, fake_embedder, mine, {
+            "a.md": "# Mine\n\n## Prose\n\nRun gh repo view.\n",
+        })  # fmt: skip
+        searcher.close()
+        scoped = HybridSearcher(db, fake_embedder, scope=str(mine))
+        try:
+            paths = [r.file_path for r in scoped.search("GH_REPO", limit=5)]
+        finally:
+            scoped.close()
+        assert paths and all(path.startswith(str(mine)) for path in paths)
+
+    def test_a_query_mixing_words_and_an_identifier_is_untouched(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Primer\n\n## Language\n\nRun gh repo view.\n",
+            "b.md": "# Hosts\n\n## Choose\n\nSet GH_REPO to pick the repository.\n",
+        })  # fmt: skip
+        try:
+            query = "how do I set GH_REPO for scripts"
+            assert searcher._keyword_pass(query, 20) == _Keyword(
+                *searcher._keyword_ranking(query, 20)
+            )
+        finally:
+            searcher.close()
