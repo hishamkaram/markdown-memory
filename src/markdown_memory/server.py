@@ -611,7 +611,8 @@ def create_server(
         Returns JSON `{"documents": [...], "index_status": {...}}`. `index_status` is the one
         search_docs describes: `root`, `coverage`, `changed_files`, `message`, and `gitignore`
         (`applied`, `off`, `no_repository`, `unavailable` or `unknown`). Each `file_path` is
-        relative to `index_status.root`, as in search_docs.
+        relative to `index_status.root` (absolute when another worktree answered), as in
+        search_docs.
         `cwd` is your working directory: pass it on every call. In a git worktree the answer then
         comes from that worktree's own copy of the docs.
         """

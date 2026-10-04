@@ -1171,6 +1171,13 @@ MUTATIONS = (
         tests="test_the_anchor_one_block_before_and_three_after",
     ),
     Mutation(
+        name="excerpt: leave out the block before the anchor",
+        module="search.py",
+        old="BLOCKS_BEFORE = 1",
+        new="BLOCKS_BEFORE = 0",
+        tests="test_the_anchor_one_block_before_and_three_after",
+    ),
+    Mutation(
         name="excerpt harness: show the judges a text without the hit it came from",
         module="eval_excerpts.py",
         area="scripts",

@@ -241,8 +241,8 @@ def build_corpus(root: Path) -> dict[str, str]:
         f"**Scenario {number}.** "
         + "A cluster sized for this scenario needs headroom for replays, compaction and "
         "traffic spikes, so provision for twice the steady-state throughput and verify it "
-        "with a synthetic load test before onboarding new tenants. " * 3
-        for number in range(1, 11)
+        "with a synthetic load test before onboarding new tenants."
+        for number in range(1, 31)  # many blocks a part: an excerpt shows a few of them
     )
     files = {
         "reference/configuration.md": CONFIGURATION_MD,
