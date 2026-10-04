@@ -60,5 +60,7 @@ State, in this order:
   wrong, say so and let the user decide.
 - Only after the user accepts a change: `uv run python scripts/eval_retrieval.py
   --update-baseline`, then update the accuracy tables in `README.md` and `CLAUDE.md`.
+  Record the report-only corpus as well (`--corpus v2 --update-baseline`): its baseline
+  is `<preset>@v2`, and no document quotes its numbers.
 - A failed gate blocks the change. Report it; do not lower the floors in
   `scripts/eval_retrieval.py`.
