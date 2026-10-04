@@ -62,6 +62,89 @@ class Mutation:
 
 MUTATIONS = (
     Mutation(
+        name="preset: rebuild an index of another vector size on open again",
+        module="db.py",
+        old="        if version >= 1:\n            self._refuse_another_dimension(conn)",
+        new="        if False:\n            self._refuse_another_dimension(conn)",
+        tests="test_a_database_of_another_dimension_is_refused_and_left_unchanged "
+        "or test_another_dimension_is_refused_and_every_root_keeps_its_index "
+        "or test_a_mismatched_database_stops_the_server_with_the_reason",
+    ),
+    Mutation(
+        name="preset: let an older schema migrate before its vector size is checked",
+        module="db.py",
+        old="        if version >= 1:\n            self._refuse_another_dimension(conn)",
+        new=(
+            "        if version >= SCHEMA_VERSION:\n"
+            "            self._refuse_another_dimension(conn)"
+        ),
+        tests="test_the_dimension_is_checked_before_any_migration_runs",
+    ),
+    Mutation(
+        name="preset: leave out which model built the refused index",
+        module="db.py",
+        old=(
+            '        built_by = f"built by {model[0]}" if model else "built by an unrecorded model"'
+        ),
+        new='        built_by = "built by an unrecorded model"',
+        tests="test_the_refusal_names_the_path_both_sizes_and_the_model",
+    ),
+    Mutation(
+        name="preset: hold on to the file a refused open refused",
+        module="db.py",
+        old="            self.close()  # a refused open must not hold the file it refused",
+        new="            pass",
+        tests="test_a_refused_open_lets_go_of_the_file",
+    ),
+    Mutation(
+        name="preset: one default database for every preset again",
+        module="config.py",
+        old=(
+            '        / ("index.db" if embedder == DEFAULT_EMBEDDER '
+            'else f"index-{_safe(embedder)}.db")'
+        ),
+        new='        / "index.db"',
+        tests="test_each_preset_has_its_own_default_database "
+        "or test_two_presets_on_one_root_keep_both_indexes",
+    ),
+    Mutation(
+        name="preset: name a preset's database with whatever the environment says",
+        module="config.py",
+        old=(
+            '        / ("index.db" if embedder == DEFAULT_EMBEDDER '
+            'else f"index-{_safe(embedder)}.db")'
+        ),
+        new='        / ("index.db" if embedder == DEFAULT_EMBEDDER else f"index-{embedder}.db")',
+        tests="test_each_preset_has_its_own_default_database",
+    ),
+    Mutation(
+        name="preset: derive the environment's database before its preset is known",
+        module="config.py",
+        old=(
+            "                db_path if db_path else "
+            "_project_database(docs_dir if docs_dir else root, embedder)"
+        ),
+        new=(
+            "                db_path if db_path else "
+            "_project_database(docs_dir if docs_dir else root, DEFAULT_EMBEDDER)"
+        ),
+        tests="test_each_preset_has_its_own_default_database",
+    ),
+    Mutation(
+        name="preset: key the command line's database on the environment's preset",
+        module="config.py",
+        old="            else _project_database(root, preset)",
+        new="            else _project_database(root, base.embedder)",
+        tests="test_each_preset_has_its_own_default_database",
+    ),
+    Mutation(
+        name="preset: put every preset's work-tree index in one file",
+        module="config.py",
+        old="    default = _project_database(docs_dir, config.embedder)",
+        new="    default = _project_database(docs_dir, DEFAULT_EMBEDDER)",
+        tests="test_a_trees_database_is_beside_a_chosen_one_and_derived_otherwise",
+    ),
+    Mutation(
         name="scope: resolve the configured docs root again on every scan",
         module="server.py",
         old=(
@@ -77,14 +160,8 @@ MUTATIONS = (
     Mutation(
         name="config: keep the launcher's database when another project's root is named",
         module="config.py",
-        old=(
-            "            db.expanduser() if db else configured_db "
-            "if configured_db else _project_database(root)"
-        ),
-        new=(
-            "            db.expanduser() if db else configured_db "
-            "if configured_db else base.db_path"
-        ),
+        old="            else _project_database(root, preset)",
+        new="            else base.db_path",
         tests="test_two_docs_dir_flags_do_not_share_the_launcher_s_database "
         "or test_naming_a_directory_rekeys_the_database "
         "or test_the_script_resolves_its_configuration_the_same_way",
@@ -93,12 +170,12 @@ MUTATIONS = (
         name="config: put every project's index back in one shared database",
         module="config.py",
         old=(
-            "            db_path=(db_path if db_path else "
-            "_project_database(docs_dir if docs_dir else root)),"
+            "                db_path if db_path else "
+            "_project_database(docs_dir if docs_dir else root, embedder)"
         ),
         new=(
-            "            db_path=(db_path if db_path else "
-            '_xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"),'
+            "                db_path if db_path else "
+            '_xdg_dir("XDG_DATA_HOME", ".local/share") / "markdown-memory" / "index.db"'
         ),
         tests="test_one_working_directory_two_projects_two_databases",
     ),
@@ -1189,7 +1266,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 10926),',
+        old='    ("README.md", 11114),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -2144,11 +2221,8 @@ MUTATIONS = (
     Mutation(
         name="config: overrule a database that was configured on purpose",
         module="config.py",
-        old=(
-            "            db.expanduser() if db else configured_db "
-            "if configured_db else _project_database(root)"
-        ),
-        new=("            configured_db if configured_db else _project_database(root)"),
+        old="            db.expanduser()\n            if db\n            else configured_db",
+        new="            configured_db",
         tests="test_an_explicitly_configured_database_still_wins",
     ),
     Mutation(

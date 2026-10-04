@@ -162,23 +162,80 @@ class TestSchema:
         with Database(path) as reopened:
             assert reopened.get_meta("embedding_dim") == "384"
 
-    def test_changed_embedding_dimension_rebuilds_the_index(
+    @staticmethod
+    def contents(path: Path) -> tuple[object, ...]:
+        """Everything a refused open must leave as it was, read without opening a Database."""
+        plain = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            counts = tuple(
+                plain.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("documents", "sections", "units", "index_coverage")
+            )
+            meta = plain.execute("SELECT key, value FROM meta ORDER BY key").fetchall()
+            version = plain.execute("PRAGMA user_version").fetchone()[0]
+            columns = plain.execute("SELECT name FROM pragma_table_info('index_coverage')")
+            return (*counts, tuple(meta), version, tuple(columns.fetchall()))
+        finally:
+            plain.close()
+
+    def test_a_database_of_another_dimension_is_refused_and_left_unchanged(
         self, tmp_path: Path, fake_embedder: FakeEmbedder
     ) -> None:
-        """The index is a cache of the files: a new model size resets it, never errors."""
+        """Opening is all a search does: it must never cost the index its vectors (#82)."""
         path = tmp_path / "dim.db"
         with Database(path, embedding_dim=384) as small:
             store(small, fake_embedder, "/docs/a.md", SECTIONS)
-        wide = FakeEmbedder(dimension=768)
-        with Database(path, embedding_dim=768) as large:
-            assert large.get_meta("embedding_dim") == "768"
-            for table in ("documents", "sections", "sections_fts", "sections_vec", "units"):
-                assert large.count_rows(table) == 0
-            store(large, wide, "/docs/a.md", SECTIONS)
-            assert len(large.vec_search(wide.embed_query("installer"), 5)) == 3
-            assert len(large.unit_search(wide.embed_query("installer"), 5)) == 3
-        with Database(path, embedding_dim=768) as again:
-            assert again.count_rows("documents") == 1  # a second open changes nothing
+            vectors = small.count_rows("units_vec"), small.count_rows("sections_vec")
+        before = self.contents(path)
+        with pytest.raises(DatabaseError, match="Nothing was changed"):
+            Database(path, embedding_dim=768)
+        assert self.contents(path) == before
+        with Database(path, embedding_dim=384) as again:
+            assert (again.count_rows("units_vec"), again.count_rows("sections_vec")) == vectors
+            assert len(again.unit_search(fake_embedder.embed_query("installer"), 5)) == 3
+
+    def test_the_dimension_is_checked_before_any_migration_runs(
+        self, tmp_path: Path, fake_embedder: FakeEmbedder
+    ) -> None:
+        # One migration deletes documents; a refusal that came after them would not be one.
+        path = tmp_path / "old.db"
+        with Database(path, embedding_dim=384) as small:
+            store(small, fake_embedder, "/docs/a.md", SECTIONS)
+            conn = small.connection()
+            conn.execute("ALTER TABLE index_coverage DROP COLUMN gitignore")  # back to v6
+            conn.execute("PRAGMA user_version = 6")
+        before = self.contents(path)
+        with pytest.raises(DatabaseError, match="384-dimensional"):
+            Database(path, embedding_dim=768)
+        assert self.contents(path) == before
+
+    def test_a_refused_open_lets_go_of_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "held.db"
+        with Database(path, embedding_dim=384):
+            pass
+        closed: list[Path] = []
+        real_close = Database.close
+        monkeypatch.setattr(Database, "close", lambda db: (closed.append(db.path), real_close(db)))
+        with pytest.raises(DatabaseError):
+            Database(path, embedding_dim=768)
+        assert closed == [path]  # nobody else holds the object, so nobody else could close it
+
+    def test_the_refusal_names_the_path_both_sizes_and_the_model(self, tmp_path: Path) -> None:
+        recorded, unrecorded = tmp_path / "recorded.db", tmp_path / "unrecorded.db"
+        with Database(recorded, embedding_dim=384) as database:
+            database.set_meta("embedding_model", "BAAI/bge-small-en-v1.5")
+        with Database(unrecorded, embedding_dim=384):
+            pass
+        with pytest.raises(DatabaseError) as named:
+            Database(recorded, embedding_dim=768)
+        message = str(named.value)
+        assert str(recorded) in message and "384-dimensional" in message
+        assert "produces 768" in message and "built by BAAI/bge-small-en-v1.5" in message
+        assert "MARKDOWN_MEMORY_DB" in message and "-wal and -shm" in message
+        with pytest.raises(DatabaseError, match="built by an unrecorded model"):
+            Database(unrecorded, embedding_dim=768)
 
     def test_newer_schema_is_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "future.db"

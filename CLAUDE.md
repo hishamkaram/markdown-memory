@@ -62,13 +62,13 @@ The first run downloads the embedding model (~218 MB) into
 | `src/markdown_memory/models.py` | Frozen dataclasses: `ParsedDocument`, `SectionDraft` (+ `units`), `SectionVectors`, `Section`, `Document`, `DocumentSummary`, `OutlineNode`, `SearchResult` (+ `Excerpt`), `FileFailure`, `IndexStatus`, `IndexReport` |
 | `src/markdown_memory/exceptions.py` | `MarkdownMemoryError` hierarchy (`ConfigurationError`, `DatabaseError`, `ASTParseError`, `IndexingError` > `EmbeddingError` > `ModelLoadError`, `ForeignWeightsError`, `IndexBusyError`, `SearchError`, `DocumentNotFoundError`, `SectionNotFoundError`, `WorkTreeError`) |
 | `src/markdown_memory/parser.py` | AST sectioniser: heading stack, preamble, front matter, unclosed-fence repair, oversized-section parts, `passages` (each passage with the lines it came from) and its projection `extract_units` (+ `_windows`: a passage over `MAX_UNIT_CHARS` is split, never truncated), `cuts_a_block` |
-| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v7), repository methods, `integrity_problems()` |
+| `src/markdown_memory/db.py` | `Database`: per-thread connections, WAL, migrations (schema v7; a database of another vector size is refused before any of them), repository methods, `integrity_problems()` |
 | `src/markdown_memory/discovery.py` | The walk: `iter_markdown_files`, `Scope` (exclusions, `git_ignored` -> `GitIgnore`, linked worktrees), `without_aliases` (symlinks to a file indexed anyway), symlink and unreadable-name handling, `read_regular_file` (`O_NONBLOCK` + `fstat`), `hash_bytes`, `MAX_FILE_BYTES` |
 | `src/markdown_memory/model_cache.py` | The versioned/verified model cache: `gemma_model_dir`, `GEMMA_MANIFEST`, the pin, the graph file, the `.verified` stamp, `flock`, atomic writes |
 | `src/markdown_memory/embedders.py` | `Embedder` protocol, `EmbeddingGemmaEmbedder`, `FastEmbedEmbedder`, `create_embedder`. `numpy` and `onnxruntime` live here and nowhere else; cache names are read as `model_cache.X` so one patch point holds. `weights_revision` names the revision *and* the graph, because one revision publishes several |
 | `src/markdown_memory/indexer.py` | Incremental `Indexer`: the scan, SHA-256 change detection, the bounded window (workers embed, the driver writes), section/passage vectors |
 | `src/markdown_memory/search.py` | `HybridSearcher`: FTS5 query building, IDF keyword gate, passage max-sim, RRF, the top hit's excerpt (`select_anchor`, `excerpt_lines`) |
-| `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
+| `src/markdown_memory/config.py` | `ServerConfig`, `resolve_config` (one precedence for every entry point), the default database per docs root and preset, the `MARKDOWN_MEMORY_*` names, `parse_exclusions` |
 | `src/markdown_memory/freshness.py` | `FreshnessSweep`: how many indexed documents moved on, its single-entry cache, its TTL and the lock that makes a sweep one step |
 | `src/markdown_memory/autoindex.py` | `AutoIndexer`: the stdio server's background re-indexing - one run at a time, started by a search's `index_status` - the first after the server starts, then whenever one is due (changed files above the post-run baseline, a new weights mismatch, or the walk interval); stopped between documents before the service closes |
 | `src/markdown_memory/trees.py` | Which work tree a path is in (`work_tree`: one `git rev-parse`, never a parse of `.git`), where the docs root sits in another tree of the same repository (`counterpart`), `MAX_TREES` |
@@ -152,8 +152,10 @@ A passage vector is reused across work trees on the exact embedded text, the wei
 and `VECTOR_FORMAT` - the prompts are not part of the stamp, so **changing an embedding prompt
 bumps `VECTOR_FORMAT`**, which makes every document re-embed itself.
 
-Changing the embedding dimension invalidates every stored vector: the index is discarded and
-rebuilt (`IndexReport.notes` says so). Changing the weights at the same dimension does not:
+Changing the embedding dimension never discards an index: a database holding vectors of
+another size is refused on open, before anything is written, and each preset has a default
+database of its own (`index.db`, `index-bge-small.db`), so switching preset does not reach
+another's file (#82). Changing the weights at the same dimension does not discard either:
 each document is stamped with the weights that embedded it (`documents.weights_revision`),
 the index-wide revision is revoked while stamps disagree, and a run re-embeds the stale
 documents in place, restoring the revision once no vector-bearing row in the database is

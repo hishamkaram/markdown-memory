@@ -308,7 +308,7 @@ def server_cpu_seconds() -> float | None:
 def check_schema_integrity(test: LiveTest, db_path: Path) -> None:
     """Open the database the server just closed and verify every index agrees."""
     # Read the stored size with plain sqlite3 first: opening a Database with a different
-    # embedding size REBUILDS it, and an inspection must never be able to do that.
+    # embedding size refuses it, and this check should say which size it found.
     plain = sqlite3.connect(db_path)
     try:
         stored = plain.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()

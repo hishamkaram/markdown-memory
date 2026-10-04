@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 19,349
+       alt="One question asked of four documentation files. Reading them whole costs 19,608
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 19,349 tokens in all:
+`docs/evaluation-protocol.md`, 19,608 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -29,11 +29,11 @@ search_docs("where does the embedding model get downloaded")
            excerpt: the passage that matched and the three after it come back (275 tok)
   712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   735 tok  README.md  markdown-memory
-  268 tok  README.md  markdown-memory > The embedding model > When it goes wrong
+  303 tok  README.md  markdown-memory > The embedding model > When it goes wrong
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 19,349**: the passage that answers and the three after it, verbatim,
+**275 tokens instead of 19,608**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
 not enough. The other four come back as pointers - where each section is, what reading it
 costs, and the passage that matched - so when the first is not the answer, one
@@ -333,9 +333,16 @@ nothing, and how often `keyword_match` says no section contains the terms. A que
 of identifiers that no indexed section contains returns nothing; a question keeps its neighbours.
 It never gates either: at 4 queries a split, one query moves it 25pp.
 
-Switching preset **discards the whole index**: the two produce vectors of different sizes,
-which cannot be compared, so every documentation root has to be indexed again.
-`index_directory` reports that when it happens.
+Each preset keeps **an index of its own**: the two produce vectors of different sizes, so
+`embeddinggemma` uses `index.db` and `bge-small` uses `index-bge-small.db` beside it, and
+switching back and forth costs nothing after each has indexed once. A database of the other
+size is refused, never emptied: pointing `--db` at it stops the server with a message that
+names the file, both sizes and the model that built it, and nothing in it is changed.
+
+Upgrading from 0.6 or earlier: before 0.7.0 every preset shared `index.db`, so a
+`bge-small` user's first run builds `index-bge-small.db`, and `embeddinggemma` refuses the
+old 384-dimensional `index.db` until it is deleted (with its `-wal` and `-shm` files, while
+no markdown-memory process uses it) or kept for `bge-small` through `--db`.
 
 **The first index of a large documentation set is slow.** Every paragraph, list item, table
 row and code block costs one vector; a section costs none of its own, because its vector is
@@ -361,9 +368,10 @@ the revision is pinned. See [License](#license) for what that means for you.
 - **All logging goes to stderr.** stdout carries JSON-RPC frames only, so a client that
   shows you "the output" may be showing you nothing. Set `MARKDOWN_MEMORY_LOG_LEVEL=DEBUG`
   and read stderr.
-- **Switching preset discards the index.** The two models produce vectors of different
-  sizes, which cannot be compared, so every root must be indexed again. `index_directory`
-  says so when it happens.
+- **The server stops with "holds an index of N-dimensional vectors".** The database was built
+  by the other preset. Nothing in it was changed: point `--db` / `MARKDOWN_MEMORY_DB` at
+  another file, or delete it with its `-wal` and `-shm` files while no markdown-memory
+  process uses it, and the next run rebuilds it from the Markdown files.
 - **Searches come back empty or stale.** Run `index_directory` again; it is incremental, so
   it is cheap. If `index_status.coverage` stays `"unknown"`, its `message` names the files
   that could not be read.
@@ -428,7 +436,7 @@ answered.
 | Environment variable | CLI flag | Default |
 | --- | --- | --- |
 | `MARKDOWN_MEMORY_DOCS_DIR` | `--docs-dir` | `$CLAUDE_PROJECT_DIR` if the client exports it, else the working directory |
-| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/projects/<root>-<digest>/index.db` — one index per docs root |
+| `MARKDOWN_MEMORY_DB` | `--db` | `$XDG_DATA_HOME/markdown-memory/projects/<root>-<digest>/index.db` — one index per docs root (`index-bge-small.db` for that preset) |
 | `MARKDOWN_MEMORY_MODEL_CACHE` | - | `$XDG_CACHE_HOME/markdown-memory/models` (`~/.cache/...`) |
 | `MARKDOWN_MEMORY_EXCLUDE` | `--exclude` (repeatable) | none of your own - the built-in rules below still apply |
 | `MARKDOWN_MEMORY_LOG_LEVEL` | `--log-level` | `INFO` |
