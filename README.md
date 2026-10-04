@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 19,202
+       alt="One question asked of four documentation files. Reading them whole costs 19,349
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 19,202 tokens in all:
+`docs/evaluation-protocol.md`, 19,349 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -33,7 +33,7 @@ search_docs("where does the embedding model get downloaded")
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 19,202**: the passage that answers and the three after it, verbatim,
+**275 tokens instead of 19,349**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
 not enough. The other four come back as pointers - where each section is, what reading it
 costs, and the passage that matched - so when the first is not the answer, one
@@ -323,7 +323,7 @@ the section that answers each query, as a median, a p95 and a median ratio per s
 (`--show-costs` lists every query). It is informational - it never gates and never enters
 the baseline. Paths are sent relative to the documentation root, so the figure no longer depends
 on where the repository is checked out. On this corpus the
-default call costs a median of about 470-520 tokens against answering sections of
+default call costs a median of about 380-430 tokens against answering sections of
 roughly 50-80; an identifier lookup that abstains costs about 140, its `keyword_message`
 included.
 
@@ -392,10 +392,17 @@ as one block, so it keeps the sentence that introduces it; a table keeps its hea
 fence or HTML block is never cut; and `lines` names exactly the lines sent. `tokens` stays what
 the whole section costs, which is what `read_section(file_path, heading_path)` returns when the
 excerpt is not enough. Anything that cannot be shown safe comes back whole instead: a section
-short enough for the window to cover it all, an excerpt that would not be smaller, a query with
-no word to anchor on, a section whose heading names everything the query asks for, an
-identifier lookup that only the heading answers, a part split from inside a block, or an index
-whose stored passages no longer match the parser.
+of three passages or fewer, or short enough for the window to cover it all, an excerpt that
+would not be smaller, a query with no word to anchor on, a section whose heading names
+everything the query asks for, an identifier lookup that only the heading answers, a part split
+from inside a block, or an index whose stored passages no longer match the parser.
+
+The excerpt was measured once, on 150 queries over `corpus_v2` written for the purpose and never
+used to tune it (`scripts/eval_excerpts.py`). Three judges - Codex, Gemini and Claude, each
+alone - first marked which top hits answer their query when sent whole (127 of 150), then
+whether the excerpt still does, by majority: it kept the answer in 124 of those 127 (97.6%,
+one-sided 95% lower bound 94.2%), and a call cost 83.8% of the whole-section call (bootstrap
+upper bound 87.0%), counting the `read_section` an agent makes when the excerpt falls short.
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base
