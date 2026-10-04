@@ -72,11 +72,11 @@ You are judging a documentation-retrieval experiment. Do NOT run tests and chang
 Only read the input file.
 
 Each line of the input is one JSON object with an "id", a "query" a coding agent sent to a
-documentation search tool, and "texts": {"A": ...}, the text the tool returned as its top
-answer, verbatim Markdown from the docs.
+documentation search tool, "hit": the file and heading path the tool named for its top answer,
+and "texts": {"A": ...}, the text it returned for that hit, verbatim Markdown from the docs.
 
-For each item, judge whether an agent reading ONLY that text could act on the query without
-reading more:
+For each item, judge whether an agent reading ONLY that hit - its file, heading path and text
+- could act on the query without reading more:
 - "yes": it answers the query
 - "partial": relevant, but the agent would need to read more to act
 - "no": does not answer
@@ -235,14 +235,25 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def judge_texts(
     judged: Sequence[Mapping[str, Any]], keys: Sequence[Mapping[str, Any]], which: str
 ) -> list[dict[str, Any]]:
-    """One text per item for a judge: every whole section, or every excerpt there is."""
+    """One text per item for a judge: every whole section, or every excerpt there is.
+
+    Each comes with the file and heading path of its hit, which the agent sees beside the
+    text: a release named only by its heading is still named.
+    """
     by_id = {key["id"]: key for key in keys}
     texts: list[dict[str, Any]] = []
     for item in judged:
-        letter = by_id[item["id"]][which]
+        key = by_id[item["id"]]
+        letter = key[which]
         if letter is not None:
+            file_path, heading_path = key["cluster"].split(" :: ", 1)
             texts.append(
-                {"id": item["id"], "query": item["query"], "texts": {"A": item["texts"][letter]}}
+                {
+                    "id": item["id"],
+                    "query": item["query"],
+                    "hit": {"file_path": file_path, "heading_path": heading_path},
+                    "texts": {"A": item["texts"][letter]},
+                }
             )
     return texts
 

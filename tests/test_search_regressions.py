@@ -1099,31 +1099,28 @@ class TestTheExcerptWindow:
 
     PARAGRAPHS = _section(*(f"Paragraph {n} says something." for n in range(6)))
 
-    def test_the_anchor_and_one_passage_either_side(self) -> None:
-        assert self.shown(self.PARAGRAPHS, 3) == [
-            "Paragraph 2 says something.",
-            "",
-            "Paragraph 3 says something.",
-            "",
-            "Paragraph 4 says something.",
-        ]
-        assert self.shown(self.PARAGRAPHS, 0) == [
-            "Paragraph 0 says something.",
-            "",
-            "Paragraph 1 says something.",
-        ]
+    def test_the_anchor_one_block_before_and_three_after(self) -> None:
+        """The answer follows the passage that states the problem (#76 sealed run)."""
+
+        def paragraphs(*numbers: int) -> list[str]:
+            lines = [line for n in numbers for line in (f"Paragraph {n} says something.", "")]
+            return lines[:-1]
+
+        assert self.shown(self.PARAGRAPHS, 2) == paragraphs(1, 2, 3, 4, 5)
+        assert self.shown(self.PARAGRAPHS, 0) == paragraphs(0, 1, 2, 3)
+        assert self.shown(self.PARAGRAPHS, 4) == paragraphs(3, 4, 5)
 
     def test_three_passages_or_fewer_are_sent_whole(self) -> None:
-        # Anchored on the first, the window leaves the third out: only the count decides.
+        # The window covers a short section wherever it is anchored.
         assert self.shown(_section("One.", "Two.", "Three."), 0) is None
 
     def test_a_table_row_brings_its_header_and_delimiter(self) -> None:
         rows = "\n".join(f"| r{n} | v{n} |" for n in range(8))
         content = _section("Intro.", f"| K | V |\n| - | - |\n{rows}", "Outro.")
-        shown = self.shown(content, 6)
+        shown = self.shown(content, 3)  # the row r2: rows r1 to r5 are shown
         assert shown is not None
-        assert shown[:2] == ["| K | V |", "| - | - |"]
-        assert shown[-1] == "| r6 | v6 |"
+        assert shown[:3] == ["| K | V |", "| - | - |", "| r0 | v0 |"]
+        assert shown[-1] == "| r5 | v5 |"
 
     def test_a_window_that_grows_over_every_passage_is_sent_whole(self) -> None:
         rows = "\n".join(f"| r{n} | v{n} |" for n in range(4))
@@ -1132,7 +1129,7 @@ class TestTheExcerptWindow:
     def test_a_window_no_smaller_than_the_section_is_sent_whole(self) -> None:
         long = "word " * 40
         for padding in range(8):
-            content = "\n\n".join([long + "a" * padding, long, long, "x"])  # no heading line
+            content = "\n\n".join([long + "a" * padding, long, long, long, long, "x"])  # no heading
             remainder = len("\n\nx")
             if -(-len(content) // 4) == -(-(len(content) - remainder) // 4):
                 break
@@ -1145,8 +1142,9 @@ class TestTheExcerptWindow:
         assert self.shown(content, 3) is None
 
     def test_a_list_item_does_not_bring_the_blank_line_after_it(self) -> None:
-        content = _section("Intro.", "- one\n- two\n\n- three", "Middle.", "Outro.")
-        assert self.shown(content, 0) == ["Intro.", "", "- one", "- two", "", "- three"]
+        content = _section("P0.", "P1.", "P2.", "P3.", "- one\n- two\n\n- three", "After.", "End.")
+        shown = self.shown(content, 1)  # P0 to the list
+        assert shown is not None and shown[-2:] == ["", "- three"]
 
     def test_a_list_is_one_block_with_the_sentence_that_introduces_it(self) -> None:
         """Three items cut from a longer list lost what the list was of (#76 dev check)."""
@@ -1158,6 +1156,8 @@ class TestTheExcerptWindow:
             *(f"- item {n}" for n in range(5)),
             "",
             "After.",
+            "",
+            "Outro.",
         ]
 
     def test_a_passage_without_lines_sends_the_section_whole(self) -> None:
@@ -1407,4 +1407,4 @@ class TestEveryExcerptOfBothCorporaIsVerbatim:
                     )
                     assert not ends_inside_fence(shown), f"{path}: leaves a fence open"
                     checked += 1
-        assert checked > {"corpus": 25, "corpus_v2": 1000}[corpus]
+        assert checked > {"corpus": 12, "corpus_v2": 3000}[corpus], checked

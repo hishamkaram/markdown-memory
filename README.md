@@ -13,30 +13,30 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 19,176
+       alt="One question asked of four documentation files. Reading them whole costs 19,202
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns the passage that answers, 108 tokens of a
+            vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 19,176 tokens in all:
+`docs/evaluation-protocol.md`, 19,202 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
-           excerpt: the passage that matched and the one after it come back (108 tok)
+           excerpt: the passage that matched and the three after it come back (275 tok)
   712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  734 tok  README.md  markdown-memory
+  735 tok  README.md  markdown-memory
   268 tok  README.md  markdown-memory > The embedding model > When it goes wrong
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**108 tokens instead of 19,176**: the passage that answers and the one after it, verbatim,
+**275 tokens instead of 19,202**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
-not enough. The other four come back as pointers - where each section is, what
-reading it costs, and the passage that matched - so when the first is not the answer, one
+not enough. The other four come back as pointers - where each section is, what reading it
+costs, and the passage that matched - so when the first is not the answer, one
 `read_section` fetches the one that is.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
@@ -386,15 +386,16 @@ would otherwise pay for it twice. The first hit of `search_docs` is a pointer pl
 `content`, nothing that ranks it.
 
 That `content` is the whole section unless the hit says `excerpt: true`. Then it is the block
-that matched and the block either side of it, as contiguous lines of the stored section - a
-list counts as one block, so it keeps the sentence that introduces it; a table keeps its
-header; a code fence or HTML block is never cut; and `lines` names exactly the lines sent.
-`tokens` stays what the whole section costs, which is what `read_section(file_path,
-heading_path)` returns when the excerpt is not enough. Anything that cannot be shown safe comes
-back whole instead: a section of three passages or fewer, an excerpt that would not be smaller,
-a query with no word to anchor on, a section whose heading names everything the query asks for,
-an identifier lookup that only the heading answers, a part split from inside a block, or an
-index whose stored passages no longer match the parser.
+that matched, the block before it and up to three after it - the answer to a question usually
+follows the passage that states it - as contiguous lines of the stored section: a list counts
+as one block, so it keeps the sentence that introduces it; a table keeps its header; a code
+fence or HTML block is never cut; and `lines` names exactly the lines sent. `tokens` stays what
+the whole section costs, which is what `read_section(file_path, heading_path)` returns when the
+excerpt is not enough. Anything that cannot be shown safe comes back whole instead: a section
+short enough for the window to cover it all, an excerpt that would not be smaller, a query with
+no word to anchor on, a section whose heading names everything the query asks for, an
+identifier lookup that only the heading answers, a part split from inside a block, or an index
+whose stored passages no longer match the parser.
 
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base

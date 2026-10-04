@@ -64,6 +64,9 @@ _STALE_RETRIES = 1  # re-rank once when a concurrent re-index replaced ranked se
 # reads `--pre` as `pre`, so prose about `pre_start` can fill the first 20; the `--pre` section
 # of the measured corpus sat at 25.
 LITERAL_CANDIDATES = 200
+# The top hit's excerpt (#76): the matched block, one before it and up to three after.
+BLOCKS_BEFORE = 1
+BLOCKS_AFTER = 3
 _PASSAGES_PER_CANDIDATE = 10  # passage neighbours fetched per wanted section
 
 
@@ -330,19 +333,22 @@ def select_anchor(
 def excerpt_lines(content: str, passages: Sequence[Passage], anchor: int) -> tuple[int, int] | None:
     """The 0-based, end-exclusive lines of ``content`` an excerpt around ``anchor`` shows.
 
-    The anchor's block and the block on either side, widened to whole lines: the pieces of a
-    long block are one block, and so is a list, whose items rarely stand without the sentence
-    that introduces it (#76). A table row brings its table's header with it, contiguously.
-    None whenever the excerpt would not be safe or would not be smaller: few passages, a
-    window covering all of them, a block without lines, a fence left open.
+    The anchor's block, the block before it and up to three after, widened to whole lines: a
+    passage that matches a question usually states the problem, and the answer - the script,
+    the parameter, the rest of the syntax - follows it (#76). The pieces of a long block are one
+    block, and so is a list, whose items rarely stand without the sentence that introduces it.
+    A table row brings its table's header with it, contiguously.
+    None whenever the excerpt would not be safe or would not be smaller: a window covering
+    every passage - which a short section always is - a block without lines, a fence left open.
     """
     keys = [passage.listing or passage.lines for passage in passages]
     starts = [i for i in range(len(keys)) if i == 0 or keys[i] != keys[i - 1]]
     at = max(index for index, start in enumerate(starts) if start <= anchor)
     ends = [*starts[1:], len(passages)]
-    window = passages[starts[max(0, at - 1)] : ends[min(len(starts) - 1, at + 1)]]
+    low, high = max(0, at - BLOCKS_BEFORE), min(len(starts) - 1, at + BLOCKS_AFTER)
+    window = passages[starts[low] : ends[high]]
     spans = [passage.lines for passage in window]
-    if len(passages) <= 3 or any(span is None for span in spans):
+    if any(span is None for span in spans):
         return None
     first = min(span[0] for span in spans if span is not None)
     end = max(span[1] for span in spans if span is not None)

@@ -1044,17 +1044,27 @@ class TestTheExcerptHarness:
     def test_a_judge_sees_one_text_the_section_or_the_excerpt(self) -> None:
         import eval_excerpts
 
-        keys = [self.key("v2-dev-paraphrase-00", "A"), self.key("v2-dev-paraphrase-01", None)]
+        keys = [
+            self.key("v2-dev-paraphrase-00", "A", "CHANGELOG.md :: 15.2.0"),
+            self.key("v2-dev-paraphrase-01", None, "a.md :: A > B"),
+        ]
         judged = [
             {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "ex", "B": "whole"}},
             {"id": "v2-dev-paraphrase-01", "query": "q1", "texts": {"A": "whole 1"}},
         ]
+        release = {"file_path": "CHANGELOG.md", "heading_path": "15.2.0"}
         assert eval_excerpts.judge_texts(judged, keys, "section") == [
-            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "whole"}},
-            {"id": "v2-dev-paraphrase-01", "query": "q1", "texts": {"A": "whole 1"}},
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "hit": release, "texts": {"A": "whole"}},
+            {
+                "id": "v2-dev-paraphrase-01",
+                "query": "q1",
+                "hit": {"file_path": "a.md", "heading_path": "A > B"},
+                "texts": {"A": "whole 1"},
+            },
         ]
+        # The release an excerpt answers is named by its heading path, as the agent sees it.
         assert eval_excerpts.judge_texts(judged, keys, "excerpt") == [
-            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "ex"}},
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "hit": release, "texts": {"A": "ex"}},
         ]
 
     def test_a_verdict_is_a_strict_majority_and_a_split_is_not_a_yes(self) -> None:

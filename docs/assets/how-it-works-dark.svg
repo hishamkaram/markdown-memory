@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 430" width="1120" height="430" role="img" aria-label="One question: reading four whole files costs 19,176 tokens; markdown-memory returns the passage that answers, 108 tokens of a 407-token section, with four pointers to the rest.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 430" width="1120" height="430" role="img" aria-label="One question: reading four whole files costs 19,202 tokens; markdown-memory returns the passage that answers, 275 tokens of a 407-token section, with four pointers to the rest.">
 <rect width="1120" height="430" fill="#0d1117"/>
 <text x="40" y="42" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="17" font-weight="600" fill="#e6edf3" text-anchor="start">"where does the embedding model get downloaded?"</text>
 <text x="40" y="64" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">one question, asked of four documentation files</text>
@@ -6,7 +6,7 @@
 <text x="62" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="600" fill="#ff7b72" text-anchor="start">Read the files</text>
 <text x="62" y="138" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#e6edf3" text-anchor="start">README.md</text>
 <rect x="62" y="146" width="200" height="13" rx="3" fill="#ff7b72" stroke="none" stroke-width="1"/>
-<text x="328" y="157" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">10,753</text>
+<text x="328" y="157" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">10,779</text>
 <text x="62" y="184" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#e6edf3" text-anchor="start">CLAUDE.md</text>
 <rect x="62" y="192" width="94" height="13" rx="3" fill="#ff7b72" stroke="none" stroke-width="1"/>
 <text x="328" y="203" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">5,064</text>
@@ -17,7 +17,7 @@
 <rect x="62" y="284" width="32" height="13" rx="3" fill="#ff7b72" stroke="none" stroke-width="1"/>
 <text x="328" y="295" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">1,698</text>
 <path d="M62 318 L328 318" stroke="#5c2b29" stroke-width="1"/>
-<text x="62" y="338" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="600" fill="#ff7b72" text-anchor="start">19,176 tokens</text>
+<text x="62" y="338" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="600" fill="#ff7b72" text-anchor="start">19,202 tokens</text>
 <text x="62" y="354" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">most of it about something else</text>
 <text x="430" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3" text-anchor="start">markdown-memory</text>
 <rect x="414" y="132" width="232" height="38" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
@@ -38,14 +38,14 @@
 <rect x="710" y="88" width="370" height="274" rx="8" fill="#12261a" stroke="#2d5c38" stroke-width="1"/>
 <text x="732" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="600" fill="#3fb950" text-anchor="start">The passage that answers, four pointers</text>
 <rect x="732" y="140" width="8" height="11" rx="2" fill="none" stroke="#3fb950" stroke-width="1"/>
-<rect x="732" y="140" width="3" height="11" rx="2" fill="#3fb950" stroke="none" stroke-width="1"/>
+<rect x="732" y="140" width="5" height="11" rx="2" fill="#3fb950" stroke="none" stroke-width="1"/>
 <text x="776" y="150" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">407</text>
 <text x="788" y="150" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="600" fill="#e6edf3" text-anchor="start">What downloads, when, and where</text>
 <rect x="732" y="174" width="13" height="11" rx="2" fill="none" stroke="#3fb950" stroke-width="1"/>
 <text x="776" y="184" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">712</text>
 <text x="788" y="184" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">Pre-download it, or install offline</text>
 <rect x="732" y="208" width="14" height="11" rx="2" fill="none" stroke="#3fb950" stroke-width="1"/>
-<text x="776" y="218" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">734</text>
+<text x="776" y="218" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">735</text>
 <text x="788" y="218" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">markdown-memory  (preamble)</text>
 <rect x="732" y="242" width="5" height="11" rx="2" fill="none" stroke="#3fb950" stroke-width="1"/>
 <text x="776" y="252" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">268</text>
@@ -54,7 +54,7 @@
 <text x="776" y="286" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="end">119</text>
 <text x="788" y="286" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">Install &gt; Get it</text>
 <path d="M732 318 L1058 318" stroke="#2d5c38" stroke-width="1"/>
-<text x="732" y="338" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="600" fill="#3fb950" text-anchor="start">108 tokens of a 407-token section</text>
+<text x="732" y="338" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="600" fill="#3fb950" text-anchor="start">275 tokens of a 407-token section</text>
 <text x="732" y="354" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">plus four pointers, read only if the first is not the answer</text>
 <text x="40" y="402" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="400" fill="#9198a1" text-anchor="start">Measured on this repository's own documentation. Token estimates; every bar is to the same scale.</text>
 </svg>

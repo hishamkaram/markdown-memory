@@ -1164,10 +1164,25 @@ MUTATIONS = (
         "or test_the_cost_target_is_reported_but_does_not_gate",
     ),
     Mutation(
+        name="excerpt: stop the window one block after the anchor again",
+        module="search.py",
+        old="BLOCKS_AFTER = 3",
+        new="BLOCKS_AFTER = 1",
+        tests="test_the_anchor_one_block_before_and_three_after",
+    ),
+    Mutation(
+        name="excerpt harness: show the judges a text without the hit it came from",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='                    "hit": {"file_path": file_path, "heading_path": heading_path},\n',
+        new="",
+        tests="test_a_judge_sees_one_text_the_section_or_the_excerpt",
+    ),
+    Mutation(
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 10753),',
+        old='    ("README.md", 10779),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -3289,17 +3304,10 @@ MUTATIONS = (
         tests="test_without_one_the_passage_holding_the_most_terms_lowest_first",
     ),
     Mutation(
-        name="excerpt: cut a section of three passages",
-        module="search.py",
-        old="    if len(passages) <= 3 or any(span is None for span in spans):",
-        new="    if any(span is None for span in spans):",
-        tests="test_three_passages_or_fewer_are_sent_whole",
-    ),
-    Mutation(
         name="excerpt: cut by a passage that has no lines",
         module="search.py",
-        old="    if len(passages) <= 3 or any(span is None for span in spans):",
-        new="    if len(passages) <= 3:",
+        old="    if any(span is None for span in spans):\n        return None",
+        new="    if False:\n        return None",
         tests="test_a_passage_without_lines_sends_the_section_whole",
     ),
     Mutation(

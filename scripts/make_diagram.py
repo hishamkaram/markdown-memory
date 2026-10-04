@@ -67,7 +67,7 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 10753),
+    ("README.md", 10779),
     ("CLAUDE.md", 5064),
     ("evaluation-protocol.md", 1661),
     ("AGENTS.md", 1698),
@@ -75,16 +75,16 @@ LEFT_FILES = [
 RIGHT_HITS = [
     (407, "What downloads, when, and where", True),
     (712, "Pre-download it, or install offline", False),
-    (734, "markdown-memory  (preamble)", False),
+    (735, "markdown-memory  (preamble)", False),
     (268, "When it goes wrong", False),
     (119, "Install > Get it", False),
 ]
 # The first hit comes back as an excerpt (#76): the passage at this ordinal of its section,
-# and its neighbours. Which passage the query anchors on takes the model to find, as the
-# ranking does; how many tokens the excerpt around it holds does not, and
-# tests/test_agent_docs.py recomputes that from the README.
+# the block before it and up to three after. Which passage the query anchors on takes the
+# model to find, as the ranking does; how many tokens the excerpt around it holds does not,
+# and tests/test_agent_docs.py recomputes that from the README.
 EXCERPT_ANCHOR = 0
-EXCERPT_TOKENS = 108
+EXCERPT_TOKENS = 275
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # Every figure the drawing prints is derived from the two lists above - the totals, the
 # caption and the aria-label alike. Writing any of them out by hand is how the caption and
