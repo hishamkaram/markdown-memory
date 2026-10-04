@@ -283,7 +283,7 @@ class Indexer:
                 # per-document stamps, which re-embed each document in place while keyword
                 # search keeps answering; one that cannot would leave nothing to tell old
                 # vectors from new, so every document has to go, not only those under
-                # `root`. Nothing is announced when a size change already emptied it.
+                # `root`. Nothing is announced when there was nothing left to discard.
                 self._db.clear(
                     notice=lambda discarded: (
                         f"Embedding model changed ({previous_model} -> "
@@ -293,7 +293,7 @@ class Indexer:
                     )
                 )
             self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
-            # Whatever emptied the index (new format, new vector size, new model) left a
+            # Whatever emptied the index (new format, new model) left a
             # notice. They are dismissed only once the report carrying them exists: a run
             # that aborts - the model cannot be loaded - leaves them for the next one.
             notices = self._db.pending_notices()

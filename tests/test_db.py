@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes import FakeEmbedder, vectors_for
@@ -208,6 +209,27 @@ class TestSchema:
         with pytest.raises(DatabaseError, match="384-dimensional"):
             Database(path, embedding_dim=768)
         assert self.contents(path) == before
+
+    def test_another_preset_that_built_the_file_first_is_still_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two clients on one new --db both see an empty file; the slower one must stop."""
+        path = tmp_path / "shared.db"
+        real_transaction = Database.transaction
+        raced: list[Database] = []
+
+        def transaction(db: Database) -> Any:
+            if db.embedding_dim == 768 and not raced:  # the 768 client waits for the lock...
+                raced.append(Database(path, embedding_dim=384))  # ...while 384 builds it
+                raced[0].close()
+            return real_transaction(db)
+
+        monkeypatch.setattr(Database, "transaction", transaction)
+        with pytest.raises(DatabaseError, match="384-dimensional"):
+            Database(path, embedding_dim=768)
+        monkeypatch.undo()
+        with Database(path, embedding_dim=384) as database:
+            assert database.get_meta("embedding_dim") == "384"
 
     def test_a_refused_open_lets_go_of_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

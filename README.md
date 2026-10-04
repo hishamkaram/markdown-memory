@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 19,608
+       alt="One question asked of four documentation files. Reading them whole costs 19,618
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 19,608 tokens in all:
+`docs/evaluation-protocol.md`, 19,618 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -28,12 +28,12 @@ search_docs("where does the embedding model get downloaded")
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
            excerpt: the passage that matched and the three after it come back (275 tok)
   712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  735 tok  README.md  markdown-memory
+  738 tok  README.md  markdown-memory
   303 tok  README.md  markdown-memory > The embedding model > When it goes wrong
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 19,608**: the passage that answers and the three after it, verbatim,
+**275 tokens instead of 19,618**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
 not enough. The other four come back as pointers - where each section is, what reading it
 costs, and the passage that matched - so when the first is not the answer, one
@@ -44,7 +44,7 @@ protocol agents use to call tools - and it runs entirely on your machine: parsin
 `markdown-it-py`, embeddings with
 [EmbeddingGemma-300m](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)
 (4-bit ONNX on CPU, 768 dimensions), storage in SQLite - one database per documentation
-root, with a keyword index and two vector indexes over it. No API key, no network after the
+root and preset, with a keyword index and two vector indexes over it. No API key, no network after the
 first model download, nothing leaves the machine.
 
 ## Install
@@ -337,7 +337,8 @@ Each preset keeps **an index of its own**: the two produce vectors of different 
 `embeddinggemma` uses `index.db` and `bge-small` uses `index-bge-small.db` beside it, and
 switching back and forth costs nothing after each has indexed once. A database of the other
 size is refused, never emptied: pointing `--db` at it stops the server with a message that
-names the file, both sizes and the model that built it, and nothing in it is changed.
+names the file, both sizes and - when the index recorded it - the model that built it, and
+nothing in it is changed.
 
 Upgrading from 0.6 or earlier: before 0.7.0 every preset shared `index.db`, so a
 `bge-small` user's first run builds `index-bge-small.db`, and `embeddinggemma` refuses the

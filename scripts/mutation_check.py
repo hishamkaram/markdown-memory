@@ -71,14 +71,14 @@ MUTATIONS = (
         "or test_a_mismatched_database_stops_the_server_with_the_reason",
     ),
     Mutation(
-        name="preset: let an older schema migrate before its vector size is checked",
+        name="preset: trust a file another preset built while this one waited",
         module="db.py",
-        old="        if version >= 1:\n            self._refuse_another_dimension(conn)",
-        new=(
-            "        if version >= SCHEMA_VERSION:\n"
-            "            self._refuse_another_dimension(conn)"
+        old=(
+            "                if current >= 1:\n"
+            "                    # And it may have been another preset"
         ),
-        tests="test_the_dimension_is_checked_before_any_migration_runs",
+        new="                if False:\n                    # And it may have been another preset",
+        tests="test_another_preset_that_built_the_file_first_is_still_refused",
     ),
     Mutation(
         name="preset: leave out which model built the refused index",
@@ -1266,7 +1266,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 11114),',
+        old='    ("README.md", 11124),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",

@@ -458,6 +458,10 @@ class Database:
                 # Re-check under the write lock: another process starting at the same
                 # moment may have migrated the schema while this one waited for it.
                 current = int(tx.execute("PRAGMA user_version").fetchone()[0])
+                if current >= 1:
+                    # And it may have been another preset: two clients sharing one new
+                    # --db both saw an empty file, and the first to get here chose its size.
+                    self._refuse_another_dimension(tx)
                 if current < 1:
                     for statement in _schema_v1(self._embedding_dim):
                         tx.execute(statement)
