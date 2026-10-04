@@ -9,6 +9,7 @@ holds reused for every passage whose embedded text is identical.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -441,7 +442,11 @@ class TestProvider:
         sibling = tree_database(chosen, docs)
         assert sibling.parent == tmp_path / "dbs" and sibling.name.startswith("index-docs-")
         assert sibling != chosen.db_path
-        assert tree_database(derived, docs) == _project_database(docs)
+        assert tree_database(derived, docs) == _project_database(docs, derived.embedder)
+        light = dataclasses.replace(derived, embedder="bge-small")  # its own file, #82
+        assert tree_database(light, docs) == _project_database(docs, "embeddinggemma").with_name(
+            "index-bge-small.db"
+        )
 
 
 class TestReuse:

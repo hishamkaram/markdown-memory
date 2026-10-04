@@ -485,9 +485,10 @@ class TestMigrationInvalidatesTheIndex:
             again = Indexer(migrated, fake_embedder).index_directory(docs)
             assert (again.files_indexed, again.files_unchanged) == (0, 1), "rebuilt twice"
 
-    def test_dimension_change_reports_how_many_documents_it_really_discarded(
+    def test_another_dimension_is_refused_and_every_root_keeps_its_index(
         self, tmp_path: Path
     ) -> None:
+        """A dimension change used to discard every root in the file; now it discards none."""
         first, second = tmp_path / "one", tmp_path / "two"
         for root in (first, second):
             root.mkdir()
@@ -498,13 +499,13 @@ class TestMigrationInvalidatesTheIndex:
             indexer = Indexer(database, small)
             indexer.index_directory(first)
             indexer.index_directory(second)
-        wide = FakeEmbedder(dimension=768, model_name="wide")
-        with Database(path, embedding_dim=768) as database:
-            report = Indexer(database, wide).index_directory(first)
-        assert len(report.notes) == 1
-        assert "384 -> 768 dimensions" in report.notes[0]
-        assert "discarded all 2 previously indexed documents" in report.notes[0]
-        assert "discarded all 0" not in report.summary()
+        with pytest.raises(DatabaseError, match="built by small"):
+            Database(path, embedding_dim=768)
+        with Database(path, embedding_dim=384) as database:
+            assert database.count_rows("documents") == 2
+            assert database.index_status(str(first)).verified
+            assert database.index_status(str(second)).verified
+            assert database.pending_notices() == {}
 
 
 class TestIntegrityCheckUnderContention:
@@ -540,22 +541,6 @@ class TestNoticesSurviveAnAbortedRun:
             (root / "doc.md").write_text(f"# {root.name}\n\nbody\n")
         return first, second
 
-    def test_dimension_change_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
-        first, second = self.two_roots(tmp_path)
-        path = tmp_path / "switch.db"
-        with Database(path, embedding_dim=384) as database:
-            indexer = Indexer(database, FakeEmbedder(dimension=384, model_name="small"))
-            indexer.index_directory(first)
-            indexer.index_directory(second)
-        with Database(path, embedding_dim=768) as database, pytest.raises(ModelLoadError):
-            Indexer(database, self.NoModel(768, "wide")).index_directory(first)
-        with Database(path, embedding_dim=768) as database:
-            indexer = Indexer(database, FakeEmbedder(dimension=768, model_name="wide"))
-            report = indexer.index_directory(first)
-            assert len(report.notes) == 1
-            assert "discarded all 2 previously indexed documents" in report.notes[0]
-            assert indexer.index_directory(first).notes == ()  # told once
-
     def test_model_change_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
         first, second = self.two_roots(tmp_path)
         with Database(tmp_path / "model.db") as database:
@@ -569,6 +554,8 @@ class TestNoticesSurviveAnAbortedRun:
             assert len(report.notes) == 1
             assert "Embedding model changed (old -> new)" in report.notes[0]
             assert "discarded all 2 previously indexed documents" in report.notes[0]
+            again = Indexer(database, FakeEmbedder(model_name="new")).index_directory(first)
+            assert again.notes == ()  # told once
 
     def test_notice_added_after_a_partial_dismissal_gets_a_fresh_key(
         self, db: Database, fake_embedder: FakeEmbedder

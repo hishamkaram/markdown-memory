@@ -22,6 +22,7 @@ import markdown_memory.config as config_module
 import markdown_memory.freshness as freshness_module
 import markdown_memory.server as server_module
 from markdown_memory.config import ServerConfig
+from markdown_memory.db import Database
 from markdown_memory.exceptions import (
     ConfigurationError,
     DatabaseError,
@@ -239,6 +240,21 @@ class TestMainEntrypoint:
             server_module.main(["--db", str(blocker / "nested" / "index.db")])
         assert raised.value.code == 1
         assert "service" not in harness
+
+    def test_a_mismatched_database_stops_the_server_with_the_reason(
+        self, harness: dict[str, object], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Refused, not emptied: the server says why and the index is still there (#82)."""
+        path = tmp_path / "light.db"
+        with Database(path, embedding_dim=384) as database:
+            database.set_meta("embedding_model", "BAAI/bge-small-en-v1.5")
+        with pytest.raises(SystemExit) as raised:
+            server_module.main(["--db", str(path)])  # the default preset is 768-dimensional
+        assert raised.value.code == 1
+        assert "service" not in harness
+        assert "384-dimensional vectors (built by BAAI/bge-small-en-v1.5)" in caplog.text
+        with Database(path, embedding_dim=384) as database:
+            assert database.get_meta("embedding_model") == "BAAI/bge-small-en-v1.5"
 
     def test_version_is_the_installed_one_and_builds_nothing(
         self,
@@ -1034,6 +1050,63 @@ class TestTheCommandLineRekeysTheDatabase:
             "MARKDOWN_MEMORY_DB stopped winning"
         )
         assert self.config(alpha, flag).db_path == flag, "the flag lost to the environment"
+
+
+class TestEachPresetKeepsItsOwnIndex:
+    """Opening an index with the other preset discarded it, every root in the file (#82).
+
+    The default database was keyed on the documentation root alone, so a stray
+    MARKDOWN_MEMORY_EMBEDDER, or a second client configured with the other preset, opened
+    the same file at another vector size - and opening rebuilt it empty. Each preset now has
+    a default file of its own, and a file of the wrong size is refused rather than emptied.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        for name in (config_module.ENV_DB_PATH, config_module.ENV_PROJECT_DIR):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(config_module.ENV_DOCS_DIR, str(tmp_path / "docs"))
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "guide.md").write_text("# Guide\n\n## Retry\n\nretry body\n")
+        yield
+
+    def test_each_preset_has_its_own_default_database(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(config_module.ENV_EMBEDDER, raising=False)
+        default = ServerConfig.from_env().db_path
+        assert default.name == "index.db"  # where every index lived before: nothing moves
+        monkeypatch.setenv(config_module.ENV_EMBEDDER, "bge-small")
+        light = ServerConfig.from_env().db_path
+        assert light == default.with_name("index-bge-small.db")
+        flags = argparse.Namespace(docs_dir=None, db=None, embedder="embeddinggemma", exclude=[])
+        assert config_module._config_from_cli(flags).db_path == default  # the flag wins
+        flags.embedder = None
+        assert config_module._config_from_cli(flags).db_path == light
+        flags.db = tmp_path / "chosen.db"
+        assert config_module._config_from_cli(flags).db_path == tmp_path / "chosen.db"
+        monkeypatch.setenv(config_module.ENV_EMBEDDER, "../../elsewhere")
+        assert ServerConfig.from_env().db_path.parent == default.parent  # one plain name
+
+    def test_two_presets_on_one_root_keep_both_indexes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        presets = {"embeddinggemma": 768, "bge-small": 384}
+        for preset, dimension in presets.items():
+            monkeypatch.setenv(config_module.ENV_EMBEDDER, preset)
+            service = MarkdownMemoryService(ServerConfig.from_env(), FakeEmbedder(dimension))
+            try:
+                service.index_directory()
+            finally:
+                service.close()
+        for preset, dimension in presets.items():  # each still finds its own index
+            monkeypatch.setenv(config_module.ENV_EMBEDDER, preset)
+            service = MarkdownMemoryService(ServerConfig.from_env(), FakeEmbedder(dimension))
+            try:
+                assert [Path(d.file_path).name for d in service.list_documents()] == ["guide.md"]
+            finally:
+                service.close()
 
 
 class TestARetargetedDocsSymlinkStrandsNothing:

@@ -242,8 +242,8 @@ def _forget_weights_without_vectors(conn: sqlite3.Connection) -> None:
     """Drop the weights metadata once the vectors it describes are gone.
 
     Which weights produced the vectors is a fact about the vectors, so it belongs to the
-    same transaction that removes them - a purge of the last document, a rebuild for a new
-    vector size, a discard for a changed model. Kept behind, it would have the next run
+    same transaction that removes them - a purge of the last document, a discard for a
+    changed model. Kept behind, it would have the next run
     compare a new model against the revision of a model whose output no longer exists, and
     have search rank on keywords alone over an index with nothing wrong with it.
 
@@ -302,7 +302,11 @@ class Database:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise DatabaseError(f"Cannot create database directory {self._path.parent}") from exc
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            self.close()  # a refused open must not hold the file it refused
+            raise
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -446,12 +450,18 @@ class Database:
                 f"Database schema v{version} is newer than this build supports "
                 f"(v{SCHEMA_VERSION}); upgrade markdown-memory."
             )
+        if version >= 1:
+            self._refuse_another_dimension(conn)
         if version < SCHEMA_VERSION:
             applied: list[int] = []
             with self.transaction() as tx:
                 # Re-check under the write lock: another process starting at the same
                 # moment may have migrated the schema while this one waited for it.
                 current = int(tx.execute("PRAGMA user_version").fetchone()[0])
+                if current >= 1:
+                    # And it may have been another preset: two clients sharing one new
+                    # --db both saw an empty file, and the first to get here chose its size.
+                    self._refuse_another_dimension(tx)
                 if current < 1:
                     for statement in _schema_v1(self._embedding_dim):
                         tx.execute(statement)
@@ -534,9 +544,6 @@ class Database:
             if applied:
                 logger.info("Applied schema migration(s) %s at %s", applied, self._path)
         self._seed_section_ids()
-        stored_dim = self.get_meta("embedding_dim")
-        if stored_dim is not None and int(stored_dim) != self._embedding_dim:
-            self._rebuild_for_dimension(int(stored_dim))
 
     def _seed_section_ids(self) -> None:
         """Give a database from an earlier release its section-id high-water mark.
@@ -556,40 +563,32 @@ class Database:
                 (_SECTION_ID_META_KEY,),
             )
 
-    def _rebuild_for_dimension(self, stored_dim: int) -> None:
-        """Re-create the vector tables for a model with a different output size.
+    def _refuse_another_dimension(self, conn: sqlite3.Connection) -> None:
+        """Stop, before anything is written, when the index holds vectors of another size.
 
-        The index is a cache of the Markdown files: vectors of another dimensionality
-        are useless, so everything is dropped and the next ``index_directory`` rebuilds it.
+        Opening used to discard such an index and rebuild it for the new size, and opening
+        is all a search does - so a stray `MARKDOWN_MEMORY_EMBEDDER`, or a second client
+        configured with the other preset, cost every root in the file its index (#82). The
+        index is a cache, but rebuilding it is minutes to hours of embedding, and that is
+        for the person to decide: the message says how. This runs before the schema
+        migrations, because one of them deletes documents too, and "nothing was changed"
+        has to be true.
         """
-        logger.warning(
-            "Embedding size changed (%d -> %d): discarding the index at %s; re-run "
-            "index_directory to rebuild it",
-            stored_dim,
-            self._embedding_dim,
-            self._path,
+        try:
+            stored = conn.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()
+            if stored is None or int(stored[0]) == self._embedding_dim:
+                return
+            model = conn.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"Cannot read the index's vector size: {exc}") from exc
+        built_by = f"built by {model[0]}" if model else "built by an unrecorded model"
+        raise DatabaseError(
+            f"{self._path} holds an index of {stored[0]}-dimensional vectors ({built_by}), but "
+            f"the configured embedder produces {self._embedding_dim}. Nothing was changed. "
+            f"Point --db / MARKDOWN_MEMORY_DB at another file, or delete {self._path} with its "
+            "-wal and -shm files while no markdown-memory process uses it; the next run "
+            "rebuilds it from the Markdown files."
         )
-        with self.transaction() as tx:
-            dropped = tx.execute("DELETE FROM documents").rowcount
-            _forget_weights_without_vectors(tx)
-            # Every root's documents are gone, including roots this process never looked
-            # at; a certificate that survived would vouch for an empty tree.
-            self.revoke_coverage(tx)
-            if dropped:
-                _add_notice(
-                    tx,
-                    f"The embedding size changed ({stored_dim} -> {self._embedding_dim} "
-                    f"dimensions): discarded all {dropped} previously indexed documents from "
-                    "every directory. Re-run index_directory for each documentation root.",
-                )
-            tx.execute("DROP TABLE sections_vec")
-            tx.execute("DROP TABLE units_vec")
-            for statement in _vector_tables(self._embedding_dim):
-                tx.execute(statement)
-            tx.execute(
-                "UPDATE meta SET value = ? WHERE key = 'embedding_dim'",
-                (str(self._embedding_dim),),
-            )
 
     # ------------------------------------------------------------------ meta / pragmas
 
@@ -720,8 +719,8 @@ class Database:
     def revoke_coverage(self, conn: sqlite3.Connection | None = None) -> None:
         """Nothing is vouched for any more - the index itself was discarded.
 
-        A model or dimension change empties every document in the database, including
-        roots this process never looked at. A certificate that outlives its subject is
+        A model change that cannot name its weights empties every document in the database,
+        including roots this process never looked at. A certificate that outlives its subject is
         worse than none: it says a tree is whole when nothing of it is left.
 
         The generation is bumped in the same breath. Revoking only settles the
@@ -1210,8 +1209,8 @@ class Database:
         """Drop the recorded weights revision: no documents, so nothing it can describe.
 
         `clear()` does this in the same transaction as the delete. This exists for every
-        other way the index empties - a purge of the last document, a rebuild for a new
-        vector size, the v1 format discard - where the rows go without going through it.
+        other way the index empties - a purge of the last document, the v1 format discard -
+        where the rows go without going through it.
         """
         with self.transaction() as conn:
             conn.execute("DELETE FROM meta WHERE key = ?", (WEIGHTS_META_KEY,))

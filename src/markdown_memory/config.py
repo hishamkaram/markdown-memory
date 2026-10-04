@@ -56,7 +56,12 @@ def _xdg_dir(variable: str, fallback: str) -> Path:
     return Path(configured) if configured else Path.home() / fallback
 
 
-def _project_database(docs_dir: Path) -> Path:
+def _safe(name: str) -> str:
+    """``name`` as one plain path component: nothing that could climb or nest directories."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", name)
+
+
+def _project_database(docs_dir: Path, embedder: str) -> Path:
     """Where one documentation root's index lives when nothing configured it.
 
     Keyed on the documentation root, never on the working directory. The working directory
@@ -71,19 +76,24 @@ def _project_database(docs_dir: Path) -> Path:
     read-only, and - on a network share - sits where SQLite's WAL cannot take the locks it
     needs. The name carries the root's own basename so a person can tell the indexes apart,
     and a digest of its resolved path so two projects called `docs` cannot collide.
+
+    Keyed on the preset too, because the presets' vectors have different sizes and a file
+    holds one size (#82): the default keeps `index.db`, which is where every index lived
+    before, and any other preset gets `index-<preset>.db` beside it. Two clients configured
+    with different presets then keep an index each instead of fighting over one.
     """
     try:
         resolved = docs_dir.expanduser().resolve()
     except (OSError, RuntimeError):  # symlink loop, or a path the OS will not resolve
         resolved = docs_dir.expanduser().absolute()
     digest = hashlib.sha256(os.fsencode(str(resolved))).hexdigest()[:12]
-    label = re.sub(r"[^A-Za-z0-9_.-]", "-", resolved.name) or "root"
+    label = _safe(resolved.name) or "root"
     return (
         _xdg_dir("XDG_DATA_HOME", ".local/share")
         / "markdown-memory"
         / "projects"
         / f"{label}-{digest}"
-        / "index.db"
+        / ("index.db" if embedder == DEFAULT_EMBEDDER else f"index-{_safe(embedder)}.db")
     )
 
 
@@ -115,14 +125,17 @@ class ServerConfig:
         db_path = _configured_path(ENV_DB_PATH, root)
         docs_dir = _configured_path(ENV_DOCS_DIR, root)
         model_cache = _configured_path(ENV_MODEL_CACHE, root)
+        embedder = os.environ.get(ENV_EMBEDDER, "").strip() or DEFAULT_EMBEDDER
         return cls(
             # One index per documentation root, rather than one for the whole machine.
             # Isolation should not depend on the user having set an environment variable.
             # The model cache below stays shared on purpose: 218 MB of read-only weights,
             # identical everywhere, and copying it per project would be pure waste.
-            db_path=(db_path if db_path else _project_database(docs_dir if docs_dir else root)),
+            db_path=(
+                db_path if db_path else _project_database(docs_dir if docs_dir else root, embedder)
+            ),
             docs_dir=docs_dir if docs_dir else root,
-            embedder=os.environ.get(ENV_EMBEDDER, "").strip() or DEFAULT_EMBEDDER,
+            embedder=embedder,
             model_cache_dir=(
                 model_cache
                 if model_cache
@@ -163,12 +176,17 @@ def resolve_config(
     base = ServerConfig.from_env()
     root = docs_dir.expanduser() if docs_dir else base.docs_dir
     configured_db = _configured_path(ENV_DB_PATH, _project_root())
+    preset = embedder or base.embedder
     return ServerConfig(
         db_path=(
-            db.expanduser() if db else configured_db if configured_db else _project_database(root)
+            db.expanduser()
+            if db
+            else configured_db
+            if configured_db
+            else _project_database(root, preset)
         ),
         docs_dir=root,
-        embedder=embedder or base.embedder,
+        embedder=preset,
         model_cache_dir=base.model_cache_dir,
         exclude=tuple(exclude) or base.exclude,
         index_workers=base.index_workers,
@@ -187,7 +205,7 @@ def tree_database(config: ServerConfig, docs_dir: Path) -> Path:
     where indexes may live - a mounted volume, a writable directory - so the tree's goes
     beside it, named after the tree the way the default is.
     """
-    default = _project_database(docs_dir)
+    default = _project_database(docs_dir, config.embedder)
     if not config.db_explicit:
         return default
     configured = config.db_path

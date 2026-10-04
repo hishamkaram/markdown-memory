@@ -19,16 +19,15 @@ uv run python scripts/reindex_docs.py <directory> --force
   `CLAUDE_PROJECT_DIR`, else the current directory.
 - `--db PATH` targets a specific database. Without it the script resolves the same way the
   server does: `MARKDOWN_MEMORY_DB` if it is set, else the index keyed on the directory
-  being re-indexed (`$XDG_DATA_HOME/markdown-memory/projects/<name>-<digest>/index.db`).
+  being re-indexed (`$XDG_DATA_HOME/markdown-memory/projects/<name>-<digest>/index.db`, or
+  `index-bge-small.db` for that preset).
   That keying is what makes this verify the index the server actually searches; it used to
   take the database from the environment's root and silently re-index one project into
   another's.
-- `--embedder {embeddinggemma,bge-small}` must match the server's. **Opening a database
-  with the other embedder is destructive**: the vector size differs, so the whole index -
-  every directory, not just this one - is discarded on open and must be rebuilt. The
-  summary then carries a `NOTE ... discarded all N previously indexed documents`; repeat
-  that to the user and re-index the other roots. Confirm the embedder before running
-  against a database you did not create.
+- `--embedder {embeddinggemma,bge-small}` must match the server's. Each preset has its own
+  default database, so the default path never mixes them. A `--db` built by the other
+  preset is refused with "holds an index of N-dimensional vectors" and left unchanged:
+  report that to the user rather than deleting the file yourself.
 - Without `--force` it is a normal incremental run followed by the same checks.
 
 Only documents under `<directory>` are dropped; other indexed directories are untouched.

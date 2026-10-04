@@ -817,7 +817,7 @@ def test_a_document_whose_prose_becomes_headings_leaves_no_provenance_behind(
 def test_purging_the_last_document_forgets_what_its_vectors_came_from(
     db: Database, one_document: Path
 ) -> None:
-    """`delete_documents` and the rebuild for a new vector size empty the index without
+    """`delete_documents` empties the index without
 
     going through `clear()`. The revision they left behind described vectors that were
     gone, and search - which asks the database, not an indexing run - then ranked on
@@ -953,7 +953,7 @@ def test_emptying_the_index_clears_a_mismatch_recorded_against_what_was_in_it(
     assert db.get_meta("embedding_weights_mismatch") is not None
 
     # Every path that empties the index without going through `clear()` - a purge of the
-    # last document, a rebuild for a new vector size, the old-format discard - used to
+    # last document, the old-format discard - used to
     # leave the flag behind, describing vectors that no longer exist, so the rebuilt index
     # stayed unverified and keyword-only for good.
     db.delete_documents([str(one_document / "README.md")])
@@ -1129,9 +1129,9 @@ def test_the_weights_are_recorded_only_for_vectors_every_one_of_which_they_embed
 def test_emptying_the_index_any_other_way_also_forgets_the_revision(
     db: Database, one_document: Path
 ) -> None:
-    """`clear()` is not the only way the rows go: a purge of the last document, a rebuild
+    """`clear()` is not the only way the rows go: a purge of the last document and the
 
-    for a new vector size and the old-format discard all empty it too. A revision left
+    old-format discard both empty it too. A revision left
     behind by any of them makes every later run report a mismatch that is not real.
     """
     Indexer(db, _PinnedWeights("a" * 40)).index_directory(one_document)
