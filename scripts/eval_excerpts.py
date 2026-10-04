@@ -115,7 +115,7 @@ def _relative(file_path: str, root: str) -> str:
 def rankings(service: MarkdownMemoryService, queries: Mapping[str, Any]) -> list[str]:
     """One sorted-key JSON line per query: what was ranked, in order, and the keyword verdict."""
     lines: list[str] = []
-    for split in (name for name in ("dev", "held_out", "sealed") if name in queries):
+    for split in (name for name, cases in queries.items() if isinstance(cases, dict)):
         for kind, index, case in _cases(queries, split, (*KINDS, "no_answer")):
             page = service.search_page(str(case["query"]), RANKING_LIMIT)
             record = {
@@ -492,7 +492,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = indexed(name)
         command.add_argument("--queries", type=Path, help="a query file other than the corpus's")
         if name == "build":
-            command.add_argument("--split", required=True, choices=("dev", "held_out", "sealed"))
+            command.add_argument(
+                "--split", required=True, help="dev, held_out, or a split --queries names"
+            )
         command.add_argument("out", type=Path)
     indexed("latency").add_argument("--rounds", type=int, default=10)
     commands.add_parser("prompt")
