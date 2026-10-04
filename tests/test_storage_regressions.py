@@ -554,6 +554,8 @@ class TestNoticesSurviveAnAbortedRun:
             assert len(report.notes) == 1
             assert "Embedding model changed (old -> new)" in report.notes[0]
             assert "discarded all 2 previously indexed documents" in report.notes[0]
+            again = Indexer(database, FakeEmbedder(model_name="new")).index_directory(first)
+            assert again.notes == ()  # told once
 
     def test_notice_added_after_a_partial_dismissal_gets_a_fresh_key(
         self, db: Database, fake_embedder: FakeEmbedder
