@@ -1111,8 +1111,9 @@ class TestTheExcerptWindow:
         assert self.shown(self.PARAGRAPHS, 4) == paragraphs(3, 4, 5)
 
     def test_three_passages_or_fewer_are_sent_whole(self) -> None:
-        # The window covers a short section wherever it is anchored.
-        assert self.shown(_section("One.", "Two.", "Three."), 0) is None
+        # One block before the anchor leaves the first of three out when the third is anchored.
+        for anchor in range(3):
+            assert self.shown(_section("One.", "Two.", "Three."), anchor) is None
 
     def test_a_table_row_brings_its_header_and_delimiter(self) -> None:
         rows = "\n".join(f"| r{n} | v{n} |" for n in range(8))

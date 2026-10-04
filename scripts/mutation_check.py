@@ -3306,9 +3306,16 @@ MUTATIONS = (
     Mutation(
         name="excerpt: cut by a passage that has no lines",
         module="search.py",
-        old="    if any(span is None for span in spans):\n        return None",
-        new="    if False:\n        return None",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if len(passages) <= 3:",
         tests="test_a_passage_without_lines_sends_the_section_whole",
+    ),
+    Mutation(
+        name="excerpt: cut a section of three passages",
+        module="search.py",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if any(span is None for span in spans):",
+        tests="test_three_passages_or_fewer_are_sent_whole",
     ),
     Mutation(
         name="excerpt: show a table row without its header",

@@ -338,8 +338,9 @@ def excerpt_lines(content: str, passages: Sequence[Passage], anchor: int) -> tup
     the parameter, the rest of the syntax - follows it (#76). The pieces of a long block are one
     block, and so is a list, whose items rarely stand without the sentence that introduces it.
     A table row brings its table's header with it, contiguously.
-    None whenever the excerpt would not be safe or would not be smaller: a window covering
-    every passage - which a short section always is - a block without lines, a fence left open.
+    None whenever the excerpt would not be safe or would not be smaller: three passages or fewer
+    (the window is lopsided, so it can leave out the first of three), a window covering every
+    passage, a block without lines, a fence left open.
     """
     keys = [passage.listing or passage.lines for passage in passages]
     starts = [i for i in range(len(keys)) if i == 0 or keys[i] != keys[i - 1]]
@@ -348,7 +349,7 @@ def excerpt_lines(content: str, passages: Sequence[Passage], anchor: int) -> tup
     low, high = max(0, at - BLOCKS_BEFORE), min(len(starts) - 1, at + BLOCKS_AFTER)
     window = passages[starts[low] : ends[high]]
     spans = [passage.lines for passage in window]
-    if any(span is None for span in spans):
+    if len(passages) <= 3 or any(span is None for span in spans):
         return None
     first = min(span[0] for span in spans if span is not None)
     end = max(span[1] for span in spans if span is not None)
