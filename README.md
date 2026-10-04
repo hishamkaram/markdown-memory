@@ -6,35 +6,38 @@ section that answers it.**
 Ask an agent a question about your docs and it opens the files that might answer it, whole.
 Most of what lands in its context is about something else, and the part you wanted competes
 with it. markdown-memory indexes your documentation by heading, so the same question comes
-back as the section that answers it, quoted verbatim, with pointers to the next few.
+back as the section that answers it - or, when that section is long, the passage that
+matched and its neighbours - quoted verbatim, with pointers to the next few.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 18,508
+       alt="One question asked of four documentation files. Reading them whole costs 19,349
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
-            vectors, fuses the two, and returns the section that answers in full, 407
-            tokens, with four pointers to the rest.">
+            vectors, fuses the two, and returns the passage that answers, 275 tokens of a
+            407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 18,508 tokens in all:
+`docs/evaluation-protocol.md`, 19,349 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
+           excerpt: the passage that matched and the three after it come back (275 tok)
   712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  666 tok  README.md  markdown-memory
-  738 tok  CLAUDE.md  markdown-memory > Commands
-  383 tok  README.md  markdown-memory > The embedding model > What is checked before the model is loaded
+  735 tok  README.md  markdown-memory
+  268 tok  README.md  markdown-memory > The embedding model > When it goes wrong
+  119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**One section in full - 407 tokens - instead of 18,508**: the one that answers, first. The
-other four come back as pointers - where each section is, what reading it costs, and the
-passage that matched - so when the first is not the answer, one `read_section` fetches the
-one that is.
+**275 tokens instead of 19,349**: the passage that answers and the three after it, verbatim,
+marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
+not enough. The other four come back as pointers - where each section is, what reading it
+costs, and the passage that matched - so when the first is not the answer, one
+`read_section` fetches the one that is.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
 protocol agents use to call tools - and it runs entirely on your machine: parsing with
@@ -314,13 +317,13 @@ Query latency is not in the table on purpose: it swings by 2-3x with what else t
 is doing, so the baseline records it as informational and so should you.
 
 The same run reports what the default `search_docs` call costs: the estimated tokens of the
-text block the MCP server actually sends (one section in full, pointers to the rest and
-`index_status`), beside
+text block the MCP server actually sends (the top hit - its section in full, or an excerpt
+of it - pointers to the rest and `index_status`), beside
 the section that answers each query, as a median, a p95 and a median ratio per set
 (`--show-costs` lists every query). It is informational - it never gates and never enters
-the baseline - and it depends on where the repository is checked out, since every hit
-carries its absolute path, so compare two runs from the same checkout. On this corpus the
-default call costs a median of about 470-520 tokens against answering sections of
+the baseline. Paths are sent relative to the documentation root, so the figure no longer depends
+on where the repository is checked out. On this corpus the
+default call costs a median of about 380-430 tokens against answering sections of
 roughly 50-80; an identifier lookup that abstains costs about 140, its `keyword_message`
 included.
 
@@ -373,7 +376,7 @@ the revision is pinned. See [License](#license) for what that means for you.
 | `list_documents(directory="", cwd="")` | `{documents, index_status}`: indexed paths, titles and section counts, and whether a full index run vouches for them |
 | `get_document_outline(file_path, cwd="")` | Hierarchical TOC with line ranges and token estimates |
 | `read_section(file_path, heading_path, include_subsections=False, cwd="")` | Verbatim text of one section |
-| `search_docs(query, limit=5, cwd="")` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content`, the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, a `matched_passage` preview of the passage that won the vector ranking, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
+| `search_docs(query, limit=5, cwd="")` | `{results, keyword_match, index_status}` (plus `keyword_message` unless matched): BM25 + passage-level vector search fused with Reciprocal Rank Fusion (k = 60); the first hit carries its section's `content` - or, marked `excerpt: true`, the passage that matched and its neighbours, verbatim, with `lines` naming them and `tokens` still the whole section's - the rest are pointers (`file_path`, `heading_path`, `lines`, `tokens`, a `matched_passage` preview of the passage that won the vector ranking, and for a `(Part n)` a `part_preview` of how it begins) for `read_section`; every `file_path` is relative to `index_status.root` (absolute when another worktree answered); `keyword_match` says whether keyword search found the query's terms (`no_match`: no indexed section contains them, so a query of identifiers alone returns no results and any other query's hits are only semantic neighbours); and `index_status` says whether the tree searched is known to be whole |
 
 Every result is one text block, sent once: compact JSON from `search_docs`,
 `list_documents` and `get_document_outline`, the raw text from `read_section` and
@@ -382,10 +385,31 @@ Every result is one text block, sent once: compact JSON from `search_docs`,
 would otherwise pay for it twice. The first hit of `search_docs` is a pointer plus its
 `content`, nothing that ranks it.
 
+That `content` is the whole section unless the hit says `excerpt: true`. Then it is the block
+that matched, the block before it and up to three after it - the answer to a question usually
+follows the passage that states it - as contiguous lines of the stored section: a list counts
+as one block, so it keeps the sentence that introduces it; a table keeps its header; a code
+fence or HTML block is never cut; and `lines` names exactly the lines sent. `tokens` stays what
+the whole section costs, which is what `read_section(file_path, heading_path)` returns when the
+excerpt is not enough. Anything that cannot be shown safe comes back whole instead: a section
+of three passages or fewer, or short enough for the window to cover it all, an excerpt that
+would not be smaller, a query with no word to anchor on, a section whose heading names
+everything the query asks for, an identifier lookup that only the heading answers, a part split
+from inside a block, or an index whose stored passages no longer match the parser.
+
+The excerpt was measured once, on 150 queries over `corpus_v2` written for the purpose and never
+used to tune it (`scripts/eval_excerpts.py`). Three judges - Codex, Gemini and Claude, each
+alone - first marked which top hits answer their query when sent whole (127 of 150), then
+whether the excerpt still does, by majority: it kept the answer in 124 of those 127 (97.6%,
+one-sided 95% lower bound 94.2%), and a call cost 83.8% of the whole-section call (bootstrap
+upper bound 87.0%), counting the `read_section` an agent makes when the excerpt falls short.
+
 Sections are addressed by breadcrumb: `Root > Child > Subchild`. Oversized sections
 (> ~800 tokens) are stored as `Root > Child (Part 1)`, `(Part 2)`, ...; reading the base
 path reassembles them byte-for-byte. `file_path` may be absolute, relative to the docs
-root, or any unique path suffix. `heading_path` is matched exactly first, then ignoring
+root (the form `search_docs` and `list_documents` return), relative to `cwd`, or any unique
+path suffix; when a relative path names an indexed document under the docs root, that one
+wins. `heading_path` is matched exactly first, then ignoring
 spacing around `>`, then ignoring case, then as a trailing fragment (`Child > Subchild`
 or just the title); an ambiguous request lists the exact candidates.
 
@@ -523,7 +547,8 @@ a server could learn where its client is, are deprecated by the 2026-07-28 speci
 
 Which tree a path is in is asked of git (`git rev-parse --show-toplevel --git-common-dir`),
 never worked out by reading `.git` files. A path the call names decides before `cwd`, so a
-pointer a worktree search returned is read from that worktree, and indexing a worktree never
+pointer a worktree search returned is read from that worktree - which is why a worktree's
+answers keep absolute paths, where the configured root's are relative to it - and indexing a worktree never
 writes into the configured root's database. Another tree's index is built in the background
 from the first search that names it, like the root's, and starts warm: a passage whose embedded text is
 identical to one the configured root already holds, under the same weights, reuses that

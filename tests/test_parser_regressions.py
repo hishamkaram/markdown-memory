@@ -607,3 +607,140 @@ class TestLongBlocksKeepTheirTail:
         )  # fmt: skip
         embedded = [text for batch in fake_embedder.document_calls for text in batch]
         assert any("marker-23" in text for text in embedded), "the tail never reached the embedder"
+
+
+class TestPassagesKeepTheirCut:
+    """The span-aware passage core (#76) must cut every passage exactly as before.
+
+    Stored passage vectors are only valid while `extract_units` returns what it returned
+    when they were embedded. The digests below were computed with the parser as it stood
+    before the span core existed (0.5.1), so they are an oracle independent of the new code:
+    every section path, line range, section text and passage of both eval corpora.
+    """
+
+    EVAL_DATA = Path(__file__).parent.parent / "scripts" / "eval_data"
+
+    @pytest.mark.parametrize(
+        ("corpus", "digest"),
+        [
+            ("corpus", "50b7c677edb3375933837947ea72a12a0fad92caca57a612454208942da2335b"),
+            ("corpus_v2", "65eebdc8d1133b3f6e5646fcee243648a5abeb70b4e5a93c38d7142e7ccd7507"),
+        ],
+    )
+    def test_both_eval_corpora_cut_into_the_same_passages(self, corpus: str, digest: str) -> None:
+        import eval_cache
+
+        assert eval_cache.parse_fingerprint(self.EVAL_DATA / corpus) == digest
+
+
+class TestPassageLines:
+    """`MarkdownParser.passages` (#76): each passage with the lines of the text that hold it."""
+
+    TEXT = "\n".join(
+        [
+            "## S",
+            "",
+            "Intro para",
+            "two lines.",
+            "",
+            "| A | B |",
+            "| - | - |",
+            "| 1 | 2 |",
+            "| 3 | 4 |",
+            "",
+            "- item one",
+            "  - nested",
+            "- item two",
+            "",
+            "> quoted para",
+            ">",
+            "> second quote",
+            "",
+            "```py",
+            "code",
+            "```",
+            "",
+            "<div>",
+            "html",
+            "</div>",
+        ]
+    )
+
+    def lines(self, text: str) -> list[tuple[str, list[str], int | None]]:
+        source = text.split("\n")
+        shown = []
+        for passage in MarkdownParser().passages(text, skip_heading=True):
+            assert passage.lines is not None
+            first, end = passage.lines
+            shown.append((passage.text, source[first:end], passage.table))
+        return shown
+
+    def test_every_kind_of_block_names_the_lines_it_was_cut_from(self) -> None:
+        assert self.lines(self.TEXT) == [
+            ("Intro para two lines.", ["Intro para", "two lines."], None),
+            ("A: 1; B: 2", ["| 1 | 2 |"], 5),
+            ("A: 3; B: 4", ["| 3 | 4 |"], 5),
+            ("item one nested", ["- item one", "  - nested"], None),
+            ("item two", ["- item two", ""], None),
+            ("quoted para", ["> quoted para"], None),
+            ("second quote", ["> second quote"], None),
+            ("code", ["```py", "code", "```"], None),
+            ("html", ["<div>", "html", "</div>"], None),
+        ]
+
+    def test_the_texts_are_what_extract_units_returns(self) -> None:
+        parser = MarkdownParser()
+        texts = tuple(passage.text for passage in parser.passages(self.TEXT, skip_heading=True))
+        assert texts == parser.extract_units(self.TEXT, skip_heading=True)
+
+    def test_every_window_of_a_long_block_keeps_the_whole_block(self) -> None:
+        sentences = " ".join(f"Sentence number {n} says something." for n in range(60))
+        windows = self.lines(f"## Notes\n\n{sentences}\n")
+        assert len(windows) > 1
+        assert {tuple(lines) for _, lines, _ in windows} == {(sentences,)}
+
+    def test_a_header_only_table_points_at_its_header(self) -> None:
+        assert self.lines("## T\n\n| A | B |\n| - | - |\n") == [
+            ("A; B", ["| A | B |", "| - | - |"], 2)
+        ]
+
+
+class TestBlockCuts:
+    """`MarkdownParser.cuts_a_block`: may a part boundary at this offset be excerpted from?"""
+
+    def test_a_cut_between_blocks_or_among_blank_lines_is_clean(self) -> None:
+        text = "First para.\n\n\nSecond para.\n"
+        parser = MarkdownParser()
+        assert not parser.cuts_a_block(text, [text.index("Second")])
+        assert not parser.cuts_a_block(text, [len("First para.")])
+        assert not parser.cuts_a_block(text, [len("First para.\n")])
+
+    def test_a_cut_inside_a_fence_a_table_or_a_list_is_not(self) -> None:
+        parser = MarkdownParser()
+        fence = "```\na\n\nb\n```\n"
+        table = "| A |\n| - |\n| 1 |\n| 2 |\n"
+        loose = "- one\n\n- two\n"
+        assert parser.cuts_a_block(fence, [fence.index("b")])
+        assert parser.cuts_a_block(table, [table.index("| 2")])
+        assert parser.cuts_a_block(loose, [loose.index("- two")])
+
+    def test_a_cut_inside_one_long_line_is_not(self) -> None:
+        line = "<div>" + "word " * 50 + "</div>"
+        assert MarkdownParser().cuts_a_block(line, [line.index("word", 100)])
+
+    def test_a_nested_block_is_covered_by_its_top_level_ancestor(self) -> None:
+        text = "> - item\n>   ```\n>   a\n>\n>   b\n>   ```\n"
+        assert MarkdownParser().cuts_a_block(text, [text.index(">   b")])
+
+    def test_an_html_block_with_a_blank_line_is_one_block(self) -> None:
+        text = "<pre>\nline\n\nmore\n</pre>\n"
+        assert MarkdownParser().cuts_a_block(text, [text.index("more")])
+
+
+class TestOpenFences:
+    def test_an_unclosed_fence_is_seen(self) -> None:
+        from markdown_memory.parser import ends_inside_fence
+
+        assert ends_inside_fence("text\n```py\ncode")
+        assert not ends_inside_fence("text\n```py\ncode\n```")
+        assert not ends_inside_fence("````\n```\ninner\n```\n````")

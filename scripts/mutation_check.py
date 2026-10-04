@@ -1093,13 +1093,114 @@ MUTATIONS = (
         tests="test_a_cache_built_from_another_corpus_is_refused",
     ),
     Mutation(
+        name="excerpt harness: count a split verdict as a yes",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='    return 2 * sum(judge[item_id] == "yes" for judge in judges) > len(judges)',
+        new='    return 2 * sum(judge[item_id] == "yes" for judge in judges) >= len(judges)',
+        tests="test_a_verdict_is_a_strict_majority_and_a_split_is_not_a_yes",
+    ),
+    Mutation(
+        name="excerpt harness: pass a small sample on its point estimate alone",
+        module="eval_excerpts.py",
+        area="scripts",
+        old="            passed &= retention >= FLOOR_RETENTION and bound >= FLOOR_RETENTION_BOUND",
+        new="            passed &= retention >= FLOOR_RETENTION",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
+    ),
+    Mutation(
+        name="excerpt harness: score items outside the frozen denominator",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='        if key["id"] in frozen:',
+        new="        if True:",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
+    ),
+    Mutation(
+        name="excerpt harness: let a lost excerpt cost nothing more",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='    cost = key["payload_tokens"] + (0 if kept else key["read_tokens"])',
+        new='    cost = key["payload_tokens"]',
+        tests="test_a_lost_excerpt_costs_the_read_and_a_whole_section_is_kept_as_sent",
+    ),
+    Mutation(
+        name="excerpt harness: score a top hit that moved to another section",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            '        if key["id"] in set(frozen["eligible"]) and clusters.get(key["id"])'
+            ' != key["cluster"]'
+        ),
+        new='        if key["id"] in set(frozen["eligible"]) and False',
+        tests="test_a_build_that_drifted_from_the_frozen_denominator_is_not_scored",
+    ),
+    Mutation(
+        name="excerpt harness: price a baseline that names another top hit",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            '        raise RuntimeError(f"{item_id}: the whole-section response'
+            ' names another top hit")'
+        ),
+        new="        pass",
+        tests="test_the_baseline_is_the_whole_section_response_for_the_same_top_hit",
+    ),
+    Mutation(
+        name="excerpt harness: gate v1, which has no sealed set",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='GATED = ("v2",)',
+        new='GATED = ("v1", "v2")',
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2",
+    ),
+    Mutation(
+        name="excerpt harness: gate the hoped-for cost instead of a material saving",
+        module="eval_excerpts.py",
+        area="scripts",
+        old="CEILING_COST_RATIO = 0.90",
+        new="CEILING_COST_RATIO = 0.80",
+        tests="test_the_gates_count_only_frozen_items_and_hold_only_on_v2 "
+        "or test_the_cost_target_is_reported_but_does_not_gate",
+    ),
+    Mutation(
+        name="excerpt: stop the window one block after the anchor again",
+        module="search.py",
+        old="BLOCKS_AFTER = 3",
+        new="BLOCKS_AFTER = 1",
+        tests="test_the_anchor_one_block_before_and_three_after",
+    ),
+    Mutation(
+        name="excerpt: leave out the block before the anchor",
+        module="search.py",
+        old="BLOCKS_BEFORE = 1",
+        new="BLOCKS_BEFORE = 0",
+        tests="test_the_anchor_one_block_before_and_three_after",
+    ),
+    Mutation(
+        name="excerpt harness: show the judges a text without the hit it came from",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='                    "hit": {"file_path": file_path, "heading_path": heading_path},\n',
+        new="",
+        tests="test_a_judge_sees_one_text_the_section_or_the_excerpt",
+    ),
+    Mutation(
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 10332),',
+        old='    ("README.md", 10926),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
+    ),
+    Mutation(
+        name="diagram: claim an excerpt the anchored passage does not give",
+        module="make_diagram.py",
+        area="scripts",
+        old="EXCERPT_ANCHOR = 0",
+        new="EXCERPT_ANCHOR = 1",
+        tests="test_the_excerpt_the_worked_example_shows_is_the_size_it_claims",
     ),
     Mutation(
         name="diagram: let a machine with no browser report a half-redrawn picture as done",
@@ -1612,8 +1713,8 @@ MUTATIONS = (
     Mutation(
         name="units: throw away everything past the character limit again",
         module="parser.py",
-        old="            for window in _windows(unit):",
-        new="            for window in [unit[:MAX_UNIT_CHARS]]:",
+        old="            for window in _windows(unit.text):",
+        new="            for window in [unit.text[:MAX_UNIT_CHARS]]:",
         tests="test_no_line_of_a_long_block_is_dropped or test_the_tail_reaches_the_embedder",
     ),
     Mutation(
@@ -2284,8 +2385,8 @@ MUTATIONS = (
     Mutation(
         name="part_preview: pay for it beside rank 1's full text",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "part_preview": self.part_preview,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "part_preview": self.part_preview,',
         tests="test_every_part_carries_its_first_passage_shortened",
     ),
     Mutation(
@@ -2547,8 +2648,8 @@ MUTATIONS = (
     Mutation(
         name="pointers: pay for the matched passage twice in the full result",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "matched_passage": self.matched_passage,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "matched_passage": self.matched_passage,',
         tests="test_best_passage_decides_and_is_reported",
     ),
     Mutation(
@@ -2584,15 +2685,15 @@ MUTATIONS = (
     Mutation(
         name="pointers: return every hit in full",
         module="server.py",
-        old="                hit.to_dict() if rank == 0 else hit.to_pointer()",
-        new="                hit.to_dict()",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_dict(), root)",
         tests="test_hits_after_the_first_are_pointers_that_read_section_follows",
     ),
     Mutation(
         name="pointers: return even the best hit as a pointer",
         module="server.py",
-        old="                hit.to_dict() if rank == 0 else hit.to_pointer()",
-        new="                hit.to_pointer()",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_pointer(), root)",
         tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
     ),
     Mutation(
@@ -2739,8 +2840,8 @@ MUTATIONS = (
     Mutation(
         name="trees: resolve a relative path without the agent's cwd",
         module="server.py",
-        old="[Path(cwd.strip()).expanduser() / path, self._config.docs_dir / path]",
-        new="[self._config.docs_dir / path]",
+        old="[Path(self._root) / path, Path(cwd.strip()).expanduser() / path]",
+        new="[Path(self._root) / path]",
         tests="test_a_relative_path_is_resolved_where_the_agent_is",
     ),
     Mutation(
@@ -3113,8 +3214,8 @@ MUTATIONS = (
     Mutation(
         name="top hit: send the ranks an agent has no use for",
         module="models.py",
-        old='            "content": self.content,',
-        new='            "content": self.content, "fts_rank": self.fts_rank,',
+        old='                "content": self.content,',
+        new='                "content": self.content, "fts_rank": self.fts_rank,',
         tests="test_search_docs_returns_sections_and_breadcrumbs",
     ),
     Mutation(
@@ -3124,6 +3225,331 @@ MUTATIONS = (
         old='            answer["index_status"]\n            == {',
         new='            True or answer["index_status"]\n            == {',
         tests="test_a_root_that_does_not_vouch_for_itself_fails_the_run",
+    ),
+    Mutation(
+        name="excerpt: let a table row lose the line its table starts on",
+        module="parser.py",
+        old='            rows.append(Passage("; ".join(labelled), row, table))',
+        new='            rows.append(Passage("; ".join(labelled), row, None))',
+        tests="test_a_table_row_brings_its_header_and_delimiter",
+    ),
+    Mutation(
+        name="excerpt: give a list item no lines",
+        module="parser.py",
+        old="            fragments, item = [], _span(token)",
+        new="            fragments, item = [], None",
+        tests="test_every_kind_of_block_names_the_lines_it_was_cut_from",
+    ),
+    Mutation(
+        name="excerpt: call no part boundary a cut through a block",
+        module="parser.py",
+        old="        return any(start < cut < end for cut in cuts for start, end in blocks)",
+        new="        return False",
+        tests=(
+            "test_a_cut_inside_a_fence_a_table_or_a_list_is_not"
+            " or test_a_part_cut_through_a_fence_is_sent_whole"
+            " or test_a_part_cut_inside_one_long_line_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: end a block on the next line's first character",
+        module="parser.py",
+        old="            (starts[token.map[0]], starts[token.map[1]] - 1)",
+        new="            (starts[token.map[0]], starts[token.map[1]])",
+        tests="test_a_cut_between_blocks_or_among_blank_lines_is_clean",
+    ),
+    Mutation(
+        name="excerpt: never see a fence left open",
+        module="parser.py",
+        old="    return open_fence is not None",
+        new="    return False",
+        tests=(
+            "test_an_unclosed_fence_is_seen or test_a_window_that_leaves_a_fence_open_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: anchor a query of stopwords",
+        module="search.py",
+        old='    if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):',
+        new="    if not terms:",
+        tests="test_a_query_of_stopwords_has_no_anchor_even_with_a_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: let backticks hide a stopword",
+        module="search.py",
+        old='    if not terms or all(_is_stopword(term.replace("`", "")) for term in terms):',
+        new="    if not terms or all(_is_stopword(term) for term in terms):",
+        tests="test_a_query_of_stopwords_has_no_anchor_even_with_a_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: anchor an identifier lookup on the vector passage",
+        module="search.py",
+        old="    if _is_identifier_lookup(terms):\n        return next(",
+        new="    if _is_identifier_lookup(terms) and ordinal is None:\n        return next(",
+        tests="test_an_identifier_lookup_is_anchored_where_the_identifier_is "
+        "or test_an_identifier_lookup_is_anchored_where_it_is_first_named",
+    ),
+    Mutation(
+        name="excerpt: fall through to the vector passage when only the heading names it",
+        module="search.py",
+        old="        return next((index for index, count in enumerate(found) if count), None)",
+        new="        return next((index for index, count in enumerate(found) if count), ordinal)",
+        tests="test_an_identifier_only_the_heading_names_gets_the_whole_section",
+    ),
+    Mutation(
+        name="excerpt: ignore the passage that won the vector ranking",
+        module="search.py",
+        old="    if ordinal is not None and 0 <= ordinal < len(passages):\n        return ordinal",
+        new="    if False:\n        return ordinal",
+        tests="test_any_other_query_is_anchored_on_the_vector_passage",
+    ),
+    Mutation(
+        name="excerpt: anchor on a passage that holds no term",
+        module="search.py",
+        old="    return found.index(best) if best else None",
+        new="    return found.index(best) if found else None",
+        tests="test_without_one_the_passage_holding_the_most_terms_lowest_first",
+    ),
+    Mutation(
+        name="excerpt: cut by a passage that has no lines",
+        module="search.py",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if len(passages) <= 3:",
+        tests="test_a_passage_without_lines_sends_the_section_whole",
+    ),
+    Mutation(
+        name="excerpt: cut a section of three passages",
+        module="search.py",
+        old="    if len(passages) <= 3 or any(span is None for span in spans):",
+        new="    if any(span is None for span in spans):",
+        tests="test_three_passages_or_fewer_are_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: show a table row without its header",
+        module="search.py",
+        old=(
+            "    first = min([first, *(passage.table for passage in window"
+            " if passage.table is not None)])"
+        ),
+        new="    first = min([first])",
+        tests="test_a_table_row_brings_its_header_and_delimiter",
+    ),
+    Mutation(
+        name="excerpt: keep the blank line markdown-it gives a list item",
+        module="search.py",
+        old="        end -= 1  # markdown-it counts the blank line after a list item as part of it",
+        new="        break",
+        tests="test_a_list_item_does_not_bring_the_blank_line_after_it",
+    ),
+    Mutation(
+        name="excerpt: cut a window that covers every passage",
+        module="search.py",
+        old=(
+            "    if all(p.lines is not None and first <= p.lines[0] and p.lines[1] <= end"
+            " for p in passages):\n        return None"
+        ),
+        new=(
+            "    if False and all(p.lines is not None and first <= p.lines[0]"
+            " and p.lines[1] <= end for p in passages):\n        return None"
+        ),
+        tests="test_a_window_that_grows_over_every_passage_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: send a window no smaller than its section",
+        module="search.py",
+        old="    if ends_inside_fence(text) or estimate_tokens(text) >= estimate_tokens(content):",
+        new="    if ends_inside_fence(text):",
+        tests="test_a_window_no_smaller_than_the_section_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: trust passages that differ from the stored ones",
+        module="search.py",
+        old="                if [passage.text for passage in cut] == stored:",
+        new="                if True:",
+        tests="test_passages_that_differ_from_the_stored_ones_send_the_section",
+    ),
+    Mutation(
+        name="excerpt: cut a section at the passage cap",
+        module="search.py",
+        old="            if not stored or len(stored) >= MAX_UNITS_PER_SECTION:",
+        new="            if not stored:",
+        tests="test_a_section_at_the_passage_cap_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: cut a part without looking at the section it came from",
+        module="search.py",
+        old=(
+            "            if passages is None or (section.part_index"
+            " and self._cut_through(section, parser)):"
+        ),
+        new="            if passages is None:",
+        tests=(
+            "test_a_part_cut_through_a_fence_is_sent_whole"
+            " or test_a_part_cut_inside_one_long_line_is_sent_whole"
+        ),
+    ),
+    Mutation(
+        name="excerpt: let a failure while cutting fail the search",
+        module="search.py",
+        old=(
+            "        except Exception:  # an excerpt is an optimisation:"
+            " whatever fails sends the section"
+        ),
+        new="        except ValueError:  # narrowed",
+        tests="test_a_failure_while_cutting_sends_the_section",
+        fails_with="RuntimeError",
+    ),
+    Mutation(
+        name="excerpt: lose which passage of its section won the vector ranking",
+        module="search.py",
+        old="                passages.setdefault(section_id, (ordinal, passage))",
+        new="                passages.setdefault(section_id, (0, passage))",
+        tests="test_a_section_is_ranked_by_its_closest_passage_not_its_average",
+    ),
+    Mutation(
+        name="excerpt: send the whole section's line range with the excerpt",
+        module="models.py",
+        old='            "lines": f"{self.excerpt.start_line}-{self.excerpt.end_line}",',
+        new='            "lines": f"{self.start_line}-{self.end_line}",',
+        tests="test_the_excerpt_is_verbatim_lines_of_the_file",
+    ),
+    Mutation(
+        name="excerpt: price the excerpt instead of what read_section costs",
+        module="models.py",
+        old=('            "tokens": estimate_tokens(self.content),\n            "excerpt": True,'),
+        new=(
+            '            "tokens": estimate_tokens(self.excerpt.text),\n'
+            '            "excerpt": True,'
+        ),
+        tests="test_the_excerpt_is_verbatim_lines_of_the_file",
+    ),
+    Mutation(
+        name="excerpt: count each list item as a block of its own",
+        module="search.py",
+        old="    keys = [passage.listing or passage.lines for passage in passages]",
+        new="    keys = [passage.lines for passage in passages]",
+        tests="test_a_list_is_one_block_with_the_sentence_that_introduces_it",
+    ),
+    Mutation(
+        name="excerpt: let a list item forget which list it is in",
+        module="parser.py",
+        old="    listing = _span(block[0])",
+        new="    listing = None",
+        tests="test_a_list_is_one_block_with_the_sentence_that_introduces_it",
+    ),
+    Mutation(
+        name="excerpt: cut a section whose heading names the whole query",
+        module="search.py",
+        old="    if all(literal.found(heading) for literal in literals):",
+        new="    if False:",
+        tests="test_a_section_whose_heading_names_the_whole_query_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: send whole every section whose heading shares a query term",
+        module="search.py",
+        old="    if all(literal.found(heading) for literal in literals):",
+        new="    if any(literal.found(heading) for literal in literals):",
+        tests="test_a_section_whose_heading_names_the_whole_query_is_sent_whole",
+    ),
+    Mutation(
+        name="excerpt: anchor the top hit without telling it its heading",
+        module="search.py",
+        old="            anchor = select_anchor(terms, stored, ordinal, section.heading_title)",
+        new="            anchor = select_anchor(terms, stored, ordinal)",
+        tests="test_a_section_headed_by_the_identifier_looked_up_is_sent_whole",
+    ),
+    Mutation(
+        name="paths: let the agent's cwd shadow the root's document again",
+        module="server.py",
+        old="[Path(self._root) / path, Path(cwd.strip()).expanduser() / path]",
+        new="[Path(cwd.strip()).expanduser() / path, Path(self._root) / path]",
+        tests="test_the_roots_document_wins_over_a_same_named_one_in_cwd",
+    ),
+    Mutation(
+        name="paths: follow a symlink before looking the path up as spelled",
+        module="server.py",
+        old=(
+            "            document = self._db.get_document(spelled)"
+            " or self._db.get_document(resolved)"
+        ),
+        new="            document = self._db.get_document(resolved)",
+        tests="test_an_indexed_symlink_is_found_under_its_own_name",
+        # The honest outcome: the suffix lookup finds two `shared.md` and says so.
+        fails_with="mcp.server.mcpserver.exceptions.ToolError",
+    ),
+    Mutation(
+        name="paths: shorten only the pointers' paths",
+        module="server.py",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                hit.to_dict() if rank == 0 else _relative(hit.to_pointer(), root)",
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: shorten only the top hit's path",
+        module="server.py",
+        old="                _relative(hit.to_dict() if rank == 0 else hit.to_pointer(), root)",
+        new="                _relative(hit.to_dict(), root) if rank == 0 else hit.to_pointer()",
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: list documents by their absolute paths",
+        module="server.py",
+        old="                    _relative(summary.to_dict(), root)",
+        new="                    summary.to_dict()",
+        tests=(
+            "test_every_listed_path_reads_back_its_own_document_from_any_cwd"
+            " or test_a_narrowed_listing_is_still_relative_to_the_root"
+        ),
+    ),
+    Mutation(
+        name="paths: leave a listing's failures absolute",
+        module="server.py",
+        old=(
+            '                "index_status": _relative_failures('
+            "service.index_status(scope).to_dict(), root),"
+        ),
+        new='                "index_status": service.index_status(scope).to_dict(),',
+        tests="test_a_search_over_a_damaged_index_says_so_in_its_answer",
+    ),
+    Mutation(
+        name="paths: leave a search's failures absolute",
+        module="server.py",
+        old='        payload["index_status"] = _relative_failures(status.to_dict(), root)',
+        new='        payload["index_status"] = status.to_dict()',
+        tests="test_a_search_over_a_damaged_index_says_so_in_its_answer",
+    ),
+    Mutation(
+        name="paths: shorten index_status.root too",
+        module="server.py",
+        old='    return {**status, "failures": shown}',
+        new='    return {**status, "failures": shown, "root": "."}',
+        tests="test_the_tool_keeps_the_order_and_the_limit_the_service_gives_it",
+    ),
+    Mutation(
+        name="paths: shorten another work tree's paths",
+        module="server.py",
+        old="        return service.root if service is self._configured() else None",
+        new="        return service.root",
+        tests="test_a_worktree_answer_keeps_absolute_paths_that_route_without_cwd",
+    ),
+    Mutation(
+        name="paths: shorten a path that is not under the root",
+        module="server.py",
+        old=(
+            "    if root is None or not isinstance(path, str)"
+            " or not Path(path).is_relative_to(root):"
+        ),
+        new="    if root is None or not isinstance(path, str):",
+        tests="test_a_failure_outside_the_root_stays_absolute",
+        fails_with="ValueError",
+    ),
+    Mutation(
+        name="usage: read a relative hit against the project instead of the root",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old="    base = root if isinstance(root, str) and root else cwd",
+        new="    base = cwd",
+        tests="test_a_relative_hit_is_the_file_under_the_root_that_answered",
     ),
 )
 

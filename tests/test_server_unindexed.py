@@ -156,6 +156,10 @@ class TestTheReasonIsGiven:
         # Not under cwd, but under the docs root: that file is what the agent meant.
         said = (await failures(service, "gen/out.md", cwd=str(tmp_path)))[0]
         assert "left out of its index by git ignoring it" in said
+        # Not under the docs root, which is tried first (#76), but under cwd: that one.
+        write(tmp_path / "notes" / "loose.md")
+        said = (await failures(service, "notes/loose.md", cwd=str(tmp_path)))[0]
+        assert "is outside" in said and "does not exist" not in said
 
     async def test_a_link_is_judged_where_it_is_not_where_it_points(
         self, service: MarkdownMemoryService, repo: Path, tmp_path: Path

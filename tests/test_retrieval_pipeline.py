@@ -199,7 +199,8 @@ class TestUnitStorage:
         hits = db.unit_search(fake_embedder.embed_query("Doc Retries backoff doubles"), 3)
         assert hits[0][0] == ids["Retries"]
         assert hits[0][2] == "Backoff doubles each time."
-        assert [distance for _, distance, _ in hits] == sorted(d for _, d, _ in hits)
+        assert hits[0][3] == 1  # its ordinal: the second passage of its section
+        assert [distance for _, distance, _, _ in hits] == sorted(d for _, d, _, _ in hits)
         assert db.sections_with_passages(list(ids.values())) == {ids["Retries"], ids["Shutdown"]}
         assert db.sections_with_passages([]) == set()
 
@@ -212,7 +213,7 @@ class TestUnitStorage:
         assert db.count_rows("units") == db.count_rows("units_vec") == 1
         assert db.count_rows("sections_vec") == 1
         remaining = db.unit_search(fake_embedder.embed_query("retry attempts"), 10)
-        assert [passage for _, _, passage in remaining] == ["kept passage"]
+        assert [passage for _, _, passage, _ in remaining] == ["kept passage"]
 
     def test_replacing_a_document_replaces_its_passages(
         self, db: Database, fake_embedder: FakeEmbedder

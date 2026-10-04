@@ -41,14 +41,19 @@ BUDGETS = {
     "headings.py": 155,
     "indexer.py": 495,
     "model_cache.py": 173,
-    # Raised from 270 for #69: what a miss says while a fresh tree is still indexing.
-    "models.py": 285,
+    # Raised from 270 for #69: what a miss says while a fresh tree is still indexing;
+    # and from 285 for #76: the top hit's excerpt.
+    "models.py": 289,
     "parser.py": 722,
-    # Raised from 399 for #75: an identifier lookup ranks the sections that name it.
-    "search.py": 460,
+    # Raised from 399 for #75: an identifier lookup ranks the sections that name it;
+    # and from 460 for #76: the top hit as its matched passage and neighbours (a list
+    # counted as one block), and every check that decides when the whole section is sent.
+    "search.py": 568,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
-    # and for #73: every result sent once, as compact JSON text.
-    "server.py": 510,
+    # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
+    # sent relative to the root, a relative path resolved back under it first, and the
+    # agent told what an excerpt is.
+    "server.py": 526,
     "trees.py": 70,
 }
 

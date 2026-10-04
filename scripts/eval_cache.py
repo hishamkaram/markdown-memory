@@ -360,7 +360,7 @@ def check_vectors(database: Database, embedder: Embedder, probes: Sequence[Probe
         nearest = database.unit_search(vector, 1)
         if not nearest:
             raise StaleCacheError("the index holds no passage vectors")
-        _, distance, passage = nearest[0]
+        _, distance, passage, _ = nearest[0]
         if distance > VECTOR_PROBE_TOLERANCE or passage != probe.text:
             raise StaleCacheError(
                 f"stored vectors are not {embedder.model_name}'s: re-embedding a passage "

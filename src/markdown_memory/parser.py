@@ -37,9 +37,9 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
 from markdown_it.rules_block.fence import make_fence_rule
@@ -117,6 +117,26 @@ class _Block:
     start: int
     end: int
     has_fence: bool
+
+
+Span = tuple[int, int] | None  # markdown-it's `token.map`: 0-based lines, end-exclusive
+
+
+class Passage(NamedTuple):
+    """One passage, and the lines of the text it was cut from that hold it (#76).
+
+    ``lines`` is the ``token.map`` of the block the passage came from, relative to the text
+    given, or None when markdown-it left the token without a map. Every window of a long
+    block inherits the whole block's lines. ``table`` is the first line of a body row's
+    table - its header - so that a window showing the row can show the header too. ``listing``
+    is the lines of the top-level list an item belongs to: an item rarely stands without the
+    sentence that introduces its list, so a window counts the list as one block.
+    """
+
+    text: str
+    lines: Span
+    table: int | None = None
+    listing: Span = None
 
 
 class MarkdownParser:
@@ -319,8 +339,16 @@ class MarkdownParser:
         meaning without the rest of the table. ``skip_heading`` drops the section's own
         heading (its text already lives in the breadcrumb).
         """
+        return tuple(passage.text for passage in self.passages(content, skip_heading=skip_heading))
+
+    def passages(self, content: str, *, skip_heading: bool = False) -> tuple[Passage, ...]:
+        """``extract_units``, with the lines of ``content`` each passage was cut from.
+
+        One implementation for both, so the lines an excerpt is cut by (#76) are those of the
+        passages that were embedded, and a stored vector never outlives its text.
+        """
         tokens = self._tokenize(content, recover_fences=False)
-        units: list[str] = []
+        units: list[Passage] = []
         index = 0
         heading_skipped = not skip_heading
         while index < len(tokens) and len(units) < MAX_UNITS_PER_SECTION:
@@ -337,19 +365,38 @@ class MarkdownParser:
             elif token.type in {"bullet_list_open", "ordered_list_open"}:
                 units.extend(_list_items(block))
             elif token.type == "blockquote_open":
-                units.extend(_leaf_texts(block))  # one unit per quoted paragraph / code block
+                units.extend(_leaves(block))  # one unit per quoted paragraph / code block
             else:
-                units.append(" ".join(_leaf_texts(block)))
+                units.append(Passage(" ".join(_leaf_texts(block)), _span(token)))
             index = end + 1
-        passages: list[str] = []
+        passages: list[Passage] = []
         for unit in units:
-            for window in _windows(unit):
+            for window in _windows(unit.text):
                 if len(passages) >= MAX_UNITS_PER_SECTION:
                     return tuple(passages)
                 cleaned = _WHITESPACE.sub(" ", window.replace("|", " ")).strip()
                 if cleaned:
-                    passages.append(cleaned)
+                    passages.append(unit._replace(text=cleaned))
         return tuple(passages)
+
+    def cuts_a_block(self, text: str, cuts: Iterable[int]) -> bool:
+        """True when a character offset in ``cuts`` falls strictly inside a block of ``text``.
+
+        Only top-level blocks are looked at, which covers every depth: a nested block's lines
+        lie within its top-level ancestor's, so a cut through the one is a cut through the
+        other. A block covers its first character to the newline closing its last line, so a
+        cut between two blocks - or among the blank lines that separate them - is not inside
+        either. Offsets, not lines: two parts of one over-long line share that line.
+        """
+        starts = [0]
+        for line in text.split("\n"):
+            starts.append(starts[-1] + len(line) + 1)
+        blocks = [
+            (starts[token.map[0]], starts[token.map[1]] - 1)
+            for token in self._tokenize(text, recover_fences=False)
+            if token.level == 0 and token.nesting != -1 and token.map
+        ]
+        return any(start < cut < end for cut in cuts for start, end in blocks)
 
 
 # ---------------------------------------------------------------------- helpers
@@ -504,17 +551,27 @@ def _inline_text(inline: Token | None) -> str:
     return _plain_inline(inline) or UNTITLED_HEADING
 
 
-def _leaf_texts(block: Sequence[Token]) -> list[str]:
-    """Text of every leaf in ``block``, at any depth: inline runs, code and raw HTML."""
-    texts: list[str] = []
+def _span(token: Token) -> Span:
+    return (token.map[0], token.map[1]) if token.map else None
+
+
+def _leaves(block: Sequence[Token]) -> list[Passage]:
+    """Every leaf in ``block``, at any depth: inline runs, code and raw HTML, with its lines."""
+    leaves: list[Passage] = []
     for token in block:
         if token.type == "inline":
-            texts.append(_plain_inline(token))
+            leaves.append(Passage(_plain_inline(token), _span(token)))
         elif token.type in {"fence", "code_block"}:
-            texts.append(token.content)
+            leaves.append(Passage(token.content, _span(token)))
         elif token.type == "html_block":
-            texts.append(_HTML_TAG.sub(" ", _HTML_COMMENT.sub(" ", token.content)))
-    return [text for text in texts if text.strip()]
+            text = _HTML_TAG.sub(" ", _HTML_COMMENT.sub(" ", token.content))
+            leaves.append(Passage(text, _span(token)))
+    return [leaf for leaf in leaves if leaf.text.strip()]
+
+
+def _leaf_texts(block: Sequence[Token]) -> list[str]:
+    """Text of every leaf in ``block``, at any depth: inline runs, code and raw HTML."""
+    return [leaf.text for leaf in _leaves(block)]
 
 
 def _block_end(tokens: Sequence[Token], start: int) -> int:
@@ -528,21 +585,25 @@ def _block_end(tokens: Sequence[Token], start: int) -> int:
     return len(tokens) - 1
 
 
-def _table_rows(block: Sequence[Token]) -> list[str]:
+def _table_rows(block: Sequence[Token]) -> list[Passage]:
     """One unit per body row, each cell labelled with its column header.
 
     A table without body rows yields its header cells instead: they are visible text,
     and a section holding nothing else would otherwise pass for a heading-only stub.
     """
+    table = block[0].map[0] if block[0].map else None
     headers: list[str] = []
-    rows: list[str] = []
+    rows: list[Passage] = []
     cells: list[str] = []
     in_head = False
+    row: Span = None
     for position, token in enumerate(block):
         if token.type == "thead_open":
             in_head = True
         elif token.type == "thead_close":
             in_head = False
+        elif token.type == "tr_open":
+            row = _span(token)
         elif token.type in {"th_open", "td_open"}:
             text = _plain_inline(block[position + 1] if position + 1 < len(block) else None)
             (headers if in_head else cells).append(text)
@@ -552,25 +613,27 @@ def _table_rows(block: Sequence[Token]) -> list[str]:
                 for header, cell in zip(headers + [""] * len(cells), cells, strict=False)
                 if cell
             ]
-            rows.append("; ".join(labelled))
+            rows.append(Passage("; ".join(labelled), row, table))
             cells = []
     if rows:
         return rows
     header_row = "; ".join(header for header in headers if header)
-    return [header_row] if header_row else []
+    return [Passage(header_row, _span(block[0]), table)] if header_row else []
 
 
-def _list_items(block: Sequence[Token]) -> list[str]:
+def _list_items(block: Sequence[Token]) -> list[Passage]:
     """One unit per top-level list item, nested content included."""
-    items: list[str] = []
+    items: list[Passage] = []
     fragments: list[str] = []
+    item: Span = None
+    listing = _span(block[0])
     for token in block:
         if token.type == "list_item_open" and token.level == 1:
-            fragments = []
+            fragments, item = [], _span(token)
         elif token.type in {"inline", "fence", "code_block", "html_block"}:
             fragments.extend(_leaf_texts([token]))
         elif token.type == "list_item_close" and token.level == 1:
-            items.append(" ".join(fragments))
+            items.append(Passage(" ".join(fragments), item, listing=listing))
     return items
 
 
@@ -594,6 +657,19 @@ def _is_closing_fence(line: str, marker: str, max_indent: int) -> bool:
         and len(stripped) >= len(marker)
         and stripped == marker[0] * len(stripped)
     )
+
+
+def ends_inside_fence(text: str) -> bool:
+    """True when ``text`` leaves a fenced block open: an excerpt that would show it is unsafe."""
+    open_fence: tuple[int, str] | None = None
+    for line in text.split("\n"):
+        if open_fence is None:
+            opener = _opening_fence(line) if line.strip() else None
+            if opener is not None:
+                open_fence = (opener[0], opener[1])
+        elif _is_closing_fence(line, open_fence[1], open_fence[0] + _MAX_TOP_LEVEL_INDENT):
+            open_fence = None
+    return open_fence is not None
 
 
 def _opening_fence(line: str) -> tuple[int, str, str] | None:

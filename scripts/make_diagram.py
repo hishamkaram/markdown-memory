@@ -67,26 +67,32 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 10332),
-    ("CLAUDE.md", 4920),
+    ("README.md", 10926),
+    ("CLAUDE.md", 5064),
     ("evaluation-protocol.md", 1661),
-    ("AGENTS.md", 1595),
+    ("AGENTS.md", 1698),
 ]
 RIGHT_HITS = [
     (407, "What downloads, when, and where", True),
     (712, "Pre-download it, or install offline", False),
-    (666, "markdown-memory  (preamble)", False),
-    (738, "Commands  (CLAUDE.md)", False),
-    (383, "What is checked before loading", False),
+    (735, "markdown-memory  (preamble)", False),
+    (268, "When it goes wrong", False),
+    (119, "Install > Get it", False),
 ]
+# The first hit comes back as an excerpt (#76): the passage at this ordinal of its section,
+# the block before it and up to three after. Which passage the query anchors on takes the
+# model to find, as the ranking does; how many tokens the excerpt around it holds does not,
+# and tests/test_agent_docs.py recomputes that from the README.
+EXCERPT_ANCHOR = 0
+EXCERPT_TOKENS = 275
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # Every figure the drawing prints is derived from the two lists above - the totals, the
 # caption and the aria-label alike. Writing any of them out by hand is how the caption and
 # the bar beside it come to disagree, which is precisely the defect this picture claims to
 # be free of.
 TOTAL_TOKENS = sum(tokens for _, tokens in LEFT_FILES)
-# search_docs returns its first hit in full and the rest as pointers, so what comes back as
-# text is the first hit; the others are drawn at what reading them would cost.
+# search_docs returns its first hit as text and the rest as pointers; every hit is drawn at
+# what reading its whole section costs, and the first is filled to what comes back.
 FULL_TOKENS = RIGHT_HITS[0][0]
 POINTER_COUNT = len(RIGHT_HITS) - 1
 # Counts read as words in prose, and prose is what the captions and the aria-label are.
@@ -132,9 +138,9 @@ def draw(c: dict) -> str:
     o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading {spell(len(LEFT_FILES))} '
-        f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns the section "
-        f"that answers in full, {FULL_TOKENS} tokens, with {spell(POINTER_COUNT)} pointers "
-        f'to the rest.">'
+        f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns the passage "
+        f"that answers, {EXCERPT_TOKENS} tokens of a {FULL_TOKENS}-token section, with "
+        f'{spell(POINTER_COUNT)} pointers to the rest.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
 
@@ -229,7 +235,7 @@ def draw(c: dict) -> str:
         text(
             732,
             116,
-            f"One section in full, {spell(POINTER_COUNT)} pointers",
+            f"The passage that answers, {spell(POINTER_COUNT)} pointers",
             fill=c["warm"],
             size=13,
             weight=600,
@@ -238,18 +244,22 @@ def draw(c: dict) -> str:
     hits = RIGHT_HITS
     y = 140
     for rank, (tokens, label, best) in enumerate(hits):
-        # Solid: text that comes back. Outlined: a pointer, and what following it would cost.
+        # Outlined: a whole section, and what reading it would cost. Solid: text that comes
+        # back - the first hit's excerpt.
         o.append(
             rect(
                 732,
                 y,
                 max(3, round(tokens * RIGHT_BAR / MAX_TOKENS)),
                 11,
-                fill=c["warm"] if rank == 0 else "none",
-                stroke="none" if rank == 0 else c["warm"],
+                fill="none",
+                stroke=c["warm"],
                 rx=2,
             )
         )
+        if rank == 0:
+            width = max(3, round(EXCERPT_TOKENS * RIGHT_BAR / MAX_TOKENS))
+            o.append(rect(732, y, width, 11, fill=c["warm"], stroke="none", rx=2))
         o.append(text(776, y + 10, f"{tokens}", fill=c["muted"], size=11, anchor="end", font=MONO))
         o.append(
             text(
@@ -264,7 +274,16 @@ def draw(c: dict) -> str:
         )
         y += 34
     o.append(f'<path d="M732 318 L1058 318" stroke="{c["warmEdge"]}" stroke-width="1"/>')
-    o.append(text(732, 338, f"{FULL_TOKENS} tokens in full", fill=c["warm"], size=14, weight=600))
+    o.append(
+        text(
+            732,
+            338,
+            f"{EXCERPT_TOKENS} tokens of a {FULL_TOKENS}-token section",
+            fill=c["warm"],
+            size=14,
+            weight=600,
+        )
+    )
     o.append(
         text(
             732,

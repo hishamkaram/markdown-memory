@@ -937,6 +937,257 @@ class TestEvalIndexCache:
             )
 
 
+class TestTheExcerptHarness:
+    """`scripts/eval_excerpts.py` (#76): what the judges see, and how their verdicts score."""
+
+    @staticmethod
+    def page(top: dict[str, Any], *pointers: dict[str, Any]) -> str:
+        return json.dumps(
+            {"results": [top, *pointers], "keyword_match": "matched", "index_status": {}},
+            separators=(",", ":"),
+        )
+
+    TOP = {"file_path": "a.md", "heading_path": "A > B", "lines": "3-5", "tokens": 90}
+
+    def test_an_excerpt_and_its_section_are_shown_in_a_seeded_random_order(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, excerpt=True, content="the passage"))
+        whole = self.page(dict(self.TOP, content="# B\n\nthe section"))
+        orders = set()
+        for seed in range(20):
+            item = eval_excerpts.make_item(
+                f"v2-dev-paraphrase-{seed:02d}",
+                "q",
+                text,
+                whole,
+                "# B\n\nthe section",
+                random.Random(seed),
+            )
+            assert item is not None
+            excerpt, section = item.key["excerpt"], item.key["section"]
+            assert {excerpt, section} == {"A", "B"}
+            assert item.judge["texts"][excerpt] == "the passage"
+            assert item.judge["texts"][section] == "# B\n\nthe section"
+            assert "excerpt" not in json.dumps(item.judge)  # nothing tells the judge which
+            orders.add(excerpt)
+        assert orders == {"A", "B"}
+        again = eval_excerpts.make_item(
+            "x", "q", text, whole, "# B\n\nthe section", random.Random(3)
+        )
+        first = eval_excerpts.make_item(
+            "x", "q", text, whole, "# B\n\nthe section", random.Random(3)
+        )
+        assert again is not None and first is not None and again.key == first.key
+
+    def test_a_whole_section_is_shown_once_and_its_baseline_is_its_own_payload(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, content="# B\n\nthe section"))
+        item = eval_excerpts.make_item(
+            "v1-dev-identifier-00", "q", text, text, "# B\n\nthe section", random.Random(0)
+        )
+        assert item is not None
+        assert item.judge["texts"] == {"A": "# B\n\nthe section"}
+        assert item.key["excerpt"] is None and item.key["section"] == "A"
+        assert item.key["payload_tokens"] == item.key["section_payload_tokens"]
+
+    def test_the_baseline_is_the_whole_section_response_for_the_same_top_hit(self) -> None:
+        """Priced from what the server sends with the excerpt off, `lines` and all."""
+        import random
+
+        import eval_excerpts
+
+        pointer = {"file_path": "b.md", "heading_path": "C", "lines": "1-2", "tokens": 7}
+        section = "# B\n\n" + "a long section " * 40
+        text = self.page(dict(self.TOP, excerpt=True, content="the passage"), pointer)
+        whole = self.page(dict(self.TOP, lines="1-40", content=section), pointer)
+        item = eval_excerpts.make_item(
+            "v2-dev-paraphrase-00", "q", text, whole, section, random.Random(0)
+        )
+        assert item is not None
+        assert item.key["section_payload_tokens"] == estimate_tokens(whole)
+        assert item.key["payload_tokens"] == estimate_tokens(text)
+        assert item.key["read_tokens"] == estimate_tokens(section)
+        elsewhere = self.page(dict(self.TOP, heading_path="A > C", content=section), pointer)
+        with pytest.raises(RuntimeError, match="another top hit"):
+            eval_excerpts.make_item("x", "q", text, elsewhere, section, random.Random(0))
+
+    def test_a_key_names_the_section_its_query_was_answered_by(self) -> None:
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, content="s"))
+        item = eval_excerpts.make_item(
+            "v2-dev-paraphrase-00", "q", text, text, "s", random.Random(0)
+        )
+        assert item is not None and item.key["cluster"] == "a.md :: A > B"
+
+    @staticmethod
+    def key(item_id: str, excerpt: str | None, cluster: str = "", **tokens: int) -> dict[str, Any]:
+        section = "A" if excerpt is None else ("B" if excerpt == "A" else "A")
+        return {
+            "id": item_id,
+            "cluster": cluster or item_id,
+            "excerpt": excerpt,
+            "section": section,
+            "payload_tokens": tokens.get("payload", 100),
+            "section_payload_tokens": tokens.get("baseline", 200),
+            "read_tokens": tokens.get("read", 150),
+        }
+
+    def test_a_judge_sees_one_text_the_section_or_the_excerpt(self) -> None:
+        import eval_excerpts
+
+        keys = [
+            self.key("v2-dev-paraphrase-00", "A", "CHANGELOG.md :: 15.2.0"),
+            self.key("v2-dev-paraphrase-01", None, "a.md :: A > B"),
+        ]
+        judged = [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "texts": {"A": "ex", "B": "whole"}},
+            {"id": "v2-dev-paraphrase-01", "query": "q1", "texts": {"A": "whole 1"}},
+        ]
+        release = {"file_path": "CHANGELOG.md", "heading_path": "15.2.0"}
+        assert eval_excerpts.judge_texts(judged, keys, "section") == [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "hit": release, "texts": {"A": "whole"}},
+            {
+                "id": "v2-dev-paraphrase-01",
+                "query": "q1",
+                "hit": {"file_path": "a.md", "heading_path": "A > B"},
+                "texts": {"A": "whole 1"},
+            },
+        ]
+        # The release an excerpt answers is named by its heading path, as the agent sees it.
+        assert eval_excerpts.judge_texts(judged, keys, "excerpt") == [
+            {"id": "v2-dev-paraphrase-00", "query": "q0", "hit": release, "texts": {"A": "ex"}},
+        ]
+
+    def test_a_verdict_is_a_strict_majority_and_a_split_is_not_a_yes(self) -> None:
+        import eval_excerpts
+
+        def judges(*verdicts: str) -> list[dict[str, str]]:
+            return [{"x": verdict} for verdict in verdicts]
+
+        assert eval_excerpts.majority_yes("x", judges("yes", "yes", "partial"))
+        assert not eval_excerpts.majority_yes("x", judges("yes", "partial", "no"))
+        assert not eval_excerpts.majority_yes("x", judges("yes", "partial"))
+        assert eval_excerpts.majority_yes("x", judges("yes", "yes"))
+
+    def test_a_lost_excerpt_costs_the_read_and_a_whole_section_is_kept_as_sent(self) -> None:
+        import eval_excerpts
+
+        lost = self.key("v2-held_out-paraphrase-00", "A")
+        judges = [{lost["id"]: "partial"}, {lost["id"]: "yes"}, {lost["id"]: "no"}]
+        assert eval_excerpts.outcome(lost, judges) == eval_excerpts.Outcome(
+            False, 250, 200, True, lost["id"]
+        )
+        whole = self.key("v2-held_out-paraphrase-01", None, payload=200)
+        assert eval_excerpts.outcome(whole, []) == eval_excerpts.Outcome(
+            True, 200, 200, False, whole["id"]
+        )
+
+    def test_the_wilson_bound_is_one_sided_at_95_percent(self) -> None:
+        import eval_excerpts
+
+        assert eval_excerpts.wilson_lower(20, 20) == pytest.approx(0.8808, abs=1e-4)
+        assert eval_excerpts.wilson_lower(114, 120) == pytest.approx(0.9062, abs=1e-4)
+        assert eval_excerpts.wilson_lower(0, 0) == 0.0
+
+    def test_the_cost_bound_resamples_sections_not_queries(self) -> None:
+        import eval_excerpts
+
+        def outcomes(clusters: list[str]) -> list[Any]:
+            costs = [100, 300] * (len(clusters) // 2)
+            return [
+                eval_excerpts.Outcome(True, cost, 200, True, cluster)
+                for cost, cluster in zip(costs, clusters, strict=True)
+            ]
+
+        # Eight queries of one section are one observation: nothing to resample.
+        assert eval_excerpts.cost_upper(outcomes(["s"] * 8), "x") == 1.0
+        spread = eval_excerpts.cost_upper(outcomes([f"s{n}" for n in range(8)]), "x")
+        assert 1.0 < spread <= 1.5
+        assert spread == eval_excerpts.cost_upper(outcomes([f"s{n}" for n in range(8)]), "x")
+
+    def test_the_gates_count_only_frozen_items_and_hold_only_on_v2(self) -> None:
+        import eval_excerpts
+
+        def keys(corpus: str, total: int, payload: int) -> list[dict[str, Any]]:
+            return [
+                self.key(f"{corpus}-sealed-paraphrase-{n:03d}", "A", payload=payload)
+                for n in range(total)
+            ]
+
+        def run(kept: int, total: int, payload: int, extra: int = 0, v1: int = 0) -> bool:
+            items = keys("v2", total + extra, payload) + keys("v1", v1, 200)
+            ids = [k["id"] for k in items]
+            verdict = {item_id: "yes" if n < kept else "no" for n, item_id in enumerate(ids)}
+            eligible = ids[:total] + ids[total + extra :]
+            return eval_excerpts.score(items, eligible, [verdict] * 3)[1]
+
+        assert run(124, 124, 100)
+        assert run(118, 124, 100)  # 95.2%, Wilson bound 90.9%
+        assert not run(117, 124, 100)  # 94.4%
+        assert not run(20, 20, 100)  # 100%, but a bound of 88.1% on twenty items
+        assert run(124, 124, 180)  # 90% of the baseline: a material saving, target missed
+        assert not run(124, 124, 182)  # 91%
+        assert run(124, 124, 100, extra=30)  # items outside the frozen list do not count
+        assert run(124, 124, 100, v1=20)  # v1 is reported: its lost excerpts gate nothing
+        assert not eval_excerpts.score(keys("v1", 20, 100), [], [{}] * 3)[1]
+
+    def test_the_cost_target_is_reported_but_does_not_gate(self) -> None:
+        import eval_excerpts
+
+        items = [self.key(f"v2-sealed-paraphrase-{n:03d}", "A", payload=170) for n in range(124)]
+        verdict = {k["id"]: "yes" for k in items}
+        lines, passed = eval_excerpts.score(items, [k["id"] for k in items], [verdict] * 3)
+        assert passed and any("target 80% / 85%: missed" in line for line in lines)
+
+    def test_a_malformed_missing_or_repeated_verdict_stops_the_score(self, tmp_path: Path) -> None:
+        import eval_excerpts
+
+        ids = ["v2-dev-paraphrase-00"]
+
+        def read(answer: object) -> dict[str, str]:
+            path = tmp_path / "judge.json"
+            path.write_text(answer if isinstance(answer, str) else json.dumps(answer))
+            return eval_excerpts.read_verdicts(path, ids)
+
+        with pytest.raises(SystemExit, match="malformed"):
+            read([{"id": ids[0], "A": "maybe"}])
+        with pytest.raises(SystemExit, match="malformed"):
+            read([{"id": ids[0], "A": "yes", "B": "no"}])
+        with pytest.raises(SystemExit, match="malformed"):
+            read([{"id": ids[0], "A": "yes"}, {"id": ids[0], "A": "no"}])
+        with pytest.raises(SystemExit, match="no verdict"):
+            read([])
+        with pytest.raises(SystemExit, match="not given"):
+            read([{"id": ids[0], "A": "yes"}, {"id": "another", "A": "yes"}])
+        answer = [{"id": ids[0], "A": "yes", "note": "x"}]
+        assert read("```json\n" + json.dumps(answer) + "\n```") == {ids[0]: "yes"}
+
+    def test_a_build_that_drifted_from_the_frozen_denominator_is_not_scored(self) -> None:
+        import eval_excerpts
+
+        keys = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: A")]
+        frozen = {"eligible": [keys[0]["id"]], "clusters": {keys[0]["id"]: "a.md :: A"}}
+        assert eval_excerpts.drifted(keys, frozen) == ""
+        assert "missing" in eval_excerpts.drifted([], frozen)
+        assert "repeated" in eval_excerpts.drifted(keys * 2, frozen)
+        moved = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: B")]
+        assert "another section" in eval_excerpts.drifted(moved, frozen)
+
+    def test_the_prompt_asks_for_the_letter_the_score_reads(self) -> None:
+        import eval_excerpts
+
+        assert '{"id": <id>, "A": "yes|partial|no"}' in eval_excerpts.JUDGE_PROMPT
+
+
 class _ReversedEmbedder(FakeEmbedder):
     """Another model, in the only way the storage layer can tell: different vectors."""
 

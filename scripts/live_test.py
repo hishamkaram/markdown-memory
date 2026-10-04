@@ -241,8 +241,8 @@ def build_corpus(root: Path) -> dict[str, str]:
         f"**Scenario {number}.** "
         + "A cluster sized for this scenario needs headroom for replays, compaction and "
         "traffic spikes, so provision for twice the steady-state throughput and verify it "
-        "with a synthetic load test before onboarding new tenants. " * 3
-        for number in range(1, 11)
+        "with a synthetic load test before onboarding new tenants."
+        for number in range(1, 31)  # many blocks a part: an excerpt shows a few of them
     )
     files = {
         "reference/configuration.md": CONFIGURATION_MD,
@@ -467,6 +467,13 @@ class LiveTest:
         titles = {Path(d["file_path"]).name: d["title"] for d in documents}
         self.check(len(documents) == 6, "list_documents reports 6 documents")
         self.check(
+            all(
+                not Path(d["file_path"]).is_absolute() and (self.docs / d["file_path"]).is_file()
+                for d in documents
+            ),
+            "listed paths are relative to index_status.root",
+        )
+        self.check(
             not any("node_modules" in d["file_path"] for d in documents),
             "vendored node_modules tree was skipped",
         )
@@ -656,8 +663,12 @@ class LiveTest:
         ]
         top, pointers = results[0], results[1:]
         self.check(
-            set(top) == {"file_path", "heading_path", "lines", "tokens", "content"},
+            set(top) - {"excerpt"} == {"file_path", "heading_path", "lines", "tokens", "content"},
             "the first hit is a pointer plus its text - no ranks, no titles, no passage",
+        )
+        self.check(
+            all(not Path(hit["file_path"]).is_absolute() for hit in results),
+            "every hit's path is relative to index_status.root",
         )
         self.check(
             bool(pointers)
@@ -677,6 +688,20 @@ class LiveTest:
         self.check(
             isinstance(followed, str) and estimate_tokens(followed) == pointers[0]["tokens"],
             "a pointer followed verbatim with read_section costs what it said",
+        )
+        answer, _, _ = await self.call("search_docs", query="how big should my cluster be")
+        top = answer["results"][0]
+        whole, _, _ = await self.call(
+            "read_section", file_path=top["file_path"], heading_path=top["heading_path"]
+        )
+        first, last = (int(n) for n in top["lines"].split("-"))
+        source = (self.docs / top["file_path"]).read_text(encoding="utf-8").split("\n")
+        self.check(
+            top.get("excerpt") is True
+            and top["content"] in whole
+            and top["content"] == "\n".join(source[first - 1 : last])
+            and top["tokens"] == estimate_tokens(whole),
+            "a long top hit is sent as an excerpt: verbatim lines, priced as its whole section",
         )
         for hostile in ('"unbalanced', "NEAR(", "a AND", "*", "col:umn", "--", "'; DROP TABLE x;"):
             outcome = await self.client.call_tool("search_docs", {"query": hostile})

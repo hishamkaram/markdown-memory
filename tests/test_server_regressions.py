@@ -1381,3 +1381,121 @@ class TestSayingWhenTheDocumentsMovedOn:
         status = self.status(service)
         assert status.changed_files == 1
         assert status.message() == "the weights changed under this index"
+
+
+class TestAReturnedPathReadsBackTheSameDocument:
+    """`file_path` is sent relative to `index_status.root` (#76); it must resolve back to the
+    document it names, from any `cwd`, ahead of anything the agent's directory holds."""
+
+    @pytest.fixture
+    def root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "docs"
+        (root / "sub").mkdir(parents=True)
+        (root / "nested").mkdir()
+        (root / "guide.md").write_text("# Root Guide\n\n## Deploy\n\nfrom the root\n")
+        (root / "sub" / "guide.md").write_text("# Sub Guide\n\n## Deploy\n\nfrom sub\n")
+        (root / "sub" / "only.md").write_text("# Only\n\n## Here\n\nonly in sub\n")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "target.md").write_text("# Linked\n\n## Body\n\nthrough the link\n")
+        (root / "shared.md").symlink_to(outside / "target.md")
+        (root / "nested" / "shared.md").write_text("# Nested\n\n## Body\n\nthe nested one\n")
+        return root
+
+    @pytest.fixture
+    def server(self, tmp_path: Path, root: Path) -> Iterator[MCPServer[None]]:
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "paths.db", docs_dir=root), embedder=FakeEmbedder()
+        )
+        service.index_directory()
+        yield create_server(service=service)
+        service.close()
+
+    @staticmethod
+    async def call(server: MCPServer[None], name: str, **arguments: object) -> str:
+        outcome = await server.call_tool(name, arguments)
+        assert not outcome.is_error, outcome.content
+        return str(outcome.content[0].text)  # type: ignore[union-attr]
+
+    async def test_every_listed_path_reads_back_its_own_document_from_any_cwd(
+        self, server: MCPServer[None], root: Path, tmp_path: Path
+    ) -> None:
+        import json
+
+        listed = json.loads(await self.call(server, "list_documents"))
+        paths = sorted(document["file_path"] for document in listed["documents"])
+        assert paths == ["guide.md", "nested/shared.md", "shared.md", "sub/guide.md", "sub/only.md"]
+        for cwd in (str(root), str(root / "sub"), str(tmp_path)):
+            for path in paths:
+                outline = json.loads(
+                    await self.call(server, "get_document_outline", file_path=path, cwd=cwd)
+                )
+                spelled = os.path.realpath(root / path) if path == "shared.md" else root / path
+                title = Path(spelled).read_text().split("\n", 1)[0].removeprefix("# ")
+                assert outline[0]["heading_path"] == title, (cwd, path)
+
+    async def test_the_roots_document_wins_over_a_same_named_one_in_cwd(
+        self, server: MCPServer[None], root: Path
+    ) -> None:
+        text = await self.call(
+            server,
+            "read_section",
+            file_path="guide.md",
+            heading_path="Deploy",
+            cwd=str(root / "sub"),
+        )
+        assert "from the root" in text
+
+    async def test_a_path_only_cwd_holds_still_resolves_there(
+        self, server: MCPServer[None], root: Path
+    ) -> None:
+        text = await self.call(
+            server, "read_section", file_path="only.md", heading_path="Here", cwd=str(root / "sub")
+        )
+        assert "only in sub" in text
+
+    async def test_an_indexed_symlink_is_found_under_its_own_name(
+        self, server: MCPServer[None]
+    ) -> None:
+        # Followed first, `shared.md` would name the link's target - not indexed - and fall
+        # into a suffix lookup that `nested/shared.md` makes ambiguous.
+        text = await self.call(server, "read_section", file_path="shared.md", heading_path="Body")
+        assert "through the link" in text
+
+    async def test_an_absolute_path_still_works(self, server: MCPServer[None], root: Path) -> None:
+        text = await self.call(
+            server, "read_section", file_path=str(root / "guide.md"), heading_path="Deploy"
+        )
+        assert "from the root" in text
+
+    async def test_a_narrowed_listing_is_still_relative_to_the_root(
+        self, server: MCPServer[None]
+    ) -> None:
+        import json
+
+        listed = json.loads(await self.call(server, "list_documents", directory="sub"))
+        assert sorted(d["file_path"] for d in listed["documents"]) == [
+            "sub/guide.md",
+            "sub/only.md",
+        ]
+        assert Path(listed["index_status"]["root"]).is_absolute()
+
+    async def test_the_index_report_keeps_absolute_paths(
+        self, server: MCPServer[None], root: Path
+    ) -> None:
+        assert str(root.resolve()) in await self.call(server, "index_directory")
+
+    def test_a_failure_outside_the_root_stays_absolute(self) -> None:
+        from markdown_memory.server import _relative_failures
+
+        status = {
+            "root": "/srv/docs",
+            "failures": [
+                {"file_path": "/srv/docs/a/b.md", "message": "unreadable"},
+                {"file_path": "/elsewhere/c.md", "message": "unreadable"},
+            ],
+        }
+        shown = _relative_failures(status, "/srv/docs")
+        assert [f["file_path"] for f in shown["failures"]] == ["a/b.md", "/elsewhere/c.md"]
+        assert shown["root"] == "/srv/docs"
+        assert _relative_failures(status, None) == status

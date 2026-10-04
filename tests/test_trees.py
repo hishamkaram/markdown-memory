@@ -187,6 +187,23 @@ class TestRouting:
         assert PRIMARY_TEXT in main["results"][0]["content"]
         assert main["index_status"]["root"] == str((repo / "docs").resolve())
 
+    async def test_a_worktree_answer_keeps_absolute_paths_that_route_without_cwd(
+        self, primary: MarkdownMemoryService, worktree: Path
+    ) -> None:
+        # A relative path cannot say which tree it belongs to (#76): read without `cwd`, it
+        # would come back from the configured checkout's copy of the same file.
+        async with Client(create_server(service=primary)) as client:
+            await call(client, "index_directory", cwd=str(worktree))
+            branch = await call(client, "search_docs", query="deploys", cwd=str(worktree))
+            main = await call(client, "search_docs", query="deploys")
+            top = branch["results"][0]
+            text = await call(
+                client, "read_section", file_path=top["file_path"], heading_path=top["heading_path"]
+            )
+        assert Path(top["file_path"]).is_absolute()
+        assert not Path(main["results"][0]["file_path"]).is_absolute()
+        assert BRANCH_TEXT in text
+
     async def test_cwd_in_the_primary_or_anywhere_else_answers_from_the_configured_root(
         self, primary: MarkdownMemoryService, repo: Path, tmp_path: Path
     ) -> None:

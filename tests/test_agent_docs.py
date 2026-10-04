@@ -612,7 +612,9 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         expected = [f"{tokens:,}" for _, tokens in make_diagram.LEFT_FILES]
         expected += [str(tokens) for tokens, _, _ in make_diagram.RIGHT_HITS]
         expected.append(f"{make_diagram.TOTAL_TOKENS:,} tokens")
-        expected.append(f"{make_diagram.FULL_TOKENS} tokens in full")
+        expected.append(
+            f"{make_diagram.EXCERPT_TOKENS} tokens of a {make_diagram.FULL_TOKENS}-token section"
+        )
         expected.append(f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers")
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
@@ -641,7 +643,8 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             assert label, f"{svg} has no aria-label"
             for figure in (
                 f"{make_diagram.TOTAL_TOKENS:,}",
-                f"in full, {make_diagram.FULL_TOKENS} tokens",
+                f"{make_diagram.EXCERPT_TOKENS} tokens of a "
+                f"{make_diagram.FULL_TOKENS}-token section",
                 f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers",
             ):
                 assert figure in label.group(1), (
@@ -766,26 +769,57 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 f"the README says {printed}"
             )
 
-    def test_the_worked_example_says_what_comes_back_in_full(self) -> None:
-        """Only the first hit comes back as text; the rest are pointers (#36).
+    def test_the_worked_example_says_what_comes_back(self) -> None:
+        """Only the first hit comes back as text, and only its excerpt (#36, #76).
 
-        The headline used to add the five hits up, when every hit carried its full text. Adding
-        them now would claim a response four pointers never cost.
+        The headline used to add the five hits up, when every hit carried its full text, and
+        then to quote the first section whole. Either would now claim a response the server
+        does not send.
         """
         import make_diagram
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
         assert example
-        sizes = [int(n) for n in re.findall(r"(\d+) tok", example.group(1))]
+        sizes = [int(n) for n in re.findall(r"(\d+) tok\b(?!\))", example.group(1))]
         total = make_diagram.TOTAL_TOKENS
-        headline = f"**One section in full - {sizes[0]} tokens - instead of {total:,}**"
-        assert headline in readme, f"the first hit is {sizes[0]} tokens; the README says otherwise"
+        excerpt = make_diagram.EXCERPT_TOKENS
+        headline = f"**{excerpt} tokens instead of {total:,}**"
+        assert headline in readme, f"the excerpt is {excerpt} tokens; the README says otherwise"
+        assert f"({excerpt} tok)" in example.group(1), "the example does not show the excerpt"
+        assert f"the whole {sizes[0]}-token section" in readme
         assert sizes[0] == make_diagram.FULL_TOKENS and len(sizes) - 1 == make_diagram.POINTER_COUNT
-        assert make_diagram.RIGHT_HITS[0][2], "the hit drawn in full is not the one that answers"
+        assert make_diagram.RIGHT_HITS[0][2], "the hit drawn first is not the one that answers"
         for stale in (
             "sections totalling",
             "Every hit carries its full text",
             "five full sections",
+            "One section in full",
         ):
             assert stale not in readme, f"the README still says {stale!r}"
+
+    def test_the_excerpt_the_worked_example_shows_is_the_size_it_claims(self) -> None:
+        """Which passage anchors the excerpt takes the model; its size around that does not."""
+        import make_diagram
+
+        from markdown_memory.models import estimate_tokens
+        from markdown_memory.parser import MarkdownParser
+        from markdown_memory.search import excerpt_lines
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r"```\nsearch_docs\(.*?\n\n(.*?)```", readme, re.DOTALL)
+        assert example
+        first = re.search(r"\d+ tok\s+(\S+)\s+(.+?)\s*$", example.group(1), re.M)
+        assert first, "the example lists no hits"
+        filename, heading_path = first.groups()
+        parser = MarkdownParser()
+        sections = parser.parse((ROOT / filename).read_text(encoding="utf-8")).sections
+        section = next(s for s in sections if s.heading_path == heading_path)
+        passages = parser.passages(section.content, skip_heading=True)
+        window = excerpt_lines(section.content, passages, make_diagram.EXCERPT_ANCHOR)
+        assert window, "the passage the example anchors on gives no excerpt"
+        text = "\n".join(section.content.split("\n")[window[0] : window[1]])
+        assert estimate_tokens(text) == make_diagram.EXCERPT_TOKENS, (
+            f"the excerpt is {estimate_tokens(text)} tokens, the README says "
+            f"{make_diagram.EXCERPT_TOKENS}"
+        )
