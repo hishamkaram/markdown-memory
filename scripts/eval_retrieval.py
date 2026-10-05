@@ -9,6 +9,7 @@ against the labelled queries in ``scripts/eval_data/queries.json``:
     uv run python scripts/eval_retrieval.py --show-costs    # what each default call costs
     uv run python scripts/eval_retrieval.py --update-baseline   # after an ACCEPTED change
     uv run python scripts/eval_retrieval.py --corpus v2     # real upstream docs, report-only
+    uv run python scripts/eval_retrieval.py --split dev --record dev.json   # tune: dev only
 
 Scores are compared with the frozen baseline in ``scripts/eval_data/baseline.json``
 (accuracy in percentage points, latency in ms; latency is informational - it depends on
@@ -24,25 +25,34 @@ queries were written before any tuning: tune on ``dev`` only, never on ``held_ou
 ``--corpus v2`` scores the pinned upstream documentation in ``scripts/eval_data/corpus_v2``
 against ``queries_v2.json`` instead (#75). It has its own baseline entry and no floors: it
 reports, and the gate stays the v1 corpus until v2's numbers have held across runs.
+
+``--split dev`` scores, validates and shows the dev queries only, and ``--record`` keeps every
+query's outcome so that ``scripts/eval_compare.py`` can hold two revisions to a per-query
+no-regression rule (#94). A run that scores less than both splits, or labels from another
+``--queries`` file, is report-only: it checks no floor and cannot write the baseline.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
+import os
 import re
 import statistics
+import subprocess
 import sys
 import time
 from collections.abc import Iterator, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import eval_cache
 
+import markdown_memory
 from markdown_memory.config import ServerConfig
 from markdown_memory.embedders import DEFAULT_EMBEDDER, Embedder, create_embedder
 from markdown_memory.models import OutlineNode, SearchResult, estimate_tokens
@@ -57,6 +67,8 @@ FLOOR_PARAPHRASE_TOP1 = 0.80
 FLOOR_PARAPHRASE_TOP5 = 0.90
 FLOOR_IDENTIFIER_TOP1 = 1.00
 NO_ANSWER_SHAPES = ("identifier", "question")
+SPLITS = ("dev", "held_out")
+RECORD_SCHEMA = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -94,6 +106,17 @@ def corpora() -> dict[str, Corpus]:
 
 
 @dataclass(slots=True, frozen=True)
+class Outcome:
+    """How one labelled query was answered: what `--record` keeps and the comparison reads."""
+
+    query: str
+    rank: int | None  # of the `expected` section among the first 20 results
+    any_valid: bool  # the first result carries any grade
+    ndcg5: float
+    top: tuple[str, ...]  # the first five results' labels, as `path::heading`
+
+
+@dataclass(slots=True, frozen=True)
 class Scores:
     top1: float
     top3: float
@@ -102,7 +125,11 @@ class Scores:
     ndcg5: float
     median_ms: float
     p95_ms: float
-    misses: tuple[tuple[str, int | None], ...]
+    cases: tuple[Outcome, ...] = field(default=())
+
+    @property
+    def misses(self) -> tuple[tuple[str, int | None], ...]:
+        return tuple((case.query, case.rank) for case in self.cases if case.rank != 1)
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,7 +199,9 @@ def _outline_paths(nodes: Sequence[OutlineNode]) -> Iterator[str]:
 
 
 def resolve_answers(
-    service: MarkdownMemoryService, queries: dict[str, dict[str, list[dict[str, object]]]]
+    service: MarkdownMemoryService,
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    splits: Sequence[str] = SPLITS,
 ) -> dict[str, Answer]:
     """Every `expected` label, resolved to the one section it names - before anything is searched.
 
@@ -186,7 +215,7 @@ def resolve_answers(
         for path in _outline_paths(service.get_document_outline(document.file_path)):
             owners.setdefault(path, []).append(document.file_path)
     answers: dict[str, Answer] = {}
-    for split in ("dev", "held_out"):
+    for split in splits:  # only the splits scored: a dev run learns nothing from held-out
         for kind in ("paraphrase", "identifier"):  # no-answer cases have nothing to resolve
             for case in queries[split][kind]:
                 label = str(case["expected"])
@@ -210,14 +239,18 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[0-9a-z]+", text.lower())
 
 
-def check_no_answer(queries: dict[str, dict[str, list[dict[str, object]]]], corpus: Path) -> None:
+def check_no_answer(
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    corpus: Path,
+    splits: Sequence[str] = SPLITS,
+) -> None:
     """Every no-answer case is well formed and absent from the corpus - before anything is searched.
 
     Absent as the keyword index would look for it: the query's tokens as a consecutive run, so
     `--enable-tls` is found in a corpus that says `enable_tls`, while a longer identifier that
     merely contains it is not. Read only when there are cases to check.
     """
-    cases = [case for split in ("dev", "held_out") for case in queries[split]["no_answer"]]
+    cases = [case for split in splits for case in queries[split]["no_answer"]]
     if not cases:
         return
     documents = [_tokens(path.read_text(encoding="utf-8")) for path in sorted(corpus.rglob("*.md"))]
@@ -232,7 +265,9 @@ def check_no_answer(queries: dict[str, dict[str, list[dict[str, object]]]], corp
 
 
 def measure_no_answer(
-    service: MarkdownMemoryService, queries: dict[str, dict[str, list[dict[str, object]]]]
+    service: MarkdownMemoryService,
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    splits: Sequence[str] = SPLITS,
 ) -> dict[str, NoAnswer]:
     """What the default call returns for each no-answer case, per split and shape.
 
@@ -240,7 +275,7 @@ def measure_no_answer(
     there is what an agent receives.
     """
     measured: dict[str, NoAnswer] = {}
-    for split in ("dev", "held_out"):
+    for split in splits:
         for shape in NO_ANSWER_SHAPES:
             cases = [case for case in queries[split]["no_answer"] if case["shape"] == shape]
             pages = [service.search_page(str(case["query"]), 5) for case in cases]
@@ -257,7 +292,7 @@ def print_no_answer(measured: dict[str, NoAnswer], *, show_misses: bool) -> None
     print("\nno-answer stratum (informational; abstention never gates; n is small, low power)")
     header = f"{'set':<22} {'n':>3}  abstained  no_match  payload"
     print(header + "\n" + "-" * len(header))
-    for split in ("dev", "held_out"):
+    for split in dict.fromkeys(name.split("/")[0] for name in measured):
         rows = [(shape, measured[f"{split}/{shape}"]) for shape in NO_ANSWER_SHAPES]
         rows.append(
             (
@@ -313,10 +348,11 @@ def measure_costs(
     service: MarkdownMemoryService,
     queries: dict[str, dict[str, list[dict[str, object]]]],
     answers: dict[str, Answer],
+    splits: Sequence[str] = SPLITS,
 ) -> dict[str, Cost]:
     """What the default call cost against the section that answers it, per split and kind."""
     costs: dict[str, Cost] = {}
-    for split in ("dev", "held_out"):
+    for split in splits:
         for kind in ("paraphrase", "identifier"):
             cases = queries[split][kind]
             costs[f"{split}/{kind}"] = Cost(
@@ -349,50 +385,58 @@ def _dcg(grades: list[int]) -> float:
     return float(sum((2**grade - 1) / math.log2(rank + 1) for rank, grade in enumerate(grades, 1)))
 
 
+def _grades(case: dict[str, object]) -> dict[str, int]:
+    also_valid = case.get("also_valid", {})
+    extra = also_valid if isinstance(also_valid, dict) else {}
+    return {str(case["expected"]): PRIMARY_GRADE, **{str(k): int(v) for k, v in extra.items()}}
+
+
+def _grade(results: Sequence[SearchResult], case: dict[str, object], root: str) -> Outcome:
+    """Score one query's ranked results against its labels."""
+    expected, grades = str(case["expected"]), _grades(case)
+    # A label is credited once: the parts of one oversized section share a label, and
+    # counting each would push nDCG above 1.
+    credited: set[str] = set()
+    relevance: list[int] = []
+    for result in results:
+        labels = _labels(result, root)
+        relevance.append(max((grades.get(label, 0) for label in labels - credited), default=0))
+        credited |= labels
+    ideal = sorted(grades.values(), reverse=True)[:5]
+    return Outcome(
+        query=str(case["query"]),
+        rank=next((i for i, r in enumerate(results, 1) if expected in _labels(r, root)), None),
+        any_valid=bool(relevance and relevance[0] > 0),
+        ndcg5=_dcg(relevance[:5]) / _dcg(ideal),
+        top=tuple(
+            f"{Path(r.file_path).relative_to(root).as_posix()}::{r.heading_path}"
+            for r in results[:5]
+        ),
+    )
+
+
 def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> Scores:
-    ranks: list[int | None] = []
-    valid_first = 0
-    ndcg: list[float] = []
+    outcomes: list[Outcome] = []
     latencies: list[float] = []
     for case in cases:
-        query, expected = str(case["query"]), str(case["expected"])
-        also_valid = case.get("also_valid", {})
-        grades = {expected: PRIMARY_GRADE, **(also_valid if isinstance(also_valid, dict) else {})}
         started = time.perf_counter()
-        results = service.search_docs(query, 20)
+        results = service.search_docs(str(case["query"]), 20)
         latencies.append((time.perf_counter() - started) * 1000)
-        # A label is credited once: the parts of one oversized section share a label, and
-        # counting each would push nDCG above 1.
-        credited: set[str] = set()
-        relevance: list[int] = []
-        for result in results:
-            labels = _labels(result, service.root)
-            relevance.append(max((grades.get(label, 0) for label in labels - credited), default=0))
-            credited |= labels
-        ranks.append(
-            next(
-                (i for i, r in enumerate(results, 1) if expected in _labels(r, service.root)), None
-            )
-        )
-        valid_first += bool(relevance and relevance[0] > 0)
-        ideal = sorted(grades.values(), reverse=True)[:5]
-        ndcg.append(_dcg(relevance[:5]) / _dcg(ideal))
+        outcomes.append(_grade(results, case, service.root))
     total = len(cases)
 
     def within(k: int) -> float:
-        return sum(rank is not None and rank <= k for rank in ranks) / total
+        return sum(case.rank is not None and case.rank <= k for case in outcomes) / total
 
     return Scores(
         top1=within(1),
         top3=within(3),
         top5=within(5),
-        any_valid_top1=valid_first / total,
-        ndcg5=statistics.mean(ndcg),
+        any_valid_top1=sum(case.any_valid for case in outcomes) / total,
+        ndcg5=statistics.mean(case.ndcg5 for case in outcomes),
         median_ms=statistics.median(latencies),
         p95_ms=_p95(latencies),
-        misses=tuple(
-            (str(case["query"]), rank) for case, rank in zip(cases, ranks, strict=True) if rank != 1
-        ),
+        cases=tuple(outcomes),
     )
 
 
@@ -419,11 +463,88 @@ def print_deltas(preset: str, scores: dict[str, Scores]) -> None:
 def update_baseline(preset: str, scores: dict[str, Scores]) -> None:
     recorded = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
     recorded[preset] = {
-        name: {k: round(v, 4) for k, v in asdict(result).items() if k != "misses"}
+        name: {k: round(v, 4) for k, v in asdict(result).items() if k != "cases"}
         for name, result in scores.items()
     }
     BASELINE.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\nbaseline for {preset!r} written to {BASELINE}")
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _code_identity() -> dict[str, object]:
+    """The package under test as imported - `PYTHONPATH` may name another revision's `src`.
+
+    The commit alone cannot tell two uncommitted states of `search.py` apart; the digest of
+    every module's bytes can.
+    """
+    package = Path(markdown_memory.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for module in sorted(package.glob("*.py")):
+        digest.update(module.name.encode("utf-8") + b"\0" + module.read_bytes())
+    revision = subprocess.run(
+        ["git", "-C", str(package), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    return {
+        "package": str(package),
+        "revision": revision.stdout.strip() if revision.returncode == 0 else None,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def record_cases(
+    service: MarkdownMemoryService,
+    queries: dict[str, dict[str, list[dict[str, object]]]],
+    splits: Sequence[str],
+    scores: dict[str, Scores],
+) -> dict[str, dict[str, object]]:
+    """Every scored case's outcome, plus what the default page returned for it.
+
+    The page is what an agent receives, so a query whose page empties is a loss even when no
+    label ranked before: `scripts/eval_compare.py` reads `hits` for exactly that.
+    """
+    cases: dict[str, dict[str, object]] = {}
+
+    def put(key: str, value: dict[str, object]) -> None:
+        if key in cases:
+            raise ValueError(f"two cases share the key {key!r}; a record must name each once")
+        cases[key] = value
+
+    for split in splits:
+        for kind in ("paraphrase", "identifier"):
+            labelled = queries[split][kind]
+            outcomes = scores[f"{split}/{kind}"].cases
+            for case, outcome in zip(labelled, outcomes, strict=True):
+                if not math.isfinite(outcome.ndcg5):
+                    raise ValueError(f"nDCG@5 of {outcome.query!r} is {outcome.ndcg5}")
+                page = service.search_page(outcome.query, 5)
+                put(f"{split}|{kind}|{outcome.query}", {
+                    "expected": str(case["expected"]),
+                    "also_valid": {k: v for k, v in _grades(case).items() if k != case["expected"]},
+                    "rank": outcome.rank, "any_valid": outcome.any_valid, "ndcg5": outcome.ndcg5,
+                    "top": list(outcome.top),
+                    "hits": len(page.results), "keyword_match": page.keyword_match,
+                })  # fmt: skip
+        for case in queries[split]["no_answer"]:
+            page = service.search_page(str(case["query"]), 5)
+            put(f"{split}|no_answer|{case['query']}", {
+                "shape": str(case["shape"]),
+                "hits": len(page.results), "keyword_match": page.keyword_match,
+            })  # fmt: skip
+    return cases
+
+
+def write_record(path: Path, record: dict[str, object]) -> None:
+    """Write ``record`` whole or not at all: a failed run leaves what was there before."""
+    text = json.dumps(record, indent=1, sort_keys=True, allow_nan=False) + "\n"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _probes(corpus: Path) -> tuple[eval_cache.Probe, ...]:
@@ -521,6 +642,11 @@ def _service(
     )
 
 
+def _splits(arguments: argparse.Namespace) -> tuple[str, ...]:
+    split = getattr(arguments, "split", "all")
+    return SPLITS if split == "all" else (split,)
+
+
 def run(
     queries: dict[str, dict[str, list[dict[str, object]]]],
     arguments: argparse.Namespace,
@@ -529,10 +655,11 @@ def run(
     corpus: Corpus | None = None,
 ) -> dict[str, Scores]:
     corpus = corpus or corpora()["v1"]
+    splits = _splits(arguments)
     service, built = open_service(arguments, base, probes, corpus)
     try:
-        answers = resolve_answers(service, queries)
-        check_no_answer(queries, corpus.root)
+        answers = resolve_answers(service, queries, splits)
+        check_no_answer(queries, corpus.root, splits)
         print(f"embedder: {service.embedder.model_name}")
         if not built:
             print("index: reused from cache (fingerprint, integrity and vectors verified)")
@@ -540,7 +667,7 @@ def run(
         header = f"{'set':<22} {'n':>3}  Top-1  Top-3  Top-5  any-valid@1  nDCG@5  median   p95"
         print("\n" + header + "\n" + "-" * len(header))
         scores: dict[str, Scores] = {}
-        for split in ("dev", "held_out"):
+        for split in splits:
             for kind in ("paraphrase", "identifier"):
                 cases = queries[split][kind]
                 result = scores[f"{split}/{kind}"] = evaluate(service, cases)
@@ -553,12 +680,34 @@ def run(
             for name, result in scores.items():
                 for query, rank in result.misses:
                     print(f"  miss [{name}] rank={rank}: {query}")
+        destination = getattr(arguments, "record", None)
+        if destination is not None:
+            # Outside the informational guards below: a record that is missing a pass would
+            # compare as if that pass had nothing to say.
+            write_record(destination, {
+                "schema": RECORD_SCHEMA, "corpus": corpus.name, "preset": arguments.embedder,
+                "splits": list(splits), "queries": str(arguments.queries_path),
+                "queries_sha256": _sha256(arguments.queries_path.read_bytes()),
+                "corpus_sha256": eval_cache.corpus_digest(corpus.root),
+                "parse_fingerprint": eval_cache.parse_fingerprint(corpus.root),
+                "code": _code_identity(), "evaluator": _sha256(Path(__file__).read_bytes()),
+                "counts": {
+                    f"{split}|{kind}": len(queries[split][kind])
+                    for split in splits for kind in ("paraphrase", "identifier", "no_answer")
+                },
+                "cases": record_cases(service, queries, splits, scores),
+            })  # fmt: skip
+            print(f"\nrecord: {destination}")
         try:
-            print_no_answer(measure_no_answer(service, queries), show_misses=arguments.show_misses)
+            print_no_answer(
+                measure_no_answer(service, queries, splits), show_misses=arguments.show_misses
+            )
         except Exception as exc:  # informational, like the cost pass below
             print(f"\nno-answer stratum: not measured ({exc})")
         try:
-            print_costs(measure_costs(service, queries, answers), per_query=arguments.show_costs)
+            print_costs(
+                measure_costs(service, queries, answers, splits), per_query=arguments.show_costs
+            )
         except Exception as exc:  # informational: it must never decide how the run ends
             print(f"\ncost: not measured ({exc})")
         return scores
@@ -595,11 +744,41 @@ def main() -> int:
         choices=CORPUS_NAMES,
         help="v1 (default) is the gate; v2 is the pinned upstream documentation, report-only",
     )
+    parser.add_argument(
+        "--split",
+        default="all",
+        choices=("all", *SPLITS),
+        help="score only these queries; anything but 'all' is report-only (tune on dev)",
+    )
+    parser.add_argument(
+        "--queries",
+        type=Path,
+        help="label file to score instead of the corpus's own (report-only), e.g. the labels "
+        "a base revision's sections have",
+    )
+    parser.add_argument(
+        "--record",
+        type=Path,
+        help="write every case's outcome here as JSON, for scripts/eval_compare.py",
+    )
     arguments = parser.parse_args()
     logging.disable(logging.CRITICAL)
 
     corpus = corpora()[arguments.corpus]
-    queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
+    report_only = [
+        reason
+        for applies, reason in (
+            (arguments.split != "all", f"--split {arguments.split}"),
+            (arguments.queries is not None, f"--queries {arguments.queries}"),
+        )
+        if applies
+    ]
+    if report_only and arguments.update_baseline:
+        # The baseline holds all four sets, scored against the corpus's own labels; neither
+        # a partial run nor another label file may stand in for it.
+        parser.error(f"--update-baseline cannot record a report-only run ({report_only[0]})")
+    arguments.queries_path = (arguments.queries or corpus.queries).resolve()
+    queries = json.loads(arguments.queries_path.read_text(encoding="utf-8"))
     base = ServerConfig.from_env()
     probes = _probes(corpus.root)
     try:
@@ -613,6 +792,9 @@ def main() -> int:
 
     preset = arguments.embedder
     print_deltas(corpus.baseline_key(preset), scores)
+    if report_only:
+        print(f"\nGATES NOT CHECKED: report-only run ({'; '.join(report_only)})")
+        return 0
     if corpus.name != "v1":
         if arguments.update_baseline:
             update_baseline(corpus.baseline_key(preset), scores)

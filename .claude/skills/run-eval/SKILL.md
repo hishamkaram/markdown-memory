@@ -52,6 +52,32 @@ State, in this order:
 3. Delta vs baseline in percentage points for each set, and the median latency delta.
 4. Any query that newly misses Top-1 compared with the baseline run (from `--show-misses`).
 
+## Tune on dev, then compare query by query
+
+While choosing a parameter, score the dev queries alone - nothing from held-out is
+validated, searched, scored or printed, and the run checks no floor:
+
+```bash
+uv run python scripts/eval_retrieval.py --split dev --record candidate.json
+```
+
+To prove a change makes **no query** worse - totals can hide one loss among several gains -
+record the base revision from the same checkout, with its code on `PYTHONPATH`, then compare:
+
+```bash
+git worktree add ../base main
+PYTHONPATH=../base/src uv run python scripts/eval_retrieval.py --split dev --record base.json
+uv run python scripts/eval_compare.py base.json candidate.json
+```
+
+`eval_compare.py` exits 0 when no query got worse, 1 naming each one that did (rank down,
+any-valid@1 lost, nDCG@5 down by more than 1e-9, a default page that came back empty, a
+changed no-answer page), and 2 when the records are malformed or measure different things.
+When the change moves section boundaries, score the base with its own labels
+(`--queries ../base/scripts/eval_data/queries.json`) and pass `--allow-label-changes`; every
+migrated label is listed. A PASS covers its own corpus, preset and split only: decide which
+cells must pass before seeing any result, and compare held-out once, at the end.
+
 ## Rules
 
 - **Never tune on `held_out`.** Choose parameters using the `dev` rows only; the held-out

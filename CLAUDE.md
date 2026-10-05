@@ -23,6 +23,7 @@ uv run ruff format .                           # format          (--check in CI)
 uv run mypy --strict src/                      # type check: must report zero errors
 uv run pytest                                  # unit + integration tests (-m "not embedding" skips real-model tests)
 uv run python scripts/eval_retrieval.py        # retrieval accuracy gate (see policy below)
+uv run python scripts/eval_compare.py A.json B.json  # per-query no-regression rule between two --record runs
 uv run python scripts/live_test.py             # end-to-end: spawns the server, drives it over stdio JSON-RPC
 uv run python scripts/reindex_docs.py DIR --force   # forced re-index + integrity verification
 scripts/check.sh                               # licences + ruff + format + mypy + pytest + live test
@@ -137,7 +138,18 @@ run before proposing the change; nothing will stop a regression at review time:
 
 The script exits non-zero below a floor and prints the delta against
 `scripts/eval_data/baseline.json`. Tune on the `dev` queries only; the `held_out` queries
-were written before any tuning and must never be used to choose a parameter. After an
+were written before any tuning and must never be used to choose a parameter.
+`--split dev` validates, searches, scores and prints the dev queries alone; like `--queries
+FILE` (another label file), it checks no floor and cannot write the baseline. To hold a change
+to a per-query rule rather than to totals, record both revisions from one checkout - `--record
+base.json` with `PYTHONPATH=<worktree of the base>/src`, `--record candidate.json` without it
+(the eval cache keys on the code it imports and the corpus path) - and run
+`scripts/eval_compare.py base.json candidate.json`. It exits 1 when any query got worse (a
+lower rank, a lost any-valid@1, nDCG@5 down by more than 1e-9, a default page that came back
+empty, a changed no-answer page) and 2 when the records are not comparable; a label migration
+needs `--allow-label-changes` and is listed. Decide which cells (corpus x preset) must pass
+before seeing any result: every compared cell applies the same rule, and held-out is compared
+once, at the end. After an
 accepted change, record the new numbers with `--update-baseline` and update the table in
 `README.md`. Rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: all lowered accuracy and cost 2-12 s per query.

@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 19,707
+       alt="One question asked of four documentation files. Reading them whole costs 20,013
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 19,707 tokens in all:
+`docs/evaluation-protocol.md`, 20,013 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -33,7 +33,7 @@ search_docs("where does the embedding model get downloaded")
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 19,707**: the passage that answers and the three after it, verbatim,
+**275 tokens instead of 20,013**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
 not enough. The other four come back as pointers - where each section is, what reading it
 costs, and the passage that matched - so when the first is not the answer, one
@@ -667,6 +667,8 @@ uv run python scripts/live_test.py    # spawns the server, drives it over stdio 
 uv run python scripts/eval_retrieval.py --show-misses   # retrieval accuracy; fails on regression
 uv run python scripts/eval_retrieval.py --rebuild       # ... after discarding the cached index
 uv run python scripts/eval_retrieval.py --show-costs    # ... and what each default call costs
+uv run python scripts/eval_retrieval.py --split dev --record dev.json   # tune on dev only
+uv run python scripts/eval_compare.py base.json dev.json   # no query worse than the base run
 uv run python scripts/reindex_docs.py DIR --force       # forced re-index + integrity verification
 scripts/check.sh                                        # the whole pre-commit gate, fail-fast
 ```
