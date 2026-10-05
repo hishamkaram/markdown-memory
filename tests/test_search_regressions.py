@@ -13,7 +13,7 @@ from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
-from markdown_memory.exceptions import SearchError
+from markdown_memory.exceptions import DatabaseError, SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
     Document,
@@ -21,7 +21,16 @@ from markdown_memory.models import (
     Section,
     SectionDraft,
 )
-from markdown_memory.search import HybridSearcher, _Keyword, _Literal, build_fts_query, fts_terms
+from markdown_memory.search import (
+    HybridSearcher,
+    _is_identifier,
+    _is_identifier_lookup,
+    _Keyword,
+    _Literal,
+    build_fts_query,
+    fts_terms,
+    select_anchor,
+)
 
 
 class TestQueryBuilding:
@@ -1003,6 +1012,260 @@ class TestIdentifierLookups:
             )
         finally:
             searcher.close()
+
+
+class TestPlainCalls:
+    """#79: a plain call (`rate()`) is an identifier lookup, answered by sections calling it.
+
+    The tokenizer reads `rate()` as the word `rate`, and `clamp()` matches `clamp_max()`'s
+    words too: without being read as a call, a function was ranked like the word it spells.
+    """
+
+    searcher = staticmethod(TestIdentifierLookups.searcher)
+    vectors_rank = staticmethod(TestIdentifierLookups.vectors_rank)
+
+    @pytest.mark.parametrize(
+        ("query", "definition", "distractor"),
+        [
+            ("clamp()", "Functions > clamp()", "Helpers > clamp_max()"),
+            ("`clamp()`", "Functions > clamp()", "Helpers > clamp_max()"),
+            ('"clamp()".', "Functions > clamp()", "Helpers > clamp_max()"),
+            ("clamp()?", "Functions > clamp()", "Helpers > clamp_max()"),
+            ("scalar()", "Functions > scalar()", "Helpers > Scalars"),
+            ("`scalar()`", "Functions > scalar()", "Helpers > Scalars"),
+        ],
+    )
+    def test_plain_call_definition_wins(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+        definition: str,
+        distractor: str,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "helpers.md": (
+                "# Helpers\n\n## clamp_max()\n\nclamp_max(v, max) is clamp() with one bound: "
+                "clamp clamp clamp clamp.\n\n## Scalars\n\nA scalar is a number: scalar "
+                "scalar scalar values.\n"
+            ),
+            "functions.md": (
+                "# Functions\n\n## clamp()\n\nclamp(v, min, max) bounds v.\n\n"
+                "## scalar()\n\nscalar(v) returns its sample value.\n"
+            ),
+        })  # fmt: skip
+        try:
+            # Vectors and BM25 both prefer the distractor: only reading the call puts the
+            # section it heads first.
+            self.vectors_rank(searcher, monkeypatch, distractor)
+            assert (
+                searcher.search(query.strip('`"?.').removesuffix("()"), limit=1)[0].heading_path
+                == distractor
+            ), "the fixture must favour the distractor on words"
+            page = searcher.search_page(query, limit=3)
+        finally:
+            searcher.close()
+        top = page.results[0]
+        assert (Path(top.file_path).name, top.heading_path) == ("functions.md", definition)
+        assert page.keyword_match == "matched"
+
+    @pytest.mark.parametrize("call", ["rate(http_requests_total[5m])", "rate (x)"])
+    def test_plain_call_matches_arguments_at_identifier_boundaries(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": (
+                "# Notes\n\n## Instant\n\nirate(x) is the instant rate: rate rate rate.\n\n"
+                "## Limits\n\nrate_limit(x) caps the rate of rate rate requests.\n\n"
+                "## Prose\n\nThe rate rate rate rate of requests.\n"
+            ),
+            "b.md": f"# Queries\n\n## Counters\n\nPer-second change: {call}.\n",
+        })  # fmt: skip
+        try:
+            self.vectors_rank(searcher, monkeypatch, "Notes > Prose", "Notes > Limits")
+            assert searcher.search("rate", limit=1)[0].heading_path != "Queries > Counters"
+            page = searcher.search_page("rate()", limit=4)
+        finally:
+            searcher.close()
+        assert page.results[0].heading_path == "Queries > Counters"
+        assert page.keyword_match == "matched"
+        literal = _Literal(fts_terms("rate()")[0])
+        assert literal.found(call)
+        assert not any(map(literal.found, ["irate(x)", "rate_limit(x)", "the rate of"]))
+
+    @pytest.mark.parametrize("call", ["all()", "any()", "is()"])
+    def test_stopword_call_survives_mixed_query(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+    ) -> None:
+        name = call.removesuffix("()")
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": (
+                f"# Functions\n\n## Predicates\n\nUse {name}(xs) on a list.\n\n"
+                "## Sorting\n\nOrder values by key.\n"
+            ),
+        })  # fmt: skip
+        try:
+            monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: ([], {}))
+            page = searcher.search_page(f"{call} zebra quokka", limit=2)
+        finally:
+            searcher.close()
+        assert [r.heading_path for r in page.results] == ["Functions > Predicates"]
+        assert page.results[0].fts_rank is not None and page.keyword_match == "matched"
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("is latency", '"latency"'),
+            ("is() latency", '"is()" OR "latency"'),
+            ("is() the", '"is()"'),
+            ("is() IS() latency", '"is()" OR "latency"'),
+            ("IS() is() latency", '"IS()" OR "latency"'),
+            ("`is()` latency", '"`is()`" OR "latency"'),
+        ],
+    )
+    def test_stopword_call_is_kept_and_deduplicated(self, query: str, expected: str) -> None:
+        assert build_fts_query(query) == expected
+
+    @staticmethod
+    def corpus(db: Database, fake_embedder: FakeEmbedder, root: Path) -> HybridSearcher:
+        notes = "".join(f"## Orbit {n}\n\nThe orbit of body {n}.\n\n" for n in range(6))
+        return TestIdentifierLookups.searcher(db, fake_embedder, root, {
+            "a.md": f"# Notes\n\n{notes}## Rates\n\nThe rate of requests per second.\n",
+        })  # fmt: skip
+
+    @pytest.mark.parametrize("query", ["zqxabsent()", "`zqxabsent()`", "zqxone() zqxtwo()"])
+    def test_plain_call_nothing_contains_abstains(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, query: str
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+        try:
+            page = searcher.search_page(query)
+        finally:
+            searcher.close()
+        assert (page.results, page.keyword_match) == ((), "no_match")
+
+    @pytest.mark.parametrize("count", [31, 32, 33])
+    def test_plain_call_abstention_stops_where_the_query_was_cut(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, count: int
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+        try:
+            # Letters only: a digit would already make each term an identifier.
+            names = (f"absent{chr(97 + n // 26)}{chr(97 + n % 26)}()" for n in range(count))
+            page = searcher.search_page(" ".join(names))
+        finally:
+            searcher.close()
+        assert page.keyword_match == "no_match"
+        assert bool(page.results) is (count >= 32)
+
+    @pytest.mark.parametrize(
+        "query",
+        ["zebra giraffe", "zqxabsent(x)", "zqxabsent(", "zqxabsent( )", "cargo zqxabsent"],
+    )
+    def test_plain_call_syntax_does_not_expand_other_queries(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, query: str
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+        try:
+            page = searcher.search_page(query)
+        finally:
+            searcher.close()
+        assert page.keyword_match == "no_match" and page.results, "not a lookup: neighbours"
+
+    @pytest.mark.parametrize(
+        ("term", "expected"),
+        [
+            ("rate()", True),
+            ("`rate()`", True),
+            ("rate().", True),
+            ("rate()..", True),  # already: a `.` before the last character marks a path
+            ("rate", False),
+            ("rate(x)", False),
+            ("rate(", False),
+            ("`rate`()", False),
+        ],
+    )
+    def test_only_an_empty_call_is_read_as_one(self, term: str, expected: bool) -> None:
+        assert _is_identifier(fts_terms(term)[0]) is expected
+        assert not _is_identifier_lookup(fts_terms("cargo metadata"))
+
+    def test_a_call_named_only_in_prose_keeps_its_keyword_hits(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+        try:
+            page = searcher.search_page("rate()")
+        finally:
+            searcher.close()
+        # No section calls rate(), so nothing is ranked as naming it; the word still matched.
+        assert page.keyword_match == "matched"
+        assert [r.heading_path for r in page.results if r.fts_rank is not None] == ["Notes > Rates"]
+
+    def test_a_failed_keyword_index_never_abstains_on_a_call(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+
+        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+            raise DatabaseError("fts index unavailable")
+
+        monkeypatch.setattr(db, "fts_search", broken)
+        try:
+            page = searcher.search_page("zqxabsent()")
+        finally:
+            searcher.close()
+        assert page.keyword_match == "unavailable" and page.results
+
+    def test_a_common_call_the_gate_refuses_never_abstains(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
+        try:
+            # `orbit` is in six sections: found, too common to bypass the gate, refused.
+            page = searcher.search_page("orbit() zqxone() zqxtwo()")
+        finally:
+            searcher.close()
+        assert page.keyword_match == "filtered" and page.results
+
+    def test_plain_call_gate_and_excerpt(self, db: Database, fake_embedder: FakeEmbedder) -> None:
+        sections = [*TestIdentifierGateBypassNeedsRarity.ACRONYM_SECTIONS]
+        sections.append(("Disk Full", "Writes fail when fallocate() returns an error."))
+        TestIdentifierGateBypassNeedsRarity.fill(db, fake_embedder, sections)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            rare = searcher.search("fallocate() zebra quokka wombat", limit=7)
+            common = searcher.search("http() request deadline", limit=7)
+        finally:
+            searcher.close()
+        assert keyword_sections(rare) == {"Disk Full"} and rare[0].heading_title == "Disk Full"
+        # `http` is in five of seven sections: written as a call, it is still vocabulary.
+        assert keyword_sections(common) == {"Upstream Deadlines"}
+
+        passages = [
+            "This is where counters live.",
+            "Call rate(x) for a per-second rate, and is(x) to test one.",
+            "Counters reset on restart.",
+            "Nothing else is kept.",
+        ]
+        assert select_anchor(fts_terms("rate()"), passages, 3) == 1
+        assert select_anchor(fts_terms("is()"), passages, 3) == 1
+        assert select_anchor(fts_terms("rate()"), passages, 3, "`rate()`") is None
 
 
 class TestTheExcerptAnchor:
