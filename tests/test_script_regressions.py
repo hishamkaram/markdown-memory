@@ -114,7 +114,7 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
         baseline.write_text(json.dumps(original))
         scores = evaluation.Scores(  # type: ignore[attr-defined]
             top1=top1, top3=top1, top5=top1, any_valid_top1=top1, ndcg5=top1,
-            median_ms=1.0, p95_ms=1.0, misses=(),
+            median_ms=1.0, p95_ms=1.0,
         )  # fmt: skip
         monkeypatch.setattr(evaluation, "BASELINE", baseline)
         monkeypatch.setattr(evaluation, "evaluate", lambda service, cases: scores)
@@ -182,7 +182,7 @@ def _queries(*labels: str) -> dict[str, dict[str, list[dict[str, object]]]]:
 def _passing_scores(evaluation: object) -> Any:
     return evaluation.Scores(  # type: ignore[attr-defined]
         top1=1.0, top3=1.0, top5=1.0, any_valid_top1=1.0, ndcg5=1.0,
-        median_ms=1.0, p95_ms=1.0, misses=(),
+        median_ms=1.0, p95_ms=1.0,
     )  # fmt: skip
 
 
@@ -1377,3 +1377,467 @@ class TestLiveTestScript:
         run = live.LiveTest(self.client(clean), tmp_path, {})
         with pytest.raises(live.CheckFailedError, match="reports 6 documents"):
             await run.indexing()
+
+
+def _paired_fixture(
+    held_out_label: str = "a.md::Guide > Big", held_out_absent: str = "zzheld absent"
+) -> dict[str, object]:
+    """Two splits whose held-out queries all carry `zzheld`, so any leak can be searched for."""
+    return {
+        "dev": {
+            "paraphrase": [{"query": "install the tool first", "expected": "a.md::Guide > Setup"}],
+            "identifier": [
+                {"query": "nested setup detail", "expected": "a.md::Guide > Setup > Nested"}
+            ],
+            "no_answer": [{"query": "zebra quantum", "shape": "question"}],
+        },
+        "held_out": {
+            "paraphrase": [{"query": "zzheld capacity sizing", "expected": held_out_label}],
+            "identifier": [{"query": "zzheld sizing words", "expected": held_out_label}],
+            "no_answer": [{"query": held_out_absent, "shape": "identifier"}],
+        },
+    }
+
+
+class _RecordingService(MarkdownMemoryService):
+    """The real service, noting every query that reached the index - by any path."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.searched: list[str] = []
+
+    def search_docs(self, query: str, limit: int = 5) -> list[SearchResult]:
+        self.searched.append(query)
+        return super().search_docs(query, limit)
+
+    def search_page(self, query: str, limit: int = 5) -> SearchPage:
+        self.searched.append(query)
+        return super().search_page(query, limit)
+
+
+class TestTheDevOnlyRun:
+    """#94: tuning reads dev; `--split dev` must not search, resolve, record or show held-out."""
+
+    @pytest.fixture
+    def evaluation(self) -> object:
+        import eval_retrieval  # by name: mutation_check points `pythonpath` at its copy
+
+        return eval_retrieval
+
+    @pytest.fixture
+    def run_main(
+        self,
+        evaluation: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_embedder: FakeEmbedder,
+    ) -> Iterator[Any]:
+        root = tmp_path / "docs"
+        root.mkdir()
+        for name, text in _COST_CORPUS.items():
+            (root / name).write_text(text, encoding="utf-8")
+        data = tmp_path / "eval_data"
+        data.mkdir()
+        service = _RecordingService(
+            ServerConfig(db_path=tmp_path / "e.db", docs_dir=root), embedder=fake_embedder
+        )
+        service.index_directory()
+        monkeypatch.setattr(evaluation, "DATA", data)
+        monkeypatch.setattr(evaluation, "CORPUS", root)
+        monkeypatch.setattr(evaluation, "BASELINE", data / "baseline.json")
+        monkeypatch.setattr(evaluation, "_probes", lambda corpus: ())
+        monkeypatch.setattr(evaluation, "open_service", lambda *_args: (service, False))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+        def run(*argv: str, fixture: dict[str, object] | None = None) -> tuple[int, Any]:
+            (data / "queries.json").write_text(json.dumps(fixture or _paired_fixture()))
+            monkeypatch.setattr(sys, "argv", ["eval_retrieval.py", *argv])
+            try:
+                return evaluation.main(), service
+            finally:
+                logging.disable(logging.NOTSET)
+
+        yield run
+        service.close()
+
+    def test_a_dev_run_never_reaches_held_out(
+        self, run_main: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        record = tmp_path / "dev.json"
+        # A held-out label naming no section, or a held-out "unanswerable" query the corpus
+        # answers, stops a full run; a dev run must not even look.
+        broken = _paired_fixture(held_out_label="a.md::Nowhere", held_out_absent="sizing words")
+        try:
+            code, service = run_main("--split", "dev", "--record", str(record), fixture=broken)
+        except SystemExit as stopped:
+            raise AssertionError(f"a dev run validated a held-out case: {stopped}") from stopped
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "GATES NOT CHECKED" in out and "--split dev" in out
+        assert "held_out" not in out and "zzheld" not in out
+        assert service.searched and not [q for q in service.searched if "zzheld" in q]
+        # The scoring pass, the page pass and the cost pass's MCP calls all reached dev.
+        assert service.searched.count("install the tool first") >= 3
+        written = json.loads(record.read_text())
+        assert written["splits"] == ["dev"]
+        assert all(key.startswith("dev|") for key in written["cases"])
+
+    @pytest.mark.parametrize(
+        ("spoilt", "message"),
+        [({"held_out_label": "a.md::Nowhere"}, "Nowhere"),
+         ({"held_out_absent": "sizing words"}, "sizing words")],
+    )  # fmt: skip
+    def test_a_full_run_still_validates_every_case(
+        self, run_main: Any, spoilt: dict[str, str], message: str
+    ) -> None:
+        with pytest.raises(SystemExit, match=message):
+            run_main(fixture=_paired_fixture(**spoilt))
+
+    @pytest.mark.parametrize("override", [["--split", "dev"], ["--queries", "other.json"]])
+    def test_a_report_only_run_cannot_write_the_baseline(
+        self, run_main: Any, override: list[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as stopped:
+            run_main(*override, "--update-baseline")
+        assert stopped.value.code == 2
+
+    def test_another_label_file_checks_no_gate(
+        self, run_main: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        other = tmp_path / "other.json"
+        other.write_text(json.dumps(_paired_fixture()))
+        code, _ = run_main("--queries", str(other))
+        assert code == 0
+        assert "GATES NOT CHECKED: report-only run (--queries" in capsys.readouterr().out
+
+    def test_a_record_holds_every_case_and_the_identity_of_what_ran(
+        self, run_main: Any, tmp_path: Path
+    ) -> None:
+        record = tmp_path / "all.json"
+        code, _ = run_main("--record", str(record))
+        written = json.loads(record.read_text())
+        assert code in (0, 1)  # the fake embedder may miss a floor; the record stands either way
+        assert written["schema"] == 1 and written["splits"] == ["dev", "held_out"]
+        for field in ("queries_sha256", "corpus_sha256", "parse_fingerprint", "evaluator"):
+            assert isinstance(written[field], str) and len(written[field]) == 64
+        assert len(written["code"]["sha256"]) == 64
+        assert set(written["counts"].values()) == {1}
+        assert len(written["cases"]) == 6
+        case = written["cases"]["dev|paraphrase|install the tool first"]
+        assert case["expected"] == "a.md::Guide > Setup" and case["also_valid"] == {}
+        assert {"rank", "any_valid", "ndcg5", "top", "hits", "keyword_match"} <= set(case)
+        assert set(written["cases"]["held_out|no_answer|zzheld absent"]) == {
+            "shape", "hits", "keyword_match"
+        }  # fmt: skip
+
+    def test_a_run_that_fails_the_floors_is_still_recorded(
+        self, run_main: Any, evaluation: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = evaluation.evaluate
+
+        def missing(service: Any, cases: list[dict[str, object]]) -> Any:
+            import dataclasses
+
+            return dataclasses.replace(real(service, cases), top1=0.0, top3=0.0, top5=0.0)
+
+        monkeypatch.setattr(evaluation, "evaluate", missing)
+        record = tmp_path / "regressed.json"
+        code, _ = run_main("--record", str(record))
+        assert code == 1
+        assert json.loads(record.read_text())["cases"]
+
+    def test_a_failed_record_leaves_the_last_one_alone(
+        self, run_main: Any, evaluation: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        record = tmp_path / "dev.json"
+        record.write_text("previous")
+
+        def failing(*_args: object) -> dict[str, object]:
+            raise RuntimeError("search_page failed")
+
+        monkeypatch.setattr(evaluation, "record_cases", failing)
+        with pytest.raises(RuntimeError):
+            run_main("--split", "dev", "--record", str(record))
+        assert record.read_text() == "previous"
+        assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+    def test_a_case_named_twice_is_not_recorded(self, run_main: Any, tmp_path: Path) -> None:
+        fixture = _paired_fixture()
+        dev = fixture["dev"]
+        assert isinstance(dev, dict)
+        dev["paraphrase"] = dev["paraphrase"] * 2
+        with pytest.raises(ValueError, match="share the key"):
+            run_main("--split", "dev", "--record", str(tmp_path / "x.json"), fixture=fixture)
+        assert not (tmp_path / "x.json").exists()
+
+    def test_a_non_finite_score_is_not_recorded(self, evaluation: Any) -> None:
+        outcome = evaluation.Outcome(query="q", rank=1, any_valid=True, ndcg5=float("nan"), top=())
+        scores = evaluation.Scores(
+            top1=1.0, top3=1.0, top5=1.0, any_valid_top1=1.0, ndcg5=1.0,
+            median_ms=1.0, p95_ms=1.0, cases=(outcome,),
+        )  # fmt: skip
+        queries = {"dev": {"paraphrase": [{"query": "q", "expected": "X"}], "identifier": [],
+                           "no_answer": []}}  # fmt: skip
+        stub = _EvalStubService(ServerConfig(db_path=Path("unused.db"), docs_dir=Path(".")))
+        try:
+            evaluation.record_cases(
+                stub, queries, ("dev",), {"dev/paraphrase": scores, "dev/identifier": scores}
+            )
+        except ValueError as refused:
+            assert "nan" in str(refused)
+        else:
+            raise AssertionError("a NaN nDCG@5 was recorded")
+
+
+def _case(rank: int | None = 1, *, any_valid: bool = True, ndcg5: float = 1.0, hits: int = 5,
+          keyword: str = "matched", expected: str = "a.md::A") -> dict[str, object]:  # fmt: skip
+    return {
+        "expected": expected, "also_valid": {}, "rank": rank, "any_valid": any_valid,
+        "ndcg5": ndcg5, "top": [], "hits": hits, "keyword_match": keyword,
+    }  # fmt: skip
+
+
+def _record(cases: dict[str, dict[str, object]] | None = None, **header: object) -> dict[str, Any]:
+    cases = cases if cases is not None else {
+        "dev|paraphrase|p": _case(), "dev|identifier|i": _case(),
+        "dev|no_answer|n": {"shape": "question", "hits": 0, "keyword_match": "no_match"},
+    }  # fmt: skip
+    counts: dict[str, int] = {
+        f"dev|{kind}": 0 for kind in ("paraphrase", "identifier", "no_answer")
+    }
+    for key in cases:
+        stratum = "|".join(key.split("|", 2)[:2])
+        counts[stratum] = counts.get(stratum, 0) + 1
+    return {
+        "schema": 1, "corpus": "v1", "preset": "embeddinggemma", "splits": ["dev"],
+        "queries": "q.json", "queries_sha256": "q" * 64, "corpus_sha256": "c" * 64,
+        "parse_fingerprint": "f" * 64, "evaluator": "e" * 64,
+        "code": {"package": "src", "revision": "r", "sha256": "a" * 64},
+        "counts": counts, "cases": cases, **header,
+    }  # fmt: skip
+
+
+class TestThePairedRule:
+    """#94: two revisions held to a per-query rule - a total cannot hide one query's loss."""
+
+    @pytest.fixture
+    def compare(self, tmp_path: Path) -> Any:
+        import eval_compare  # by name: mutation_check points `pythonpath` at its copy
+
+        def run(base: dict[str, Any], candidate: dict[str, Any], *flags: str) -> int:
+            paths = []
+            for name, record in (("base.json", base), ("candidate.json", candidate)):
+                path = tmp_path / name
+                path.write_text(record if isinstance(record, str) else json.dumps(record))
+                paths.append(str(path))
+            try:
+                return int(eval_compare.main([*paths, *flags]))
+            except (AttributeError, KeyError, TypeError, ValueError) as crash:
+                # A malformed record must be refused with exit 2, never crash the comparator.
+                raise AssertionError(f"the comparator crashed: {crash!r}") from crash
+
+        return run
+
+    @staticmethod
+    def changed(**case: Any) -> dict[str, Any]:
+        candidate = _record()
+        candidate["code"] = {"package": "src", "revision": "s", "sha256": "b" * 64}
+        candidate["cases"]["dev|paraphrase|p"] = _case(**case)
+        return candidate
+
+    @pytest.mark.parametrize(
+        ("before", "after", "reason"),
+        [
+            ({"rank": 1}, {"rank": 2}, "rank 1->2"),
+            ({"rank": 3}, {"rank": None}, "rank 3->None"),
+            ({"any_valid": True}, {"any_valid": False}, "any-valid@1 lost"),
+            ({"ndcg5": 0.5}, {"ndcg5": 0.5 - 2e-9}, "nDCG@5"),
+            ({"rank": None, "hits": 5}, {"rank": None, "hits": 0}, "new empty page"),
+        ],
+    )
+    def test_one_query_worse_rejects(
+        self, compare: Any, capsys: pytest.CaptureFixture[str],
+        before: dict[str, Any], after: dict[str, Any], reason: str,
+    ) -> None:  # fmt: skip
+        base = _record()
+        base["cases"]["dev|paraphrase|p"] = _case(**before)
+        assert compare(base, self.changed(**after)) == 1
+        out = capsys.readouterr().out
+        assert "REJECT" in out and reason in out and "dev|paraphrase|p" in out
+
+    def test_a_drop_within_the_tolerance_is_not_a_loss(self, compare: Any) -> None:
+        base = _record()
+        base["cases"]["dev|paraphrase|p"] = _case(ndcg5=0.5)
+        assert compare(base, self.changed(ndcg5=0.5 - 1e-10)) == 0
+
+    def test_a_no_answer_page_must_not_change(
+        self, compare: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        candidate = _record()
+        candidate["cases"]["dev|no_answer|n"]["keyword_match"] = "matched"
+        assert compare(_record(), candidate) == 1
+        assert "no-answer page changed" in capsys.readouterr().out
+
+    def test_a_loss_among_gains_still_rejects(
+        self, compare: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cases = {f"dev|paraphrase|p{n}": _case(rank=2) for n in range(5)}
+        cases["dev|identifier|i"] = _case(rank=1)
+        base = _record(cases)
+        better = {key: _case(rank=1) for key in cases}
+        better["dev|identifier|i"] = _case(rank=2)
+        assert compare(base, _record(better)) == 1
+        out = capsys.readouterr().out
+        assert "wins 5, losses 0" in out and "dev|identifier|i: rank 1->2" in out
+
+    def test_an_answerable_keyword_change_is_shown_not_vetoed(
+        self, compare: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert compare(_record(), self.changed(keyword="no_match")) == 0
+        assert "keyword_match matched->no_match" in capsys.readouterr().out
+
+    def test_a_label_change_needs_an_explicit_review(
+        self, compare: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        candidate = self.changed(expected="a.md::Moved")
+        assert compare(_record(), candidate) == 2
+        assert compare(_record(), candidate, "--allow-label-changes") == 0
+        assert "not an identical-definition comparison" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "spoil",
+        [
+            "duplicate key",
+            "NaN",
+            "1e400",
+            "boolean rank",
+            "rank 0",
+            "rank 21",
+            "missing case",
+            "count mismatch",
+            "foreign split",
+            "empty stratum",
+            "schema 2",
+            "boolean schema",
+            "missing rank",
+            "missing top",
+            "unknown shape",
+            "array root",
+        ],
+    )
+    def test_a_malformed_record_is_not_compared(self, compare: Any, spoil: str) -> None:
+        record: Any = _record()
+        cases = record["cases"]
+        if spoil == "boolean rank":
+            cases["dev|paraphrase|p"]["rank"] = True
+        elif spoil in ("rank 0", "rank 21"):
+            cases["dev|paraphrase|p"]["rank"] = int(spoil.split()[1])
+        elif spoil == "missing case":
+            del cases["dev|identifier|i"]
+        elif spoil == "count mismatch":
+            record["counts"]["dev|identifier"] = 2
+        elif spoil == "foreign split":
+            cases["held_out|identifier|i"] = _case()
+        elif spoil == "empty stratum":
+            del cases["dev|identifier|i"]
+            record["counts"]["dev|identifier"] = 0
+        elif spoil == "schema 2":
+            record["schema"] = 2
+        elif spoil == "boolean schema":
+            record["schema"] = True
+        elif spoil in ("missing rank", "missing top"):
+            del cases["dev|paraphrase|p"][spoil.split()[1]]
+        elif spoil == "unknown shape":
+            cases["dev|no_answer|n"]["shape"] = "riddle"
+        text = json.dumps(record) if spoil != "array root" else json.dumps([record])
+        if spoil == "duplicate key":
+            text = text.replace('"rank": 1,', '"rank": 1, "rank": 2,', 1)
+        elif spoil in ("NaN", "1e400"):
+            text = text.replace('"ndcg5": 1.0', f'"ndcg5": {spoil}', 1)
+        assert compare(_record(), text) == 2
+        assert compare(text, _record()) == 2
+        assert compare(text, text) == 2, "two records spoilt alike were compared"
+
+    @pytest.mark.parametrize("field", ["corpus_sha256", "evaluator", "preset"])
+    def test_records_of_different_things_are_not_compared(self, compare: Any, field: str) -> None:
+        assert compare(_record(), _record(**{field: "other"})) == 2
+
+    def test_the_same_code_twice_is_a_repeatability_check(
+        self, compare: Any, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert compare(_record(), _record()) == 0
+        out = capsys.readouterr().out
+        assert "same-code comparison: a repeatability check" in out
+        assert compare(_record(), _record(queries_sha256="z" * 64)) == 0
+        out = capsys.readouterr().out
+        assert "same-code comparison" in out and "repeatability" not in out
+
+
+class TestTheCacheNamesWhatBuiltIt:
+    """#94: the eval cache keys on the imported code and the corpus's location."""
+
+    @pytest.fixture
+    def corpus(self, tmp_path: Path) -> Path:
+        root = tmp_path / "corpus"
+        root.mkdir()
+        (root / "guide.md").write_text("# Guide\n\n## Storage\n\nsegment size\n", encoding="utf-8")
+        return root
+
+    def test_another_revision_on_pythonpath_keys_its_own_index(
+        self, corpus: Path, tmp_path: Path
+    ) -> None:
+        import shutil
+        import subprocess
+
+        import eval_cache
+
+        import markdown_memory
+
+        copy = tmp_path / "other" / "markdown_memory"
+        shutil.copytree(Path(markdown_memory.__file__).parent, copy)
+        # Indexing code only: the parse fingerprint cannot see this difference.
+        with (copy / "indexer.py").open("a", encoding="utf-8") as indexer:
+            indexer.write("\n# another revision\n")
+        program = (
+            "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+            "import eval_cache; print(eval_cache.build_key(Path(sys.argv[2]), 'bge-small').digest)"
+        )
+        scripts = str(Path(eval_cache.__file__).parent)
+
+        def key(pythonpath: str | None) -> str:
+            env = {**os.environ}
+            env.pop("PYTHONPATH", None)
+            if pythonpath:
+                env["PYTHONPATH"] = pythonpath
+            return subprocess.run(
+                [sys.executable, "-c", program, scripts, str(corpus)],
+                capture_output=True, text=True, check=True, env=env,
+            ).stdout.strip()  # fmt: skip
+
+        assert key(str(copy.parent)) != key(None)
+
+    def test_the_same_corpus_at_two_roots_is_two_indexes(
+        self, corpus: Path, tmp_path: Path
+    ) -> None:
+        import shutil
+
+        import eval_cache
+
+        other = shutil.copytree(corpus, tmp_path / "worktree" / "corpus")
+        assert eval_cache.corpus_digest(other) == eval_cache.corpus_digest(corpus)
+        assert (
+            eval_cache.build_key(other, "bge-small").digest
+            != eval_cache.build_key(corpus, "bge-small").digest
+        )
+
+    def test_an_entry_from_the_old_identity_is_not_reused(self, tmp_path: Path) -> None:
+        import eval_cache
+
+        db_path = tmp_path / "eval.db"
+        db_path.write_bytes(b"")
+        key = eval_cache.CacheKey("c", "k", "e", "s")
+        eval_cache.record(db_path, key, "same")
+        meta = db_path.with_suffix(".meta.json")
+        meta.write_text(json.dumps({**json.loads(meta.read_text()), "version": 1}))
+        with pytest.raises(eval_cache.StaleCacheError, match="version 1"):
+            eval_cache.validate(db_path, "same", key)

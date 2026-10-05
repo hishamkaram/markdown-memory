@@ -41,6 +41,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import markdown_memory
 from markdown_memory.db import SCHEMA_VERSION, Database
 from markdown_memory.discovery import MAX_FILE_BYTES, iter_markdown_files
 from markdown_memory.embedders import (
@@ -64,7 +65,9 @@ from markdown_memory.parser import (
     MarkdownParser,
 )
 
-SOURCE = Path(__file__).parent.parent / "src" / "markdown_memory"
+# The package that is imported, not the one beside this script: with `PYTHONPATH` naming
+# another revision's `src`, that revision builds the index, so its source must key it (#94).
+SOURCE = Path(markdown_memory.__file__).resolve().parent
 # Modules whose source decides what goes into the index. `search.py` is deliberately
 # absent: ranking changes are what the gate exists to measure, and re-indexing for one
 # would make every comparison cost 25 minutes.
@@ -78,7 +81,10 @@ INDEX_SOURCES = (
     "db.py",
     "models.py",
 )
-CACHE_VERSION = 1  # bump when the layout of the cache directory itself changes
+# Bump when the layout of the cache directory itself changes - or, as for 2 (#94), when
+# entries made under the old identity may describe something the key no longer names:
+# version 1 keyed on the source beside this script and on no corpus location.
+CACHE_VERSION = 2
 
 
 def cache_root() -> Path:
@@ -255,6 +261,9 @@ def build_key(
         "exclude": list(exclude),
     }
     storage = {
+        # The index stores absolute file paths, so the same corpus in two worktrees is two
+        # indexes: one built under the other's root names none of its documents (#95).
+        "root": str(corpus.resolve()),
         "schema": SCHEMA_VERSION,
         "sqlite": sqlite3.sqlite_version,
         "vec": _vec_version(),
@@ -386,6 +395,8 @@ def validate(db_path: Path, expected_fingerprint: str, key: CacheKey) -> None:
     if not db_path.exists():
         raise StaleCacheError("no database")
     meta = _read_meta(db_path)
+    if meta.get("version") != CACHE_VERSION:
+        raise StaleCacheError(f"cache metadata version {meta.get('version')!r}")
     stored = meta.get("parse_fingerprint")
     if not isinstance(stored, str):
         raise StaleCacheError("cache metadata has no parse fingerprint")

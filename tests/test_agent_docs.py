@@ -231,7 +231,18 @@ class TestDocsMatchTheCode:
 
     def test_every_documented_flag_is_accepted_by_its_script(self) -> None:
         for script, flags in (
-            ("scripts/eval_retrieval.py", ("--show-misses", "--update-baseline", "--embedder")),
+            (
+                "scripts/eval_retrieval.py",
+                (
+                    "--show-misses",
+                    "--update-baseline",
+                    "--embedder",
+                    "--split",
+                    "--record",
+                    "--queries",
+                ),
+            ),
+            ("scripts/eval_compare.py", ("--allow-label-changes",)),
             ("scripts/reindex_docs.py", ("--force", "--db", "--embedder")),
             ("src/markdown_memory/server.py", ("--db", "--docs-dir", "--log-level", "--embedder")),
         ):
