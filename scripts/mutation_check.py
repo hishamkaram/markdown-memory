@@ -1266,7 +1266,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 11124),',
+        old='    ("README.md", 11192),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -2556,7 +2556,24 @@ MUTATIONS = (
         module="search.py",
         old='        call = len(term) > 2 and term.endswith("()")',
         new="        call = False",
-        tests="test_an_identifier_is_found_as_itself_and_not_inside_another",
+        tests=(
+            "test_an_identifier_is_found_as_itself_and_not_inside_another"
+            " or test_plain_call_matches_arguments_at_identifier_boundaries"
+        ),
+    ),
+    Mutation(
+        name="calls: omit plain-call identifier recognition",
+        module="search.py",
+        old="        or _is_plain_call(term)\n",
+        new="",
+        tests="test_plain_call_definition_wins",
+    ),
+    Mutation(
+        name="calls: discard stopword-named calls",
+        module="search.py",
+        old="if _is_plain_call(term) or not word.isalpha()",
+        new="if not word.isalpha()",
+        tests="test_stopword_call_survives_mixed_query",
     ),
     Mutation(
         name="identifiers: miss gh_repo when GH_REPO is asked for",
