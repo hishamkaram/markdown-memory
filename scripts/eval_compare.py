@@ -35,6 +35,12 @@ SCHEMA = 1
 SPLITS = ("dev", "held_out")
 KINDS = ("paraphrase", "identifier", "no_answer")
 ANSWERABLE = ("paraphrase", "identifier")
+SHAPES = ("identifier", "question")  # eval_retrieval.NO_ANSWER_SHAPES
+FIELDS = {
+    "answerable": ("expected", "also_valid", "rank", "any_valid", "ndcg5", "top", "hits",
+                   "keyword_match"),
+    "no_answer": ("shape", "hits", "keyword_match"),
+}  # fmt: skip
 KEYWORD_STATES = get_args(KeywordMatch)
 MAX_RANK = 20  # what eval_retrieval.evaluate searches
 MAX_HITS = 5  # the default page
@@ -75,14 +81,18 @@ def _ndcg(case: Case) -> float:
 def _check_case(name: str, key: str, case: object) -> Case:
     if not isinstance(case, dict):
         raise RecordError(f"{name}: case {key!r} is not an object")
+    kind = "no_answer" if key.split("|", 2)[1] == "no_answer" else "answerable"
+    absent = [field for field in FIELDS[kind] if field not in case]
+    if absent:
+        raise RecordError(f"{name}: case {key!r} has no {', '.join(absent)}")
     hits, keyword = case.get("hits"), case.get("keyword_match")
     if not _is_int(hits) or not 0 <= hits <= MAX_HITS:
         raise RecordError(f"{name}: case {key!r} has hits {hits!r}")
     if keyword not in KEYWORD_STATES:
         raise RecordError(f"{name}: case {key!r} has keyword_match {keyword!r}")
-    if key.split("|", 2)[1] == "no_answer":
-        if not isinstance(case.get("shape"), str):
-            raise RecordError(f"{name}: no-answer case {key!r} has no shape")
+    if kind == "no_answer":
+        if case["shape"] not in SHAPES:
+            raise RecordError(f"{name}: no-answer case {key!r} has shape {case['shape']!r}")
         return case
     rank, ndcg = case.get("rank"), case.get("ndcg5")
     if rank is not None and (not _is_int(rank) or not 1 <= rank <= MAX_RANK):
@@ -94,6 +104,9 @@ def _check_case(name: str, key: str, case: object) -> Case:
         raise RecordError(f"{name}: case {key!r} has nDCG@5 {ndcg!r}")
     if not isinstance(case.get("expected"), str) or not isinstance(case.get("also_valid"), dict):
         raise RecordError(f"{name}: case {key!r} has no labels")
+    top = case["top"]
+    if not isinstance(top, list) or not all(isinstance(label, str) for label in top):
+        raise RecordError(f"{name}: case {key!r} has top {top!r}")
     return case
 
 
@@ -107,7 +120,9 @@ def load(path: Path) -> Record:
         )
     except (OSError, ValueError) as error:
         raise RecordError(f"{name}: {error}") from error
-    if not isinstance(record, dict) or record.get("schema") != SCHEMA:
+    if not isinstance(record, dict) or not _is_int(record.get("schema")):
+        raise RecordError(f"{name}: not a record (schema {record.get('schema')!r})")
+    if record["schema"] != SCHEMA:
         raise RecordError(f"{name}: not a schema-{SCHEMA} record")
     missing = [field for field in (*HEADER, "counts", "cases") if field not in record]
     if missing:

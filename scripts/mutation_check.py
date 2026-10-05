@@ -1638,6 +1638,14 @@ MUTATIONS = (
         tests="test_a_malformed_record_is_not_compared",
     ),
     Mutation(
+        name="compare: read a case that is missing a field",
+        module="eval_compare.py",
+        area="scripts",
+        old="    if absent:",
+        new="    if False:",
+        tests="test_a_malformed_record_is_not_compared",
+    ),
+    Mutation(
         name="compare: let two empty records agree",
         module="eval_compare.py",
         area="scripts",

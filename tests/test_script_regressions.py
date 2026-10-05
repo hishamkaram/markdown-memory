@@ -1630,7 +1630,11 @@ class TestThePairedRule:
                 path = tmp_path / name
                 path.write_text(record if isinstance(record, str) else json.dumps(record))
                 paths.append(str(path))
-            return int(eval_compare.main([*paths, *flags]))
+            try:
+                return int(eval_compare.main([*paths, *flags]))
+            except (KeyError, TypeError, ValueError) as crash:
+                # A malformed record must be refused with exit 2, never crash the comparator.
+                raise AssertionError(f"the comparator crashed: {crash!r}") from crash
 
         return run
 
@@ -1714,6 +1718,10 @@ class TestThePairedRule:
             "foreign split",
             "empty stratum",
             "schema 2",
+            "boolean schema",
+            "missing rank",
+            "missing top",
+            "unknown shape",
         ],
     )
     def test_a_malformed_record_is_not_compared(self, compare: Any, spoil: str) -> None:
@@ -1734,6 +1742,12 @@ class TestThePairedRule:
             record["counts"]["dev|identifier"] = 0
         elif spoil == "schema 2":
             record["schema"] = 2
+        elif spoil == "boolean schema":
+            record["schema"] = True
+        elif spoil in ("missing rank", "missing top"):
+            del cases["dev|paraphrase|p"][spoil.split()[1]]
+        elif spoil == "unknown shape":
+            cases["dev|no_answer|n"]["shape"] = "riddle"
         text = json.dumps(record)
         if spoil == "duplicate key":
             text = text.replace('"rank": 1,', '"rank": 1, "rank": 2,', 1)
