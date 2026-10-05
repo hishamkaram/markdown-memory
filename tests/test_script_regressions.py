@@ -1632,7 +1632,7 @@ class TestThePairedRule:
                 paths.append(str(path))
             try:
                 return int(eval_compare.main([*paths, *flags]))
-            except (KeyError, TypeError, ValueError) as crash:
+            except (AttributeError, KeyError, TypeError, ValueError) as crash:
                 # A malformed record must be refused with exit 2, never crash the comparator.
                 raise AssertionError(f"the comparator crashed: {crash!r}") from crash
 
@@ -1722,6 +1722,7 @@ class TestThePairedRule:
             "missing rank",
             "missing top",
             "unknown shape",
+            "array root",
         ],
     )
     def test_a_malformed_record_is_not_compared(self, compare: Any, spoil: str) -> None:
@@ -1748,7 +1749,7 @@ class TestThePairedRule:
             del cases["dev|paraphrase|p"][spoil.split()[1]]
         elif spoil == "unknown shape":
             cases["dev|no_answer|n"]["shape"] = "riddle"
-        text = json.dumps(record)
+        text = json.dumps(record) if spoil != "array root" else json.dumps([record])
         if spoil == "duplicate key":
             text = text.replace('"rank": 1,', '"rank": 1, "rank": 2,', 1)
         elif spoil in ("NaN", "1e400"):

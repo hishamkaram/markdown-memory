@@ -1638,6 +1638,14 @@ MUTATIONS = (
         tests="test_a_malformed_record_is_not_compared",
     ),
     Mutation(
+        name="compare: read a record that is not an object",
+        module="eval_compare.py",
+        area="scripts",
+        old="    if not isinstance(record, dict):\n",
+        new="    if False:\n",
+        tests="test_a_malformed_record_is_not_compared",
+    ),
+    Mutation(
         name="compare: read a case that is missing a field",
         module="eval_compare.py",
         area="scripts",

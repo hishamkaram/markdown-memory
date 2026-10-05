@@ -120,7 +120,9 @@ def load(path: Path) -> Record:
         )
     except (OSError, ValueError) as error:
         raise RecordError(f"{name}: {error}") from error
-    if not isinstance(record, dict) or not _is_int(record.get("schema")):
+    if not isinstance(record, dict):
+        raise RecordError(f"{name}: not a JSON object")
+    if not _is_int(record.get("schema")):
         raise RecordError(f"{name}: not a record (schema {record.get('schema')!r})")
     if record["schema"] != SCHEMA:
         raise RecordError(f"{name}: not a schema-{SCHEMA} record")
