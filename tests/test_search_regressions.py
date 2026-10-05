@@ -1129,14 +1129,39 @@ class TestPlainCalls:
         [
             ("is latency", '"latency"'),
             ("is() latency", '"is()" OR "latency"'),
-            ("is() the", '"is()"'),
-            ("is() IS() latency", '"is()" OR "latency"'),
+            ("is() the", '"is()"'),  # the call is meaningful: `the` no longer rides along
+            ("is() IS() latency", '"is()" OR "latency"'),  # the first spelling is kept
             ("IS() is() latency", '"IS()" OR "latency"'),
             ("`is()` latency", '"`is()`" OR "latency"'),
         ],
     )
-    def test_stopword_call_is_kept_and_deduplicated(self, query: str, expected: str) -> None:
-        assert build_fts_query(query) == expected
+    def test_stopword_call_is_kept_and_deduplicated(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+        expected: str,
+    ) -> None:
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": "# Checks\n\n## Predicates\n\nCall is(x) to test latency budgets.\n",
+        })  # fmt: skip
+        searched: list[str] = []
+        fts_search = db.fts_search
+
+        def recording(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+            searched.append(match_query)
+            return fts_search(match_query, limit, scope)
+
+        monkeypatch.setattr(db, "fts_search", recording)
+        try:
+            page = searcher.search_page(query, limit=1)
+        finally:
+            searcher.close()
+        assert searched[0] == expected  # the expression the keyword index was asked
+        assert page.keyword_match == "matched"
+        assert page.results[0].heading_path == "Checks > Predicates"
 
     @staticmethod
     def corpus(db: Database, fake_embedder: FakeEmbedder, root: Path) -> HybridSearcher:
@@ -1266,6 +1291,50 @@ class TestPlainCalls:
         assert select_anchor(fts_terms("rate()"), passages, 3) == 1
         assert select_anchor(fts_terms("is()"), passages, 3) == 1
         assert select_anchor(fts_terms("rate()"), passages, 3, "`rate()`") is None
+
+    PASSAGES = (
+        "Counters only ever go up.",
+        "This is where they live.",
+        "They reset when the process restarts.",
+        "Scrapes read them every minute.",
+        "Gaps appear when a scrape fails.",
+        "Call rate(x) for a per-second figure, and is(x) to test one.",
+        "Graphs show the result.",
+        "Nothing else is kept.",
+    )
+
+    @pytest.mark.parametrize(
+        ("query", "heading", "excerpted"),
+        [("rate()", "Counters", True), ("is()", "Counters", True), ("rate()", "`rate()`", False)],
+    )
+    def test_a_call_lookup_is_excerpted_where_the_call_is(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+        heading: str,
+        excerpted: bool,
+    ) -> None:
+        body = "\n\n".join(self.PASSAGES)
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "a.md": f"# Metrics\n\n## {heading}\n\n{body}\n",
+        })  # fmt: skip
+        query_sql = "SELECT id FROM sections WHERE heading_level = 2"
+        (sid,) = (s for (s,) in db.connection().execute(query_sql))
+        # The vectors liked the first passage: only reading the call anchors on its own.
+        ranking = ([int(sid)], {int(sid): (0, self.PASSAGES[0])})
+        monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: ranking)
+        try:
+            top = searcher.search_page(query, limit=1).results[0]
+        finally:
+            searcher.close()
+        if not excerpted:  # headed by the call: the section is the answer, whole
+            assert top.excerpt is None
+            return
+        assert top.excerpt is not None
+        assert "rate(x)" in top.excerpt.text and self.PASSAGES[0] not in top.excerpt.text
 
 
 class TestTheExcerptAnchor:
