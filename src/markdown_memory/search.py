@@ -223,8 +223,15 @@ def _without_duplicates(terms: Iterable[str]) -> list[str]:
 _IDENTIFIER_MARKS = frozenset("_./\\:@#$=")
 
 
+def _is_plain_call(term: str) -> bool:
+    """`rate()`: a name and an empty call, as an agent writes a function it means."""
+    term = term.strip("\"'`")
+    term = term.rstrip("?!,;:").removesuffix(".").strip("\"'`")
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", term) is not None
+
+
 def _is_identifier(quoted_term: str) -> bool:
-    """Spelled like a flag, path, environment variable, constant, camelCase key or version.
+    """Spelled like a flag, path, environment variable, constant, camelCase key, version or call.
 
     Spelling cannot tell ``ENOSPC`` from ``HTTP``: whether a match on such a term may
     bypass the keyword gate also depends on how rare it is (see ``HybridSearcher._gate``).
@@ -236,6 +243,7 @@ def _is_identifier(quoted_term: str) -> bool:
         or any(character in _IDENTIFIER_MARKS or character.isdigit() for character in term[:-1])
         or (len(term) > 1 and term.isupper())
         or any(lower.islower() and upper.isupper() for lower, upper in pairwise(term))
+        or _is_plain_call(term)
     )
 
 
@@ -255,11 +263,11 @@ def _is_stopword(term: str) -> bool:
     """True for plain function words only.
 
     Anything that looks like an identifier is kept even when it spells a stopword:
-    flags (``--all``, ``-i``), decorated names (``@Before``, ``IS_ON``) and upper-case
-    keywords (``WHERE``, ``NOT NULL``) are exactly what keyword search exists for.
+    flags (``--all``, ``-i``), decorated names (``@Before``, ``IS_ON``), calls (``all()``)
+    and upper-case keywords (``WHERE``, ``NOT NULL``) are what keyword search exists for.
     """
     word = term.strip(_SENTENCE_PUNCTUATION)
-    if not word.isalpha() or (len(word) > 1 and word.isupper()):
+    if _is_plain_call(term) or not word.isalpha() or (len(word) > 1 and word.isupper()):
         return False
     return word.lower() in _STOPWORDS
 
