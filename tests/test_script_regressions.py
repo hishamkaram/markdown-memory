@@ -2092,3 +2092,53 @@ class TestEvaluationsReuseWhatTheyBuilt:
         assert harness.open("embeddinggemma", "base") is True
         assert harness.open("embeddinggemma", "base") is False
         assert harness.open("bge-small", "base") is False  # the sibling survived
+
+
+class TestEveryModuleIsKeyedOrExcused:
+    """#99: a module that shapes the index and is missing from the key is a false cache hit."""
+
+    @pytest.fixture
+    def cache(self) -> Any:
+        import eval_cache  # by name: mutation_check points `pythonpath` at its copy
+
+        return eval_cache
+
+    @pytest.fixture
+    def key_after(self, cache: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        import shutil
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "guide.md").write_text(
+            "# Guide\n\n## Storage\n\nsegment size\n", encoding="utf-8"
+        )
+        before = cache.build_key(corpus, "bge-small").digest
+
+        def run(module: str) -> tuple[str, str]:
+            """The key before and after one line is added to ``module`` of the imported package."""
+            copy = tmp_path / module / "markdown_memory"
+            shutil.copytree(cache.SOURCE, copy)
+            with (copy / module).open("a", encoding="utf-8") as source:
+                source.write("\n# another revision of this module\n")
+            monkeypatch.setattr(cache, "SOURCE", copy)
+            return before, cache.build_key(corpus, "bge-small").digest
+
+        return run
+
+    def test_every_package_module_is_classified(self, cache: Any) -> None:
+        present = {path.name for path in cache.SOURCE.glob("*.py")}
+        keyed, excused = set(cache.INDEX_SOURCES), set(cache.NOT_INDEX_SOURCES)
+        assert keyed.isdisjoint(excused)
+        assert keyed | excused == present, sorted(present ^ (keyed | excused))
+        assert all(reason.strip() for reason in cache.NOT_INDEX_SOURCES.values())
+
+    @pytest.mark.parametrize("module", ["server.py", "headings.py", "exceptions.py"])
+    def test_a_change_to_what_builds_the_index_changes_the_key(
+        self, key_after: Any, module: str
+    ) -> None:
+        before, after = key_after(module)
+        assert before != after, f"a change to {module} would reuse an index built without it"
+
+    def test_a_ranking_change_keeps_the_key(self, key_after: Any) -> None:
+        before, after = key_after("search.py")
+        assert before == after, "a ranking change would rebuild the evaluation index"

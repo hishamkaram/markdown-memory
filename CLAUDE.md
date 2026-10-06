@@ -178,7 +178,8 @@ stale. Only a renamed model that cannot name its weights still discards the inde
 The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
 content, the chunking constants, the source of the modules that decide what is indexed
 (`parser.py`, `indexer.py`, `embedders.py`, `model_cache.py`, `discovery.py`, `config.py`,
-`db.py`, `models.py`),
+`db.py`, `models.py`, `server.py`, `headings.py`, `exceptions.py`; every other module is excused
+by name with a reason in `eval_cache.NOT_INDEX_SOURCES`, and a test fails on one that is neither),
 the embedder's revision, prompts and dimension, the size and mtime of the model files
 actually on disk, and `MARKDOWN_MEMORY_THREADS` (`scripts/eval_cache.py`). A cached index
 is never trusted on its key alone: before it is scored, its parse fingerprint - every

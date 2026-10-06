@@ -642,6 +642,13 @@ def _service(
     embedder: Embedder,
     docs_dir: Path | None = None,
 ) -> MarkdownMemoryService:
+    """The service an evaluation indexes with: four settings, each already in the cache key.
+
+    The database, corpus, preset and model cache are keyed as data; every other setting is
+    `ServerConfig`'s default, whose source (`config.py`) is keyed. Passing anything else here
+    - `exclude`, `gitignore` - changes what is indexed without changing the key (#99), so it
+    has to be keyed in the same change.
+    """
     return MarkdownMemoryService(
         ServerConfig(
             db_path=db_path,

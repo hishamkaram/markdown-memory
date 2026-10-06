@@ -69,9 +69,11 @@ from markdown_memory.parser import (
 # The package that is imported, not the one beside this script: with `PYTHONPATH` naming
 # another revision's `src`, that revision builds the index, so its source must key it (#94).
 SOURCE = Path(markdown_memory.__file__).resolve().parent
-# Modules whose source decides what goes into the index. `search.py` is deliberately
-# absent: ranking changes are what the gate exists to measure, and re-indexing for one
-# would make every comparison cost 25 minutes.
+# Every module of the package is one or the other, and a test holds that (#99): a module
+# left out of both would be one whose changes no key notices, which is a false cache hit.
+# Modules whose source decides what goes into the index - including what builds the
+# `Indexer` (`server.py`), where it walks (`headings._absolute`) and which failures abort a
+# build rather than being recorded (`exceptions.py`).
 INDEX_SOURCES = (
     "parser.py",
     "indexer.py",
@@ -81,7 +83,22 @@ INDEX_SOURCES = (
     "config.py",
     "db.py",
     "models.py",
+    "server.py",
+    "headings.py",
+    "exceptions.py",
 )
+# Modules whose source cannot change what an evaluation indexes, and why.
+NOT_INDEX_SOURCES = {
+    # Ranking is what the gate exists to measure; re-indexing for each change to it would
+    # make every comparison cost 25 minutes.
+    "search.py": "ranking only: it reads the index and never writes it",
+    "freshness.py": (
+        "status only: it may stamp documents.mtime_ns, never a document, section, passage or vector"
+    ),
+    "autoindex.py": "never started by an evaluation: only main() starts background indexing",
+    "trees.py": "worktree routing in _ServiceProvider, which an evaluation does not go through",
+    "__init__.py": "the version and re-exports, neither of which is written to the index",
+}
 # Bump when the layout of the cache directory itself changes - or, as for 2 (#94), when
 # entries made under the old identity may describe something the key no longer names:
 # version 1 keyed on the source beside this script and on no corpus location.
