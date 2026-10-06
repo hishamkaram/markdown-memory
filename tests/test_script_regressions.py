@@ -441,11 +441,12 @@ class TestTheRealDocsCorpus:
         corpus = evaluation.corpora()["v2"]  # type: ignore[attr-defined]
         queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
         for split in ("dev", "held_out"):
-            assert [len(queries[split][kind]) for kind in ("paraphrase", "identifier")] == [20, 20]
+            kinds = ("paraphrase", "identifier", "mixed")
+            assert [len(queries[split][kind]) for kind in kinds] == [20, 20, 20]
         graded = [
             label
             for split in ("dev", "held_out")
-            for kind in ("paraphrase", "identifier")
+            for kind in ("paraphrase", "identifier", "mixed")
             for case in queries[split][kind]
             for label in case.get("also_valid", {})
         ]
