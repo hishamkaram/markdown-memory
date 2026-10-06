@@ -212,12 +212,15 @@ class TestDocsMatchTheCode:
                 f"but the baseline says {printed}"
             )
         for name, preset in baseline.items():
-            assert set(preset) == {
+            strata = {
                 "dev/paraphrase",
                 "dev/identifier",
                 "held_out/paraphrase",
                 "held_out/identifier",
             }
+            if name.endswith("@v2"):  # corpus_v2 alone holds the mixed stratum (#78)
+                strata |= {"dev/mixed", "held_out/mixed"}
+            assert set(preset) == strata, name
             if "@" not in name:  # the identifier floor is the gate's, not corpus_v2's
                 assert (
                     preset["dev/identifier"]["top1"] == preset["held_out/identifier"]["top1"] == 1

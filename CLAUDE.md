@@ -155,7 +155,8 @@ accepted change, record the new numbers with `--update-baseline` and update the 
 rejected: all lowered accuracy and cost 2-12 s per query.
 
 `--corpus v2` scores the same way over `scripts/eval_data/corpus_v2` - 97 real upstream
-docs (cargo, compose-spec, gh, prometheus, ripgrep) with `queries_v2.json` - and is
+docs (cargo, compose-spec, gh, prometheus, ripgrep) with `queries_v2.json`, whose `mixed`
+stratum (#78) holds questions that name an identifier (`how do I set GH_REPO in CI`) - and is
 report-only: it has no floors and exits zero, and its baseline is `<preset>@v2`. Run it
 alongside the gate for any ranking change, and once the change is accepted record it too
 (`--corpus v2 --update-baseline`). The same rule holds there: tune on its `dev` queries

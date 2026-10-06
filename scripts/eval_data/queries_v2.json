@@ -1,5 +1,5 @@
 {
-  "_about": "Labelled retrieval queries over scripts/eval_data/corpus_v2 (97 upstream docs: cargo, compose-spec, gh, prometheus, ripgrep). Report-only: no floors. 'expected' is 'rel/path.md::Heading path' (file relative to corpus_v2). 'paraphrase' holds plain-language questions. 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. 'dev' are the 40 queries of issue #75. 'held_out' was written by a fresh session from the corpus alone, excluding every dev query, intent and answering section, and committed before the identifier-lookup change it measures; it must never be used to tune. Labels were proposed by two reviewers independently and reconciled in a joint pass.",
+  "_about": "Labelled retrieval queries over scripts/eval_data/corpus_v2 (97 upstream docs: cargo, compose-spec, gh, prometheus, ripgrep). Report-only: no floors. 'expected' is 'rel/path.md::Heading path' (file relative to corpus_v2). 'paraphrase' holds plain-language questions. 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. 'dev' are the 40 queries of issue #75. 'held_out' was written by a fresh session from the corpus alone, excluding every dev query, intent and answering section, and committed before the identifier-lookup change it measures; it must never be used to tune. Labels were proposed by two reviewers independently and reconciled in a joint pass. 'mixed' (#78) holds questions that name an identifier verbatim, 4 per project per split: dev and held_out were written by two separate fresh sessions from the corpus alone (held_out without seeing dev, the issue or any design), labelled independently by Codex and Gemini - who chose the same expected section for all 40 - and reconciled (also_valid grade 1 only for a section that answers an explicit part of the question). Committed before any change it measures; its held_out must never be used to tune.",
   "dev": {
     "paraphrase": [
       {
@@ -229,6 +229,112 @@
         "expected": "ripgrep/GUIDE.md::User Guide > Preprocessor",
         "also_valid": {
           "ripgrep/GUIDE.md::User Guide > Preprocessor > Reducing preprocessor overhead": 1
+        }
+      }
+    ],
+    "mixed": [
+      {
+        "query": "Can cargo update --precise pin a git dependency to a specific commit?",
+        "expected": "cargo/doc/book/src/commands/cargo-update.md::cargo-update(1) > OPTIONS > Update Options"
+      },
+      {
+        "query": "I accidentally published a crate containing my API token - is cargo yank enough?",
+        "expected": "cargo/doc/book/src/commands/cargo-yank.md::cargo-yank(1) > DESCRIPTION > When to yank",
+        "also_valid": {
+          "cargo/doc/book/src/commands/cargo-yank.md::cargo-yank(1) > DESCRIPTION": 1
+        }
+      },
+      {
+        "query": "which directory are integration tests run from under `cargo test`, so relative paths to fixtures work",
+        "expected": "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > DESCRIPTION > Working directory of tests"
+      },
+      {
+        "query": "what does the dirty field mean in .cargo_vcs_info.json",
+        "expected": "cargo/doc/book/src/commands/cargo-package.md::cargo-package(1) > DESCRIPTION > .cargo_vcs_info.json format",
+        "also_valid": {
+          "cargo/doc/book/src/commands/cargo-package.md::cargo-package(1) > DESCRIPTION": 1
+        }
+      },
+      {
+        "query": "Use the image built by another service as the base of mine via additional_contexts",
+        "expected": "compose-spec/build.md::Compose Build Specification > Attributes > additional_contexts"
+      },
+      {
+        "query": "how do I drop the ports list from the base file in compose.override.yaml using `!reset`",
+        "expected": "compose-spec/spec.md::Merge and override > Exceptions > Reset value"
+      },
+      {
+        "query": "What happens by default when a rolling update fails, and can update_config start the new task before stopping the old one?",
+        "expected": "compose-spec/deploy.md::Compose Deploy Specification > Attributes > update_config"
+      },
+      {
+        "query": "relative paths in an included Compose file: what is project_directory set to if I leave it out?",
+        "expected": "compose-spec/spec.md::Include > Long syntax > project_directory",
+        "also_valid": {
+          "compose-spec/spec.md::Include > Short syntax": 1
+        }
+      },
+      {
+        "query": "Can any terminal process read the stored gh token through /usr/bin/security on macOS?",
+        "expected": "gh/docs/macos-keyring.md::macOS Keyring Security > Consequences of using /usr/bin/security"
+      },
+      {
+        "query": "why not switch keychain access to cgo or purego for homebrew installs",
+        "expected": "gh/docs/macos-keyring.md::macOS Keyring Security > Consequences of using Apple native APIs"
+      },
+      {
+        "query": "In a host-selection test, does the httpmock REST matcher check which host the request went to?",
+        "expected": "gh/docs/testing.md::Testing > HTTP doubles and generated mocks"
+      },
+      {
+        "query": "is dry_run on by default when the deployment workflow is started from script/release versus the workflow_dispatch form",
+        "expected": "gh/docs/release-process-deep-dive.md::Jobs Deep Dive > release > Publishing behaviour and dry runs",
+        "also_valid": {
+          "gh/docs/release-process-deep-dive.md::Jobs Deep Dive": 1
+        }
+      },
+      {
+        "query": "What does time() return inside a rule unit test, and can I change the starting point?",
+        "expected": "prometheus/docs/configuration/unit_testing_rules.md::Example > Time within tests",
+        "also_valid": {
+          "prometheus/docs/configuration/unit_testing_rules.md::Test file format > <test_group>": 1
+        }
+      },
+      {
+        "query": "expanding notation for input_series values: how to write a counter that goes up by 10 five times",
+        "expected": "prometheus/docs/configuration/unit_testing_rules.md::Test file format > <series>",
+        "also_valid": {
+          "prometheus/docs/configuration/unit_testing_rules.md::Example > test.yml": 1
+        }
+      },
+      {
+        "query": "Where must the @ modifier go when the selector is wrapped in sum()?",
+        "expected": "prometheus/docs/querying/basics.md::Time series selectors > @ modifier"
+      },
+      {
+        "query": "why does a series vanish from a graph once its target is gone, and what does --query.lookback-delta control",
+        "expected": "prometheus/docs/querying/basics.md::Gotchas > Staleness",
+        "also_valid": {
+          "prometheus/docs/querying/basics.md::Time series selectors > Instant vector selectors": 1
+        }
+      },
+      {
+        "query": "Why does rg -g '*.toml' -g '!*.toml' return no results at all?",
+        "expected": "ripgrep/GUIDE.md::User Guide > Manual filtering: globs"
+      },
+      {
+        "query": "my shell script has no extension and --type all skips it",
+        "expected": "ripgrep/GUIDE.md::User Guide > Manual filtering: file types > The special all file type"
+      },
+      {
+        "query": "search the raw bytes of a UTF-16 file with `-E none` instead of transcoding",
+        "expected": "ripgrep/GUIDE.md::User Guide > File encoding"
+      },
+      {
+        "query": "difference between --binary and -a when a file has a NUL byte in it",
+        "expected": "ripgrep/GUIDE.md::User Guide > Binary data",
+        "also_valid": {
+          "ripgrep/GUIDE.md::User Guide > Automatic filtering": 1
         }
       }
     ],
@@ -482,6 +588,106 @@
         "also_valid": {
           "ripgrep/GUIDE.md::User Guide > Manual filtering: file types > The special all file type": 1
         }
+      }
+    ],
+    "mixed": [
+      {
+        "query": "does `--locked` actually change how cargo install resolves dependencies?",
+        "expected": "cargo/doc/book/src/commands/cargo-install.md::cargo-install(1) > DESCRIPTION > Dealing with the Lockfile"
+      },
+      {
+        "query": "cargo install seems to ignore my project's .cargo/config.toml, where does it look instead",
+        "expected": "cargo/doc/book/src/commands/cargo-install.md::cargo-install(1) > DESCRIPTION > Configuration Discovery"
+      },
+      {
+        "query": "if I cargo yank 1.5.0, what happens to downstream crates that require exactly that version and have no lockfile?",
+        "expected": "cargo/doc/book/src/commands/cargo-yank.md::cargo-yank(1) > DESCRIPTION > How yank works",
+        "also_valid": {
+          "cargo/doc/book/src/commands/cargo-yank.md::cargo-yank(1) > DESCRIPTION": 1
+        }
+      },
+      {
+        "query": "steps for moving a crate to a newer edition: when do I run cargo fix --edition versus editing Cargo.toml",
+        "expected": "cargo/doc/book/src/commands/cargo-fix.md::cargo-fix(1) > DESCRIPTION > Edition migration",
+        "also_valid": {
+          "cargo/doc/book/src/commands/cargo-fix.md::cargo-fix(1) > OPTIONS > Fix options": 1
+        }
+      },
+      {
+        "query": "build one service on top of another service's freshly built image using additional_contexts",
+        "expected": "compose-spec/build.md::Compose Build Specification > Attributes > additional_contexts"
+      },
+      {
+        "query": "what's the difference between the two endpoint_mode values for a replicated service?",
+        "expected": "compose-spec/deploy.md::Compose Deploy Specification > Attributes > endpoint_mode"
+      },
+      {
+        "query": "With `pull_policy: missing`, will Compose still pull an image tagged latest?",
+        "expected": "compose-spec/05-services.md::Services top-level element > pull_policy",
+        "also_valid": {
+          "compose-spec/spec.md::Services top-level element > pull_policy": 2
+        }
+      },
+      {
+        "query": "container has memory set to 300m and no memswap_limit, how much swap can it use",
+        "expected": "compose-spec/05-services.md::Services top-level element > memswap_limit",
+        "also_valid": {
+          "compose-spec/spec.md::Services top-level element > memswap_limit": 2
+        }
+      },
+      {
+        "query": "two hosts in hosts.yml point at the same api_host gateway, which one does a request get attributed to?",
+        "expected": "gh/docs/api-host.md::api_host > Scope"
+      },
+      {
+        "query": "why doesn't `gh codespace` go through our api_host gateway yet",
+        "expected": "gh/docs/api-host.md::api_host > Known gaps"
+      },
+      {
+        "query": "every homebrew upgrade of gh asks for keychain access again - is that because of the cdhash?",
+        "expected": "gh/docs/macos-keyring.md::macOS Keyring Security > Consequences of using Apple native APIs"
+      },
+      {
+        "query": "where do the built artifacts end up after running script/release --local",
+        "expected": "gh/docs/releasing.md::Releasing > Test the build system locally"
+      },
+      {
+        "query": "in my .ripgreprc can I write `--max-columns 150` on a single line?",
+        "expected": "ripgrep/GUIDE.md::User Guide > Configuration file"
+      },
+      {
+        "query": "rg stopped searching a file halfway and printed a warning; how is --binary different from -a here",
+        "expected": "ripgrep/GUIDE.md::User Guide > Binary data"
+      },
+      {
+        "query": "make --pre faster by only running the preprocessor on PDF files",
+        "expected": "ripgrep/GUIDE.md::User Guide > Preprocessor > Reducing preprocessor overhead"
+      },
+      {
+        "query": "searching UTF-16 files from Windows, do I need -E or does ripgrep figure it out on its own?",
+        "expected": "ripgrep/GUIDE.md::User Guide > File encoding",
+        "also_valid": {
+          "ripgrep/FAQ.md::FAQ": 1
+        }
+      },
+      {
+        "query": "should I apply sum() before or after irate() when aggregating across instances",
+        "expected": "prometheus/docs/querying/functions.md::irate()"
+      },
+      {
+        "query": "I called delete_series on the admin API but disk usage didn't go down",
+        "expected": "prometheus/docs/querying/api.md::TSDB Admin APIs > Delete Series",
+        "also_valid": {
+          "prometheus/docs/querying/api.md::TSDB Admin APIs > Clean Tombstones": 1
+        }
+      },
+      {
+        "query": "rule_group_iterations_missed_total keeps climbing, what does that do to my recorded series?",
+        "expected": "prometheus/docs/configuration/recording_rules.md::Failed rule evaluations due to slow evaluation"
+      },
+      {
+        "query": "increase() or rate() inside a recording rule - which one should I use?",
+        "expected": "prometheus/docs/querying/functions.md::increase()"
       }
     ],
     "no_answer": []
