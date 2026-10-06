@@ -46,7 +46,7 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -67,6 +67,10 @@ FLOOR_PARAPHRASE_TOP1 = 0.80
 FLOOR_PARAPHRASE_TOP5 = 0.90
 FLOOR_IDENTIFIER_TOP1 = 1.00
 NO_ANSWER_SHAPES = ("identifier", "question")
+# Answerable strata. `mixed` - a question naming an identifier - exists only in corpus_v2 (#78):
+# a query file without it is scored as before.
+ANSWERABLE = ("paraphrase", "identifier", "mixed")
+OPTIONAL_KINDS = ("mixed",)
 SPLITS = ("dev", "held_out")
 RECORD_SCHEMA = 1
 
@@ -198,6 +202,11 @@ def _outline_paths(nodes: Sequence[OutlineNode]) -> Iterator[str]:
         yield from _outline_paths(node.children)
 
 
+def _kinds(queries: Mapping[str, Mapping[str, object]], split: str) -> tuple[str, ...]:
+    """The answerable strata ``split`` holds: every required one, and an optional one if present."""
+    return tuple(k for k in ANSWERABLE if k not in OPTIONAL_KINDS or k in queries[split])
+
+
 def resolve_answers(
     service: MarkdownMemoryService,
     queries: dict[str, dict[str, list[dict[str, object]]]],
@@ -216,7 +225,7 @@ def resolve_answers(
             owners.setdefault(path, []).append(document.file_path)
     answers: dict[str, Answer] = {}
     for split in splits:  # only the splits scored: a dev run learns nothing from held-out
-        for kind in ("paraphrase", "identifier"):  # no-answer cases have nothing to resolve
+        for kind in _kinds(queries, split):  # no-answer cases have nothing to resolve
             for case in queries[split][kind]:
                 label = str(case["expected"])
                 if label in answers:
@@ -353,7 +362,7 @@ def measure_costs(
     """What the default call cost against the section that answers it, per split and kind."""
     costs: dict[str, Cost] = {}
     for split in splits:
-        for kind in ("paraphrase", "identifier"):
+        for kind in _kinds(queries, split):
             cases = queries[split][kind]
             costs[f"{split}/{kind}"] = Cost(
                 queries=tuple(str(case["query"]) for case in cases),
@@ -513,7 +522,7 @@ def record_cases(
         cases[key] = value
 
     for split in splits:
-        for kind in ("paraphrase", "identifier"):
+        for kind in _kinds(queries, split):
             labelled = queries[split][kind]
             outcomes = scores[f"{split}/{kind}"].cases
             for case, outcome in zip(labelled, outcomes, strict=True):
@@ -670,7 +679,7 @@ def run(
         print("\n" + header + "\n" + "-" * len(header))
         scores: dict[str, Scores] = {}
         for split in splits:
-            for kind in ("paraphrase", "identifier"):
+            for kind in _kinds(queries, split):
                 cases = queries[split][kind]
                 result = scores[f"{split}/{kind}"] = evaluate(service, cases)
                 print(
@@ -695,7 +704,7 @@ def run(
                 "code": _code_identity(), "evaluator": _sha256(Path(__file__).read_bytes()),
                 "counts": {
                     f"{split}|{kind}": len(queries[split][kind])
-                    for split in splits for kind in ("paraphrase", "identifier", "no_answer")
+                    for split in splits for kind in (*_kinds(queries, split), "no_answer")
                 },
                 "cases": record_cases(service, queries, splits, scores),
             })  # fmt: skip

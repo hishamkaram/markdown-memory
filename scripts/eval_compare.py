@@ -33,8 +33,9 @@ from markdown_memory.models import KeywordMatch
 
 SCHEMA = 1
 SPLITS = ("dev", "held_out")
-KINDS = ("paraphrase", "identifier", "no_answer")
-ANSWERABLE = ("paraphrase", "identifier")
+KINDS = ("paraphrase", "identifier", "mixed", "no_answer")
+ANSWERABLE = ("paraphrase", "identifier", "mixed")
+OPTIONAL = ("mixed",)  # eval_retrieval.OPTIONAL_KINDS: v1's queries have no mixed stratum (#78)
 SHAPES = ("identifier", "question")  # eval_retrieval.NO_ANSWER_SHAPES
 FIELDS = {
     "answerable": ("expected", "also_valid", "rank", "any_valid", "ndcg5", "top", "hits",
@@ -147,7 +148,12 @@ def load(path: Path) -> Record:
         _check_case(name, key, case)
         stratum = f"{parts[0]}|{parts[1]}"
         present[stratum] = present.get(stratum, 0) + 1
-    expected = {f"{split}|{kind}" for split in splits for kind in KINDS}
+    expected = {
+        f"{split}|{kind}"
+        for split in splits
+        for kind in KINDS
+        if kind not in OPTIONAL or f"{split}|{kind}" in counts
+    }
     if set(counts) != expected or not all(_is_int(n) for n in counts.values()):
         raise RecordError(f"{name}: counts {counts!r} do not cover {sorted(expected)}")
     for stratum in sorted(expected):

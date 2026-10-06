@@ -1521,6 +1521,38 @@ class TestTheDevOnlyRun:
             "shape", "hits", "keyword_match"
         }  # fmt: skip
 
+    def test_a_mixed_stratum_is_scored_and_recorded(
+        self, run_main: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """#78: a question naming an identifier is its own stratum, compared like the others."""
+        fixture: Any = _paired_fixture()
+        fixture["dev"]["mixed"] = [
+            {"query": "how do I run setup first", "expected": "a.md::Guide > Setup"}
+        ]
+        fixture["held_out"]["mixed"] = [{"query": "zzheld sizing", "expected": "a.md::Guide > Big"}]
+        record = tmp_path / "dev.json"
+        code, _ = run_main("--split", "dev", "--record", str(record), fixture=fixture)
+        written = json.loads(record.read_text())
+        assert code == 0 and "dev mixed" in capsys.readouterr().out
+        assert written["counts"]["dev|mixed"] == 1
+        assert written["cases"]["dev|mixed|how do I run setup first"]["expected"] == (
+            "a.md::Guide > Setup"
+        )
+
+    def test_a_fixture_without_a_mixed_stratum_is_scored_as_before(
+        self, run_main: Any, tmp_path: Path
+    ) -> None:
+        record = tmp_path / "dev.json"
+        try:
+            run_main("--split", "dev", "--record", str(record))
+        except (KeyError, SystemExit) as crash:
+            raise AssertionError(
+                f"v1's queries, without a mixed stratum, broke: {crash!r}"
+            ) from crash
+        assert sorted(json.loads(record.read_text())["counts"]) == [
+            "dev|identifier", "dev|no_answer", "dev|paraphrase"
+        ]  # fmt: skip
+
     def test_a_run_that_fails_the_floors_is_still_recorded(
         self, run_main: Any, evaluation: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1752,6 +1784,28 @@ class TestThePairedRule:
     @pytest.mark.parametrize("field", ["corpus_sha256", "evaluator", "preset"])
     def test_records_of_different_things_are_not_compared(self, compare: Any, field: str) -> None:
         assert compare(_record(), _record(**{field: "other"})) == 2
+
+    @staticmethod
+    def with_mixed(rank: int | None = 1) -> dict[str, Any]:
+        record = _record()
+        record["cases"]["dev|mixed|m"] = _case(rank)
+        record["counts"]["dev|mixed"] = 1
+        return record
+
+    def test_a_mixed_query_worse_rejects(self, compare: Any) -> None:
+        assert compare(self.with_mixed(1), self.with_mixed(1)) == 0
+        assert compare(self.with_mixed(1), self.with_mixed(2)) == 1
+
+    def test_records_without_a_mixed_stratum_still_compare(self, compare: Any) -> None:
+        assert compare(_record(), _record()) == 0
+
+    def test_a_declared_mixed_stratum_must_hold_queries(self, compare: Any) -> None:
+        empty = _record()
+        empty["counts"]["dev|mixed"] = 0
+        assert compare(empty, empty) == 2
+
+    def test_a_mixed_stratum_on_one_side_only_is_not_compared(self, compare: Any) -> None:
+        assert compare(self.with_mixed(), _record()) == 2
 
     def test_the_same_code_twice_is_a_repeatability_check(
         self, compare: Any, capsys: pytest.CaptureFixture[str]
