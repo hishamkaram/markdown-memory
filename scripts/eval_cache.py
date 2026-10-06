@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -470,13 +471,68 @@ def discard(db_path: Path) -> None:
         Path(str(db_path) + suffix).unlink(missing_ok=True)
 
 
-def prune(root: Path, keep: str) -> None:
-    """Drop cached indexes for other keys; each costs ~40 MB and only one is ever current."""
+# Two presets for each of two index-building revisions - the #94 paired comparison - stay
+# warm together. Measured: an entry is 6.3 MB for corpus v1 and 22 MB for corpus_v2 (#95).
+KEEP_INDEXES = 4
+_DIGEST = re.compile(r"[0-9a-f]{16}")  # what `CacheKey.digest` names a directory
+
+
+def _siblings(root: Path, keep: str) -> list[tuple[Path, int, bool]]:
+    """Every other cached index under ``root``: its path, its mtime and whether it is complete.
+
+    Only real directories named like a digest: a symlink is never followed, counted or
+    removed, and neither is the lock file. Complete means the metadata that `record` writes
+    last is there - read with `lstat`, so not through a link either.
+    """
+    found: list[tuple[Path, int, bool]] = []
     if not root.is_dir():
-        return
+        return found
     for entry in root.iterdir():
-        if entry.is_dir() and entry.name != keep:
+        if entry.name == keep or not _DIGEST.fullmatch(entry.name):
+            continue
+        try:
+            status = entry.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISDIR(status.st_mode):
+            continue
+        try:
+            complete = stat.S_ISREG(_meta_path(entry / "eval.db").lstat().st_mode)
+        except OSError:
+            complete = False
+        found.append((entry, status.st_mtime_ns, complete))
+    return found
+
+
+def drop_incomplete(root: Path, keep: str) -> None:
+    """Remove every other entry that never finished building - before this run builds.
+
+    Callers hold `lock(cache_root())`, so no other build is in progress: an entry without
+    its metadata is a failed or interrupted one, and leaving it would let a run of failures
+    fill the disk. Complete entries are untouched, so a failure here evicts nothing usable.
+    """
+    for entry, _, complete in _siblings(root, keep):
+        if not complete:
             shutil.rmtree(entry, ignore_errors=True)
+
+
+def prune(root: Path, keep: str) -> None:
+    """Keep ``keep`` and the most recently used complete indexes; drop the rest (#95).
+
+    Called once ``keep`` has been validated or built, so a failed run never evicts. Recency
+    is the directory's mtime, refreshed here on every use - as ccache does, since atime is
+    not reliably updated - so it is approximate: ties go by name, and a future-dated entry
+    holds its slot longer. Deletion is best effort, so the count is a target rather than a
+    disk guarantee. Callers hold `lock(cache_root())`.
+    """
+    os.utime(root / keep, follow_symlinks=False)
+    drop_incomplete(root, keep)
+    complete = sorted(
+        ((mtime, entry.name, entry) for entry, mtime, done in _siblings(root, keep) if done),
+        reverse=True,
+    )
+    for _, _, entry in complete[KEEP_INDEXES - 1 :]:
+        shutil.rmtree(entry, ignore_errors=True)
 
 
 def confirm_stable(corpus: Path, fingerprint: str, exclude: Sequence[str] = ()) -> None:

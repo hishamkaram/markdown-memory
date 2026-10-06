@@ -187,7 +187,10 @@ corpus is re-embedded and must come back as its own nearest neighbour (cosine di
 below 1e-3; measured -6e-8 for a match against 0.384 for the next passage). A query cannot
 do that last job: search fuses keyword and vector rankings, so an identifier query returns
 the right section even when every vector came from a different model. Any check failing
-discards the index and rebuilds it. `--rebuild` forces that by hand. Only one evaluation may run at a time
+discards the index and rebuilds it. `--rebuild` forces that by hand. Each corpus directory keeps
+the four most recently used complete indexes (`eval_cache.KEEP_INDEXES`; two presets for two
+code revisions), evicted by directory mtime after a run succeeds, so alternating presets or the
+two sides of a paired comparison reuses what was built; retention never skips the checks above. Only one evaluation may run at a time
 (`flock` on `eval.lock`): the script reports median and p95 latency, and a second job on the
 same CPU moves those numbers further than the changes being measured.
 

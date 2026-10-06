@@ -845,15 +845,6 @@ class TestEvalIndexCache:
         with eval_cache.lock(tmp_path):  # released, so the next run may start
             pass
 
-    def test_pruning_keeps_only_the_current_index(self, tmp_path: Path) -> None:
-        import eval_cache
-
-        for name in ("keepme", "staleone", "staletwo"):
-            (tmp_path / name).mkdir()
-            (tmp_path / name / "eval.db").write_bytes(b"x")
-        eval_cache.prune(tmp_path, "keepme")
-        assert sorted(entry.name for entry in tmp_path.iterdir()) == ["keepme"]
-
     def test_the_probes_are_spread_through_the_corpus(self, corpus: Path) -> None:
         """One probe only tells you about one passage.
 
@@ -1841,3 +1832,208 @@ class TestTheCacheNamesWhatBuiltIt:
         meta.write_text(json.dumps({**json.loads(meta.read_text()), "version": 1}))
         with pytest.raises(eval_cache.StaleCacheError, match="version 1"):
             eval_cache.validate(db_path, "same", key)
+
+
+def _entry(root: Path, name: str, mtime: int, *, complete: bool = True) -> Path:
+    """A cached index directory as `record` leaves it, dated ``mtime`` seconds."""
+    entry = root / (name * 16)[:16]
+    entry.mkdir(parents=True)
+    (entry / "eval.db").write_bytes(b"x")
+    if complete:
+        (entry / "eval.meta.json").write_text("{}")
+    os.utime(entry, ns=(mtime * 10**9, mtime * 10**9))
+    return entry
+
+
+class TestTheCacheKeepsRecentIndexes:
+    """#95: alternating presets or revisions must not rebuild an index it just built."""
+
+    @pytest.fixture
+    def cache(self) -> Any:
+        import eval_cache  # by name: mutation_check points `pythonpath` at its copy
+
+        return eval_cache
+
+    @staticmethod
+    def left(root: Path) -> list[str]:
+        return sorted(entry.name[0] for entry in root.iterdir() if entry.name != "eval.lock")
+
+    def test_the_current_index_and_the_three_most_recent_others_stay(
+        self, cache: Any, tmp_path: Path
+    ) -> None:
+        for name, mtime in (("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5), ("f", 6)):
+            _entry(tmp_path, name, mtime)
+        (tmp_path / "eval.lock").write_text("")
+        cache.prune(tmp_path, "a" * 16)
+        assert self.left(tmp_path) == ["a", "d", "e", "f"]
+        assert (tmp_path / "eval.lock").exists()
+
+    def test_the_current_index_stays_whatever_its_date(self, cache: Any, tmp_path: Path) -> None:
+        far = 4_000_000_000  # 2096: dated in the future, so they outrank anything touched now
+        for name in "bcde":
+            _entry(tmp_path, name, far)
+        _entry(tmp_path, "a", 1)
+        cache.prune(tmp_path, "a" * 16)
+        assert "a" in self.left(tmp_path) and len(self.left(tmp_path)) == 4
+
+    def test_equal_dates_evict_in_name_order(self, cache: Any, tmp_path: Path) -> None:
+        for name in "abcde":
+            _entry(tmp_path, name, 7)
+        _entry(tmp_path, "z", 1)
+        cache.prune(tmp_path, "z" * 16)
+        assert self.left(tmp_path) == ["c", "d", "e", "z"]
+
+    def test_a_symlink_is_neither_counted_followed_nor_removed(
+        self, cache: Any, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "cache"
+        outside = _entry(tmp_path / "elsewhere", "x", 1)
+        for name, mtime in (("a", 1), ("b", 2), ("c", 3), ("d", 4)):
+            _entry(root, name, mtime)
+        (root / ("9" * 16)).symlink_to(outside)
+        cache.prune(root, "a" * 16)
+        assert (root / ("9" * 16)).is_symlink() and (outside / "eval.db").exists()
+        assert self.left(root) == ["9", "a", "b", "c", "d"]  # the link took no slot
+
+    def test_only_cache_entries_are_considered(self, cache: Any, tmp_path: Path) -> None:
+        for name, mtime in (("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5)):
+            _entry(tmp_path, name, mtime)
+        (tmp_path / "notes").mkdir()  # not named like a digest: not this cache's to delete
+        cache.prune(tmp_path, "a" * 16)
+        assert (tmp_path / "notes").is_dir()
+
+    def test_an_unfinished_build_is_swept(self, cache: Any, tmp_path: Path) -> None:
+        _entry(tmp_path, "a", 1)
+        _entry(tmp_path, "b", 9, complete=False)
+        cache.drop_incomplete(tmp_path, "a" * 16)
+        assert self.left(tmp_path) == ["a"]
+
+    def test_a_reused_index_outlives_one_left_alone(self, cache: Any, tmp_path: Path) -> None:
+        for name, mtime in (("a", 1), ("b", 2), ("c", 3), ("d", 4)):
+            _entry(tmp_path, name, mtime)
+        cache.prune(tmp_path, "a" * 16)  # "a" is used again: now the most recent
+        _entry(tmp_path, "e", 2_000_000_000)
+        cache.prune(tmp_path, "e" * 16)
+        assert self.left(tmp_path) == ["a", "c", "d", "e"]  # "b" was the least recent
+
+    def test_another_corpus_directory_is_never_touched(self, cache: Any, tmp_path: Path) -> None:
+        for name, mtime in (("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5)):
+            _entry(tmp_path / "eval", name, mtime)
+            _entry(tmp_path / "eval-v2", name, mtime)
+        cache.prune(tmp_path / "eval", "e" * 16)
+        assert len(self.left(tmp_path / "eval-v2")) == 5
+
+
+class TestEvaluationsReuseWhatTheyBuilt:
+    """#95 end to end: real indexes, real validation, a fake embedder - counting builds."""
+
+    @pytest.fixture
+    def harness(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        import shutil
+
+        import eval_cache
+        import eval_retrieval
+
+        import markdown_memory
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr(eval_retrieval, "create_embedder", lambda *a, **k: FakeEmbedder())
+        corpus_root = tmp_path / "corpus"
+        corpus_root.mkdir()
+        (corpus_root / "guide.md").write_text(
+            "# Guide\n\n## Storage\n\nsegment size and retention\n\n## Network\n\nports\n"
+        )
+        corpus = eval_retrieval.Corpus("v1", corpus_root, tmp_path / "queries.json")
+        base = ServerConfig(db_path=tmp_path / "unused.db", docs_dir=corpus_root,
+                            model_cache_dir=tmp_path / "models")  # fmt: skip
+        probes = eval_cache.probe_passages(corpus_root)
+        builds: list[str] = []
+        real_index = eval_retrieval.MarkdownMemoryService.index_directory
+
+        def counted(service: Any, *args: Any, **kwargs: Any) -> Any:
+            builds.append(str(service.config.db_path))
+            return real_index(service, *args, **kwargs)
+
+        monkeypatch.setattr(eval_retrieval.MarkdownMemoryService, "index_directory", counted)
+        revisions: dict[str, Path] = {}
+
+        def open_cell(preset: str, revision: str) -> bool:
+            """Open one cell; True when it had to be built. Each revision name is its own
+            index identity: a copy of the package whose `indexer.py` differs."""
+            if revision not in revisions:
+                copy = tmp_path / revision / "markdown_memory"
+                shutil.copytree(Path(markdown_memory.__file__).parent, copy)
+                with (copy / "indexer.py").open("a", encoding="utf-8") as indexer:
+                    indexer.write(f"\n# {revision}\n")
+                revisions[revision] = copy
+            monkeypatch.setattr(eval_cache, "SOURCE", revisions[revision])
+            arguments = argparse.Namespace(embedder=preset, rebuild=False)
+            service, built = eval_retrieval.open_service(arguments, base, probes, corpus)
+            service.close()
+            return bool(built)
+
+        return argparse.Namespace(open=open_cell, builds=builds, root=corpus.cache())
+
+    CELLS = [(preset, revision) for revision in ("base", "candidate")
+             for preset in ("embeddinggemma", "bge-small")]  # fmt: skip
+
+    def test_four_cells_are_built_once_and_then_reused(self, harness: Any) -> None:
+        assert all(harness.open(*cell) for cell in self.CELLS)
+        assert len(harness.builds) == 4
+        assert not any(harness.open(*cell) for cell in self.CELLS)
+        assert len(harness.builds) == 4, "revisiting a retained cell rebuilt it"
+
+    def test_a_fifth_identity_evicts_the_least_recently_used(self, harness: Any) -> None:
+        for cell in self.CELLS:
+            harness.open(*cell)
+        harness.open(*self.CELLS[0])  # used again: the second cell is now the least recent
+        harness.open("embeddinggemma", "third")
+        first, second = (Path(build).parent for build in harness.builds[:2])
+        assert first.is_dir(), "a cell used a moment ago was evicted"
+        assert not second.exists(), "building a fifth cell kept the least recent one"
+
+    def test_a_reuse_trims_the_cache_too(self, harness: Any) -> None:
+        import shutil
+
+        for cell in self.CELLS:
+            harness.open(*cell)
+        # A fifth complete entry, as a run with a larger limit or a killed prune leaves it.
+        shutil.copytree(Path(harness.builds[1]).parent, harness.root / ("f" * 16))
+        os.utime(harness.root / ("f" * 16), ns=(1, 1))
+        assert harness.open(*self.CELLS[0]) is False
+        assert len([entry for entry in harness.root.iterdir() if entry.is_dir()]) == 4
+
+    def test_failed_builds_never_pile_up(
+        self, harness: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import eval_retrieval
+
+        for cell in self.CELLS:
+            harness.open(*cell)
+        failed = IndexReport(
+            directory="x", files_scanned=1, files_indexed=0, files_unchanged=0, files_purged=0,
+            sections_indexed=0, passages_indexed=0, elapsed_seconds=0.0,
+            errors=(FileFailure(file_path="guide.md", message="Embedding failed"),),
+        )  # fmt: skip
+        monkeypatch.setattr(
+            eval_retrieval.MarkdownMemoryService, "index_directory", lambda *a, **k: failed
+        )
+        for attempt in range(3):  # three different identities, each failing
+            with pytest.raises(SystemExit, match="indexing failed"):
+                harness.open("embeddinggemma", f"broken{attempt}")
+            for entry in harness.root.iterdir():  # as a killed build would leave it
+                if entry.is_dir() and not (entry / "eval.meta.json").exists():
+                    (entry / "eval.db-wal").write_bytes(b"x" * 1024)
+        entries = [entry for entry in harness.root.iterdir() if entry.is_dir()]
+        unfinished = [entry for entry in entries if not (entry / "eval.meta.json").exists()]
+        assert len(unfinished) == 1, "each attempt sweeps the failure before it"
+        assert len(entries) == 5  # the four complete cells survived every failure
+
+    def test_a_stale_index_is_rebuilt_without_being_told(self, harness: Any) -> None:
+        harness.open("embeddinggemma", "base")
+        harness.open("bge-small", "base")
+        meta = Path(harness.builds[0]).parent / "eval.meta.json"  # the embeddinggemma cell
+        meta.write_text(json.dumps({**json.loads(meta.read_text()), "parse_fingerprint": "x"}))
+        assert harness.open("embeddinggemma", "base") is True
+        assert harness.open("embeddinggemma", "base") is False
+        assert harness.open("bge-small", "base") is False  # the sibling survived

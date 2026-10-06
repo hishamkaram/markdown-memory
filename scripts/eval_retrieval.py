@@ -82,8 +82,8 @@ class Corpus:
     def cache(self) -> Path:
         """v1 keeps the directory it always had; any other corpus gets one of its own.
 
-        Each directory holds one current index (`eval_cache.prune` drops the rest), so two
-        corpora sharing one would rebuild each other on every alternate run.
+        Each directory keeps its most recently used indexes (`eval_cache.prune`), so two
+        corpora sharing one would evict each other's.
         """
         root = eval_cache.cache_root()
         return root if self.name == "v1" else root.with_name(f"eval-{self.name}")
@@ -579,7 +579,7 @@ def open_service(
     root = corpus.cache()
     workspace = root / key.digest
     workspace.mkdir(parents=True, exist_ok=True)
-    eval_cache.prune(root, key.digest)
+    eval_cache.drop_incomplete(root, key.digest)
     db_path = workspace / "eval.db"
     fingerprint = eval_cache.parse_fingerprint(corpus.root)
     if arguments.rebuild:
@@ -598,6 +598,7 @@ def open_service(
         try:
             eval_cache.check_integrity(service.db)
             eval_cache.check_vectors(service.db, service.embedder, probes)
+            eval_cache.prune(root, key.digest)  # only on success: a failure evicts nothing
             return service, False
         except eval_cache.StaleCacheError as stale:
             reason = str(stale)
@@ -621,6 +622,7 @@ def open_service(
         eval_cache.discard(db_path)
         raise SystemExit(str(unstable)) from unstable
     eval_cache.record(db_path, key, fingerprint)
+    eval_cache.prune(root, key.digest)
     return service, True
 
 
