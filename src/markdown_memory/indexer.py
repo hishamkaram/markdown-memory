@@ -369,10 +369,10 @@ class Indexer:
             # is under 5 ms, so nothing is gained by letting workers write and a great
             # deal is given up: SQLite takes one writer at a time anyway, and section ids
             # are allocated as documents are stored. Results are therefore drained in
-            # submission order - `search.py` breaks a scoring tie by section id, so ids
-            # handed out in some completion order would quietly reorder equal hits, and
-            # no later sort can give them back. The window bounds what is held in memory:
-            # a prepared file carries every vector of every passage it has.
+            # submission order, so one tree builds one index whatever the worker count
+            # (search breaks a scoring tie by where the walk reaches a section, not by id,
+            # #103). The window bounds what is held in memory: a prepared file carries
+            # every vector of every passage it has.
             # Walked to the end before anything is embedded, which costs nothing next to
             # embedding: a symlink is only recognised as an alias of a file once that file
             # has been seen, and it may come first. The order is the walk's all the same.

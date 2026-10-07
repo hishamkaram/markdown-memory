@@ -826,8 +826,8 @@ MUTATIONS = (
     Mutation(
         name="walk: visit dot-directories before the project's own docs",
         module="discovery.py",
-        old='            key=lambda name: (name.startswith("."), name),\n',
-        new="            key=lambda name: name,\n",
+        old='    return (name.startswith("."), name)\n',
+        new="    return (False, name)\n",
         tests="test_the_projects_own_docs_come_before_dot_directories",
     ),
     Mutation(
@@ -2980,7 +2980,62 @@ MUTATIONS = (
         tests="test_the_spelling_asked_for_ranks_first_among_sections_naming_it",
     ),
     Mutation(
-        name="identifiers: let a vector-only neighbour win the tie on section id",
+        name="ties: break an exact fused tie by section id again",
+        module="search.py",
+        old=(
+            "        ordered = self._in_order("
+            "{section_id: -score for section_id, score in scores.items()})\n"
+        ),
+        new="        ordered = sorted(scores, key=lambda sid: (-scores[sid], sid))\n",
+        tests="test_a_tie_between_documents_survives_an_edit",
+    ),
+    Mutation(
+        name="ties: break an exact vector-distance tie by section id again",
+        module="search.py",
+        old="        ranking = self._in_order(best)[:limit]\n",
+        new="        ranking = sorted(best, key=lambda sid: (best[sid], sid))[:limit]\n",
+        tests="test_a_vector_distance_tie_goes_to_the_walk_up_to_the_cut",
+    ),
+    Mutation(
+        name="ties: forget where in its document a tied section is",
+        module="search.py",
+        old="            return values[sid], (0, walk_order(file_path), start_line, part_index)\n",
+        new="            return values[sid], (0, walk_order(file_path))\n",
+        tests="test_a_tie_inside_one_document_goes_to_the_earlier_section",
+    ),
+    Mutation(
+        name="ties: forget which part of a cut line a tied section is",
+        module="search.py",
+        old="            return values[sid], (0, walk_order(file_path), start_line, part_index)\n",
+        new="            return values[sid], (0, walk_order(file_path), start_line)\n",
+        tests="test_a_tie_between_parts_of_one_line_goes_to_the_earlier_part",
+    ),
+    Mutation(
+        name="ties: let a section gone since the ranking win its tie on its id",
+        module="search.py",
+        old="                return values[sid], (1,)\n",
+        new="                return values[sid], (0, (), sid, 0)\n",
+        tests="test_a_section_gone_since_the_ranking_goes_after_its_tie",
+    ),
+    Mutation(
+        name="ties: read every candidate's position, tied or not",
+        module="search.py",
+        old="        positions = self._db.section_positions(tied) if tied else {}\n",
+        new="        positions = self._db.section_positions(list(values))\n",
+        tests="test_positions_are_read_only_when_something_ties",
+    ),
+    Mutation(
+        name="ties: put a directory's sub-directories before its own files",
+        module="discovery.py",
+        old="(0, False, name))\n",
+        new="(2, False, name))\n",
+        tests=(
+            "test_walk_order_is_the_order_of_the_walk"
+            " or test_a_fresh_build_numbers_sections_in_walk_order"
+        ),
+    ),
+    Mutation(
+        name="identifiers: let a vector-only neighbour win the tie on its place in the walk",
         module="search.py",
         old="        if keyword.literal:",
         new="        if False:",

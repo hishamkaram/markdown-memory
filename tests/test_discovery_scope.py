@@ -470,6 +470,18 @@ class TestTheWalk:
         ]
         assert walked == ["docs/a.md", ".agents/rule.md"]
 
+    def test_walk_order_is_the_order_of_the_walk(self, tmp_path: Path) -> None:
+        """Search breaks an exact tie by `walk_order` (#103): it must be the walk's own order.
+
+        A directory's files come before its sub-directories (`ab.md` before `a/b.md`, which
+        plain path order reverses), each sub-directory is walked whole, dot-directories last.
+        """
+        for name in ("ab.md", "a/b.md", "a/c/d.md", "a/a.md", ".agents/x.md", "z/y.md", "b.md"):
+            _write(tmp_path / name)
+        walked = [str(p) for p in discovery.iter_markdown_files(tmp_path)]
+        assert sorted(walked, key=discovery.walk_order) == walked
+        assert walked != sorted(walked), "the tree must tell walk order from path order"
+
     def test_a_stop_is_honoured_during_the_walk(self, tmp_path: Path) -> None:
         _write(tmp_path / "a.md")
         with pytest.raises(IndexCancelled):

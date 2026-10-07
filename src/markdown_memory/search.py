@@ -21,12 +21,14 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Iterable, Sequence
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import pairwise
 from typing import NamedTuple, NoReturn, TypeVar
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
+from markdown_memory.discovery import walk_order
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
 from markdown_memory.models import (
@@ -468,10 +470,10 @@ class HybridSearcher:
         scores = reciprocal_rank_fusion([fts_ranking, vec_ranking], self._rrf_k)
         fts_ranks = {section_id: rank for rank, section_id in enumerate(fts_ranking, start=1)}
         vec_ranks = {section_id: rank for rank, section_id in enumerate(vec_ranking, start=1)}
-        ordered = sorted(scores, key=lambda section_id: (-scores[section_id], section_id))
+        ordered = self._in_order({section_id: -score for section_id, score in scores.items()})
         if keyword.literal:
             # An identifier lookup is answered by a section that names the identifier: a
-            # vector-only neighbour must not tie with one at 1/61 and win on its id. One
+            # vector-only neighbour must not tie with one at 1/61 and win on its place. One
             # headed by it comes first, so mentions with vector support cannot push it off.
             ordered = [
                 *keyword.headings,
@@ -524,6 +526,29 @@ class HybridSearcher:
             excerpt = self._excerpt(section, fts_terms(query), ordinal)
             results[0] = dataclasses.replace(results[0], excerpt=excerpt)
         return SearchPage(tuple(results), keyword_match), stale or keyword.stale
+
+    def _in_order(self, values: Mapping[int, float]) -> list[int]:
+        """Section ids by ascending value; an exact tie goes to the one the walk reaches first.
+
+        Not to the lower id (#103): ids follow the walk only on a fresh build. An edited
+        document is stored again under new ids and would lose every tie it was in, so the
+        same documentation would rank one way or another depending on its edit history.
+        Positions are read only for ids that share a value. One deleted since the ranking
+        was taken goes after its tie group; fetching the page then finds it gone and
+        ranks again.
+        """
+        shared = Counter(values.values())
+        tied = [sid for sid, value in values.items() if shared[value] > 1]
+        positions = self._db.section_positions(tied) if tied else {}
+
+        def key(sid: int) -> tuple[float, tuple[object, ...]]:
+            position = positions.get(sid)
+            if position is None:
+                return values[sid], (1,)
+            file_path, start_line, part_index = position
+            return values[sid], (0, walk_order(file_path), start_line, part_index)
+
+        return sorted(values, key=key)
 
     def _excerpt(
         self, section: Section, terms: Sequence[str], ordinal: int | None
@@ -744,7 +769,7 @@ class HybridSearcher:
                 "The index was rebuilt by another model while this search was ranking; "
                 "only keyword ranking is used"
             )
-        ranking = sorted(best, key=lambda section_id: (best[section_id], section_id))[:limit]
+        ranking = self._in_order(best)[:limit]
         return ranking, {sid: passages[sid] for sid in ranking if sid in passages}
 
     def _refuse_foreign_vectors(self) -> str | None:
