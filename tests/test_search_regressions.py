@@ -1850,6 +1850,37 @@ class TestExactTiesFollowTheWalk:
             "Guide > Second",
         ]
 
+    def test_a_tie_between_parts_of_one_line_goes_to_the_earlier_part(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # One line too long for a section is cut into parts that all start on that line:
+        # only the part number tells them apart.
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Long\n\n" + "word " * 6000 + "\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            lines = dict(
+                searcher._db.connection().execute("SELECT heading_path, start_line FROM sections")
+            )
+            assert lines["Long (Part 2)"] == lines["Long (Part 3)"]
+            self.lanes(
+                searcher, monkeypatch, ["Long (Part 3)", "Long (Part 2)"],
+                ["Long (Part 2)", "Long (Part 3)"],
+            )  # fmt: skip
+            page = searcher.search_page("word", limit=2)
+        finally:
+            searcher.close()
+        assert [result.heading_path for result in page.results] == [
+            "Long (Part 2)",
+            "Long (Part 3)",
+        ]
+
     def test_a_section_gone_since_the_ranking_goes_after_its_tie(
         self,
         db: Database,

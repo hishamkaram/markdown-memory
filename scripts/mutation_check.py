@@ -3004,6 +3004,13 @@ MUTATIONS = (
         tests="test_a_tie_inside_one_document_goes_to_the_earlier_section",
     ),
     Mutation(
+        name="ties: forget which part of a cut line a tied section is",
+        module="search.py",
+        old="            return values[sid], (0, walk_order(file_path), start_line, part_index)\n",
+        new="            return values[sid], (0, walk_order(file_path), start_line)\n",
+        tests="test_a_tie_between_parts_of_one_line_goes_to_the_earlier_part",
+    ),
+    Mutation(
         name="ties: let a section gone since the ranking win its tie on its id",
         module="search.py",
         old="                return values[sid], (1,)\n",
