@@ -39,6 +39,7 @@ import logging
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
+from html.parser import HTMLParser
 from typing import NamedTuple, Protocol
 
 from markdown_it import MarkdownIt
@@ -79,6 +80,7 @@ _FORMATTING_TAGS = frozenset(
     }
 )  # fmt: skip
 _WHITESPACE = re.compile(r"\s+")
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _HTML_TAG = re.compile(r"<[^>]+>")
 # Removed before tags are: a ">" inside a comment would end the "tag" early and leak the
 # rest of the comment as text. An unterminated comment hides everything after it.
@@ -248,7 +250,12 @@ class MarkdownParser:
         tokens = self._tokenize("\n".join(lines[body_start:]))
         headings: list[_Heading] = []
         for position, token in enumerate(tokens):
-            if token.level != 0 or token.map is None or token.type != "heading_open":
+            if token.level != 0 or token.map is None:
+                continue
+            html = self._html_heading_of(token)
+            if html is not None:
+                headings.append(_Heading(body_start + token.map[0], *html))
+            if token.type != "heading_open":
                 continue
             inline = tokens[position + 1] if position + 1 < len(tokens) else None
             headings.append(
@@ -259,6 +266,17 @@ class MarkdownParser:
                 )
             )
         return headings
+
+    def _html_heading_of(self, token: Token) -> tuple[int, str] | None:
+        """``(level, title)`` when ``token`` is a raw HTML block that heads a section (#80).
+
+        One test for both sides of a heading - where its section opens, and that its text is
+        not embedded as the section's body. A block longer than a section could not stay
+        whole in the first part, so it stays body text, as it always was.
+        """
+        if token.type != "html_block" or len(token.content) > self._max_chars:
+            return None
+        return _html_heading(token.content)
 
     # ------------------------------------------------------------------ sections
 
@@ -358,7 +376,9 @@ class MarkdownParser:
                 continue
             end = _block_end(tokens, index)
             block = tokens[index : end + 1]
-            if token.type == "heading_open" and not heading_skipped:
+            if not heading_skipped and (
+                token.type == "heading_open" or self._html_heading_of(token) is not None
+            ):
                 heading_skipped = True
             elif token.type == "table_open":
                 units.extend(_table_rows(block))
@@ -553,6 +573,75 @@ def _inline_text(inline: Token | None) -> str:
 
 def _span(token: Token) -> Span:
     return (token.map[0], token.map[1]) if token.map else None
+
+
+class _HtmlMarks(HTMLParser):
+    """A raw HTML block as the stdlib parser reads it: tags and text in order, none repaired.
+
+    A tree parser (BeautifulSoup, lxml) closes `<h3>Title` and `<h3>Title</h2>` for its
+    caller, and with that the evidence that the heading never was one. Character references
+    are decoded once here, and the text is never parsed again: `&lt;arch&gt;` stays `<arch>`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.marks: list[tuple[str, str]] = []  # ("start" | "end" | "data" | "other", value)
+
+    # Attributes never make a title: `name`, `id` and an image's alt are not visible text.
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
+        self.marks.append(("start", tag))
+
+    def handle_endtag(self, tag: str) -> None:
+        self.marks.append(("end", tag))
+
+    def handle_data(self, data: str) -> None:
+        self.marks.append(("data", data))
+
+    def handle_comment(self, data: str) -> None:
+        self.marks.append(("other", data))
+
+    def handle_decl(self, decl: str) -> None:
+        self.marks.append(("other", decl))
+
+    def handle_pi(self, data: str) -> None:
+        self.marks.append(("other", data))
+
+    def unknown_decl(self, data: str) -> None:
+        self.marks.append(("other", data))
+
+
+def _html_heading(content: str) -> tuple[int, str] | None:
+    """``(level, title)`` when a raw HTML block is exactly one complete heading, else None.
+
+    Only `<hN>`, text and the inline formatting tags, then the matching `</hN>`: anything
+    before or after it, any other tag or a comment inside, or a heading left open is not a
+    heading - CommonMark ends such a block at a blank line only, so prose on the next line
+    would be swallowed with it. The title is the visible text; attributes and an image's alt
+    text are not, so an image-only heading stays body text.
+    """
+    reader = _HtmlMarks()
+    try:
+        reader.feed(content)
+        reader.close()
+    except Exception:  # html.parser raises on some malformed marked sections (`<![`)
+        return None
+    marks = [mark for mark in reader.marks if mark[0] != "data" or mark[1].strip()]
+    if len(marks) < 2 or marks[0][0] != "start" or marks[0][1] not in _HEADING_TAGS:
+        return None
+    level = marks[0][1]
+    if marks[-1] != ("end", level) or any(
+        kind == "other" or (kind != "data" and value not in _FORMATTING_TAGS)
+        for kind, value in marks[1:-1]
+    ):
+        return None
+    first = reader.marks.index(marks[0])
+    last = len(reader.marks) - 1 - reader.marks[::-1].index(marks[-1])
+    title = "".join(
+        value if kind == "data" else " " if value == "br" else ""
+        for kind, value in reader.marks[first + 1 : last]
+    )
+    title = _WHITESPACE.sub(" ", title).strip()
+    return (int(level[1]), title) if title else None
 
 
 def _leaves(block: Sequence[Token]) -> list[Passage]:

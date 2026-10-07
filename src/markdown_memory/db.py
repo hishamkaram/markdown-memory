@@ -50,11 +50,12 @@ DEFAULT_EMBEDDING_DIM = 384
 SCHEMA_VERSION = 7
 
 #: How a section's vector is built. 1 embedded the whole section text, truncated at the
-#: model's token limit; 2 is the mean of the section's passage vectors. Stored per document
-#: so that a document written under the old scheme re-indexes itself and one written under
-#: the new one is left alone - a format change repairs a tree file by file, and resumes
-#: where it stopped if it is interrupted.
-VECTOR_FORMAT = 2
+#: model's token limit; 2 is the mean of the section's passage vectors; 3 also opens a
+#: section at a top-level raw HTML block that is exactly one `<h1>`-`<h6>` (#80), so such a
+#: document's sections and passages differ. Stored per document so that a document written
+#: under an old scheme re-indexes itself and one written under the new one is left alone - a
+#: format change repairs a tree file by file, and resumes where it stopped if interrupted.
+VECTOR_FORMAT = 3
 #: Meta key holding the weights revision the stored vectors were built from. It lives here
 #: because `clear()` has to forget it in the same transaction that deletes them.
 WEIGHTS_META_KEY = "embedding_weights_revision"

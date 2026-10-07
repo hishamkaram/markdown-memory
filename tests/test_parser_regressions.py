@@ -616,6 +616,10 @@ class TestPassagesKeepTheirCut:
     when they were embedded. The digests below were computed with the parser as it stood
     before the span core existed (0.5.1), so they are an oracle independent of the new code:
     every section path, line range, section text and passage of both eval corpora.
+
+    corpus_v2's was recomputed once for #80, on purpose: compared file by file with the
+    parser before it, only ripgrep's FAQ changed - one section per `<h3>` question, 14 parts
+    became 33 sections. Every other file of both corpora parses exactly as it did.
     """
 
     EVAL_DATA = Path(__file__).parent.parent / "scripts" / "eval_data"
@@ -624,7 +628,7 @@ class TestPassagesKeepTheirCut:
         ("corpus", "digest"),
         [
             ("corpus", "50b7c677edb3375933837947ea72a12a0fad92caca57a612454208942da2335b"),
-            ("corpus_v2", "65eebdc8d1133b3f6e5646fcee243648a5abeb70b4e5a93c38d7142e7ccd7507"),
+            ("corpus_v2", "b69858557c57291da5a81d6dac5e3bb133a2a6df27eb72b7844fc396d24026fa"),
         ],
     )
     def test_both_eval_corpora_cut_into_the_same_passages(self, corpus: str, digest: str) -> None:
@@ -744,3 +748,200 @@ class TestOpenFences:
         assert ends_inside_fence("text\n```py\ncode")
         assert not ends_inside_fence("text\n```py\ncode\n```")
         assert not ends_inside_fence("````\n```\ninner\n```\n````")
+
+
+class TestHtmlHeadings:
+    """#80: a raw `<h1>`-`<h6>` block opens a section, but only when it is exactly one heading.
+
+    ripgrep's FAQ marks its 27 questions with `<h3 name="…">`: the whole file used to be one
+    section cut into `FAQ (Part n)` parts, with breadcrumbs naming part numbers.
+    """
+
+    @pytest.mark.parametrize(
+        ("block", "level", "title"),
+        [
+            ('<h3 name="config">\nDoes ripgrep support configuration files?\n</h3>', 3,
+             "Does ripgrep support configuration files?"),
+            ("<H2 ALIGN=center>Upper</H2>", 2, "Upper"),
+            ("<h1>Fish &amp; Chips &#x27;n&#39; more</h1>", 1, "Fish & Chips 'n' more"),
+            ("<h2>Use &lt;arch&gt; as is</h2>", 2, "Use <arch> as is"),
+            ("<h4>Make <code>-f/--file</code> faster</h4>", 4, "Make -f/--file faster"),
+            ("<h4><em>a</em> <em>b</em></h4>", 4, "a b"),
+            ("<h5>One<br>Two</h5>", 5, "One Two"),
+            ("<h2><b>Bold</h2>", 2, "Bold"),
+            ("<h2><b><i>Crossed</b></i></h2>", 2, "Crossed"),
+            ('<h1><img src="l.png" alt="Logo"> Name</h1>', 1, "Name"),
+            ("<h3>Why does a leading `/` fail?</h3>", 3, "Why does a leading `/` fail?"),
+        ],
+    )  # fmt: skip
+    def test_a_whole_heading_is_one(self, block: str, level: int, title: str) -> None:
+        from markdown_memory.parser import _html_heading
+
+        assert _html_heading(block) == (level, title)
+        document = parse(f"# Doc\n\n{block}\n\nbody\n")
+        expected = f"Doc > {title}" if level > 1 else title
+        assert paths(document)[-1] == expected
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            "<h3>Title</h3>\nparagraph after",
+            "<h3>Title</h2>",
+            "<h3>Title",
+            "<div><h2>Wrapped</h2></div>",
+            "<h2>A <p>b</p></h2>",
+            "<h2>a</div></h2>",
+            "<h2>a</script></h2>",
+            "<h2>a</h2><h2>b</h2>",
+            "<h2><h3>nested</h3></h2>",
+            "<h2>a<!DOCTYPE html></h2>",
+            "<h6><!-- hidden -->Text</h6>",
+            "<h6><!--b-->Text</h6>",  # a comment is no tag, whatever it says
+            '<h1 align="center"><img src="logo.png" alt="Logo"></h1>',
+            '<h1 align="center"><img src="logo.png"></h1>',
+            "<h2>   </h2>",
+            "<p>not a heading</p>",
+        ],
+    )
+    def test_anything_else_is_body_text(self, block: str) -> None:
+        from markdown_memory.parser import _html_heading
+
+        assert _html_heading(block) is None
+        assert len(parse(f"# Doc\n\n{block}\n\nbody\n").sections) == 1
+
+    def test_a_block_the_library_cannot_read_is_not_a_heading(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import markdown_memory.parser as parser_module
+
+        def broken(self: object, data: str) -> None:
+            raise AssertionError("unknown status keyword in marked section")
+
+        monkeypatch.setattr(parser_module._HtmlMarks, "feed", broken)
+        assert parser_module._html_heading("<h2>Title</h2>") is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "# Doc\n\n```html\n<h2>In a fence</h2>\n```\n",
+            "# Doc\n\n    <h2>Indented code</h2>\n",
+            "# Doc\n\n- item\n\n  <h2>In a list</h2>\n",
+            "# Doc\n\n> <h2>In a quote</h2>\n",
+        ],
+    )
+    def test_a_heading_inside_a_container_opens_nothing(self, text: str) -> None:
+        assert paths(parse(text)) == ["Doc"]
+
+    def test_markdown_and_html_headings_share_one_outline(self) -> None:
+        text = (
+            "<h1>Tool</h1>\n\n## Install\n\na\n\n<h3>From source</h3>\n\nb\n\n"
+            "<h2>Install</h2>\n\nc\n"
+        )
+        document = parse(text)
+        assert document.title == "Tool"
+        assert paths(document) == [
+            "Tool", "Tool > Install", "Tool > Install > From source", "Tool > Install [2]",
+        ]  # fmt: skip
+
+    def test_text_before_the_first_html_heading_is_the_preamble(self) -> None:
+        document = parse("Badges here.\n\n<h2>Usage</h2>\n\nRun it.\n")
+        assert paths(document) == [PREAMBLE_TITLE, "Usage"]
+
+    def test_the_heading_is_not_a_passage_of_its_section(self) -> None:
+        document = parse('# Doc\n\n<h3 name="q">\nA question?\n</h3>\n\nThe answer.\n')
+        section = document.sections[-1]
+        assert section.heading_path == "Doc > A question?"
+        assert section.units == ("The answer.",)
+        assert section.content.startswith('<h3 name="q">')  # stored verbatim
+        assert section.start_line == 3
+
+    def test_other_html_is_embedded_as_before(self) -> None:
+        """#80 changes headings only: any other raw HTML keeps the text it always had."""
+        document = parse("## S\n\n<p>x &lt; <b>y</b></p>\n")
+        assert document.sections[0].units == ("x &lt; y",)  # as main embeds it
+
+    def test_a_heading_longer_than_a_section_stays_body_text(self) -> None:
+        def heading(size: int) -> str:
+            return "<h2>" + "x" * (size - len("<h2></h2>\n")) + "</h2>"
+
+        parser = MarkdownParser(max_section_chars=100)
+        fits = parser.parse(f"# Doc\n\n{heading(100)}\n\nbody\n", fallback_title="d")
+        too_long = parser.parse(f"# Doc\n\n{heading(101)}\n\nbody\n", fallback_title="d")
+        assert len({s.base_path for s in fits.sections}) == 2
+        assert len({s.base_path for s in too_long.sections}) == 1
+        # One test for both sides: what does not open a section is embedded as its body.
+        assert not any("xxx" in unit for s in fits.sections for unit in s.units)
+        assert any("xxx" in unit for s in too_long.sections for unit in s.units)
+        for size, kept in ((100, False), (101, True)):
+            units = parser.extract_units(f"{heading(size)}\n\nbody", skip_heading=True)
+            assert any("xxx" in unit for unit in units) is kept, size
+
+    def test_the_ripgrep_faq_is_one_section_per_question(self) -> None:
+        corpus = Path(__file__).parent.parent / "scripts" / "eval_data" / "corpus_v2"
+        text = (corpus / "ripgrep" / "FAQ.md").read_text(encoding="utf-8")
+        document = MarkdownParser().parse(text, fallback_title="FAQ")
+        bases = list(dict.fromkeys(s.base_path for s in document.sections))
+        assert len(bases) == 28 and bases[0] == "FAQ"
+        assert "FAQ > How do I search compressed files?" in bases
+        assert "FAQ > How do I make the -f/--file flag faster?" in bases
+        pcre2 = [s for s in document.sections if "PCRE2" in s.base_path]
+        assert len(pcre2) > 1, "a long answer is still split into parts"
+        assert join_parts(pcre2) == "\n".join(
+            text.split("\n")[pcre2[0].start_line - 1 : pcre2[-1].end_line]
+        )
+
+
+class TestEveryCorpusFileIsCoveredOnce:
+    """#80 moved section boundaries: every source line still belongs to exactly one section."""
+
+    EVAL_DATA = Path(__file__).parent.parent / "scripts" / "eval_data"
+
+    @pytest.mark.parametrize("corpus", ["corpus", "corpus_v2"])
+    def test_sections_tile_each_file(self, corpus: str) -> None:
+        parser = MarkdownParser()
+        for path in sorted((self.EVAL_DATA / corpus).rglob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            lines = text.split("\n")
+            document = parser.parse(text, fallback_title=path.stem)
+            owner: dict[int, str] = {}
+            for base in dict.fromkeys(s.base_path for s in document.sections):
+                parts = [s for s in document.sections if s.base_path == base]
+                first, last = parts[0].start_line, parts[-1].end_line
+                assert join_parts(parts) == "\n".join(lines[first - 1 : last]), (path, base)
+                for number in range(first, last + 1):
+                    assert number not in owner, (path, number, owner.get(number), base)
+                    owner[number] = base
+            uncovered = [n for n, line in enumerate(lines, 1) if line.strip() and n not in owner]
+            front = document.sections and document.sections[0].start_line
+            assert all(n < front for n in uncovered), (path, uncovered[:5])  # front matter only
+
+
+class TestHtmlMigration:
+    """#80 changes sections of files whose bytes did not change: VECTOR_FORMAT 3 rebuilds them."""
+
+    def test_an_index_written_before_80_is_sectioned_again(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        from helpers import draft
+
+        (tmp_path / "faq.md").write_text(
+            "# FAQ\n\n<h3>First question?</h3>\n\nOne.\n\n<h3>Second &amp; last?</h3>\n\nTwo.\n"
+        )
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(tmp_path)
+        conn = db.connection()
+        file_path, content_hash, mtime_ns = conn.execute(
+            "SELECT file_path, content_hash, mtime_ns FROM documents"
+        ).fetchone()
+        old = [draft("FAQ", "everything in one section")]
+        db.replace_document(
+            file_path=file_path, title="FAQ", content_hash=content_hash, last_modified=1,
+            mtime_ns=mtime_ns, sections=old, vectors=vectors_for(fake_embedder, old),
+        )  # fmt: skip
+        with db.transaction() as write:  # what 0.7 left behind: same bytes, format 2
+            write.execute("UPDATE documents SET vector_format = 2")
+
+        assert indexer.index_directory(tmp_path).files_indexed == 1
+        stored = [p for (p,) in conn.execute("SELECT heading_path FROM sections ORDER BY id")]
+        assert stored == ["FAQ", "FAQ > First question?", "FAQ > Second & last?"]
+        assert indexer.index_directory(tmp_path).files_indexed == 0, "rebuilt once, not always"

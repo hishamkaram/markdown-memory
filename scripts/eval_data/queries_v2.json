@@ -104,12 +104,12 @@
         "query": "Does ripgrep replace text in my files or only in its output?",
         "expected": "ripgrep/GUIDE.md::User Guide > Replacements",
         "also_valid": {
-          "ripgrep/FAQ.md::FAQ": 2
+          "ripgrep/FAQ.md::FAQ > How can I search and replace with ripgrep?": 2
         }
       },
       {
         "query": "What flag lets ripgrep search gzip and other compressed input automatically?",
-        "expected": "ripgrep/FAQ.md::FAQ",
+        "expected": "ripgrep/FAQ.md::FAQ > How do I search compressed files?",
         "also_valid": {
           "ripgrep/GUIDE.md::User Guide > Common options": 2
         }
@@ -207,7 +207,7 @@
         "query": "RIPGREP_CONFIG_PATH",
         "expected": "ripgrep/GUIDE.md::User Guide > Configuration file",
         "also_valid": {
-          "ripgrep/FAQ.md::FAQ": 1
+          "ripgrep/FAQ.md::FAQ > How do I make the output look like The Silver Searcher's output?": 1
         }
       },
       {
@@ -585,7 +585,7 @@
         "query": "searching UTF-16 files from Windows, do I need -E or does ripgrep figure it out on its own?",
         "expected": "ripgrep/GUIDE.md::User Guide > File encoding",
         "also_valid": {
-          "ripgrep/FAQ.md::FAQ": 1
+          "ripgrep/FAQ.md::FAQ > Can ripgrep replace grep?": 1
         }
       },
       {

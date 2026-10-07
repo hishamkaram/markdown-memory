@@ -1162,6 +1162,72 @@ MUTATIONS = (
         tests="TestUnitsRound4",
     ),
     Mutation(
+        name="html: never read a raw <hN> block as a heading",
+        module="parser.py",
+        old="            html = self._html_heading_of(token)",
+        new="            html = None",
+        tests="TestHtmlHeadings or TestHtmlMigration",
+    ),
+    Mutation(
+        name="html: take a heading with prose after it for a heading",
+        module="parser.py",
+        old='    marks = [mark for mark in reader.marks if mark[0] != "data" or mark[1].strip()]',
+        new=(
+            '    marks = [mark for mark in reader.marks if mark[0] != "data" or mark[1].strip()]\n'
+            '    marks = marks[:-1] if marks and marks[-1][0] == "data" else marks'
+        ),
+        tests="test_anything_else_is_body_text",
+    ),
+    Mutation(
+        name="html: close an <h3> with an </h2>",
+        module="parser.py",
+        old='    if marks[-1] != ("end", level) or any(',
+        new='    if marks[-1][0] != "end" or any(',
+        tests="test_anything_else_is_body_text",
+    ),
+    Mutation(
+        name="html: let a comment or declaration sit inside a heading",
+        module="parser.py",
+        old='        kind == "other" or (kind != "data" and value not in _FORMATTING_TAGS)',
+        new='        kind != "data" and value not in _FORMATTING_TAGS',
+        tests="test_anything_else_is_body_text",
+    ),
+    Mutation(
+        name="html: let any tag sit inside a heading",
+        module="parser.py",
+        old='        kind == "other" or (kind != "data" and value not in _FORMATTING_TAGS)',
+        new='        kind == "other"',
+        tests="test_anything_else_is_body_text",
+    ),
+    Mutation(
+        name="html: open a section on a heading with no visible text",
+        module="parser.py",
+        old="    return (int(level[1]), title) if title else None",
+        new="    return (int(level[1]), title)",
+        tests="test_anything_else_is_body_text",
+    ),
+    Mutation(
+        name="html: embed an HTML heading as a passage of its own section",
+        module="parser.py",
+        old='token.type == "heading_open" or self._html_heading_of(token) is not None',
+        new='token.type == "heading_open"',
+        tests="test_the_heading_is_not_a_passage_of_its_section",
+    ),
+    Mutation(
+        name="html: take a heading too long to stay whole for a heading",
+        module="parser.py",
+        old='        if token.type != "html_block" or len(token.content) > self._max_chars:',
+        new='        if token.type != "html_block":',
+        tests="test_a_heading_longer_than_a_section_stays_body_text",
+    ),
+    Mutation(
+        name="html: leave an index written before #80 with its old sections",
+        module="db.py",
+        old="VECTOR_FORMAT = 3",
+        new="VECTOR_FORMAT = 2",
+        tests="TestHtmlMigration",
+    ),
+    Mutation(
         name="cache: score a cached index built from a different corpus",
         module="eval_cache.py",
         area="scripts",
