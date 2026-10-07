@@ -1850,9 +1850,9 @@ class TestOnlyAWholeWalkVouchesForATree:
     ) -> None:
         """Its measurements describe a database that no longer exists.
 
-        A scan reads the file hashes, then something empties the index wholesale - a model
-        or embedding-size change. Every file now looks unchanged to that scan, so it walks
-        to the end seeing nothing wrong and would certify an empty database as whole.
+        A scan reads the file hashes, then something empties the index wholesale. Every file
+        now looks unchanged to that scan, so it walks to the end seeing nothing wrong and
+        would certify an empty database as whole.
         """
         (tmp_path / "a.md").write_text("# A\n\nbody\n")
         Indexer(db, fake_embedder).index_directory(tmp_path)

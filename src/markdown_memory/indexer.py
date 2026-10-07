@@ -298,8 +298,8 @@ class Indexer:
             # dismissed only once the report carrying them exists: a run that aborts - the
             # model cannot be loaded - leaves them for the next one.
             notices = self._db.pending_notices()
-            # Captured just before the run reads the hashes it will trust: a discard *after*
-            # this point means the walk measured a database that no longer exists.
+            # Captured just before the run reads the hashes it will trust: a revocation
+            # *after* this point means the walk measured an index it can no longer vouch for.
             generation = self._db.generation()
             identity = self._run_identity()
             known_hashes = self._db.document_hashes(str(root))
