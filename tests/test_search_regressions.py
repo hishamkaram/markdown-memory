@@ -12,7 +12,7 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
-from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.db import MODEL_META_KEY, WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
 from markdown_memory.discovery import walk_order
 from markdown_memory.exceptions import DatabaseError, SearchError
 from markdown_memory.indexer import Indexer
@@ -31,6 +31,7 @@ from markdown_memory.search import (
     build_fts_query,
     fts_terms,
     select_anchor,
+    unnamed_rename,
 )
 
 
@@ -330,10 +331,10 @@ class TestSearchRobustness:
     def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Checking the revision does not freeze it. A model *name* change in another
+        """Checking the revision does not freeze it. Another process may re-embed the
 
-        process discards every vector and rebuilds it, and rows read after the check are
-        not the rows it vouched for - the query was embedded by one model and the vectors
+        index while this one ranks, and rows read after the check are not the rows it
+        vouched for - the query was embedded by one model and the vectors
         it is measured against were written by another.
         """
         embedder = _RevisedEmbedder("a" * 40)
@@ -346,6 +347,54 @@ class TestSearchRobustness:
             return original(*arguments)  # type: ignore[arg-type]
 
         monkeypatch.setattr(db, "vec_search", rebuild_then_search)
+        searcher = HybridSearcher(db, embedder)
+        try:
+            results = searcher.search("body number")
+            assert results and all(r.vec_rank is None for r in results)
+        finally:
+            searcher.close()
+
+    def test_vectors_another_model_built_are_not_ranked_when_neither_names_its_weights(
+        self, db: Database
+    ) -> None:
+        """With no revision on either side, only the stored model name can tell (#91).
+
+        Indexing refuses to write over such an index, so it lasts until the person acts,
+        and every query in between would have been measured against another model's
+        vectors. Nothing is recorded: what is derived from the stored name goes away the
+        moment the old model is back, where a recorded mismatch would outlive it.
+        """
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.set_meta(MODEL_META_KEY, "model-a")
+        renamed = FakeEmbedder(model_name="model-b")
+        assert "built by model-a" in (unnamed_rename(db, renamed) or "")
+        for embedder, ranked in ((renamed, False), (FakeEmbedder(model_name="model-a"), True)):
+            searcher = HybridSearcher(db, embedder)
+            try:
+                results = searcher.search("body number")
+            finally:
+                searcher.close()
+            assert results and any(r.vec_rank is not None for r in results) is ranked
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+
+    def test_a_model_renamed_mid_search_is_not_ranked_on(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When neither model names its weights, the revision stays None throughout, so
+
+        the name is all that changes when an index is taken over - an empty one, filled by
+        another model while this search was ranking.
+        """
+        embedder = FakeEmbedder(model_name="model-a")
+        store(db, embedder, "/d/a.md")
+        db.set_meta(MODEL_META_KEY, "model-a")
+        original = db.vec_search
+
+        def rename_then_search(*arguments: object) -> list[tuple[int, float]]:
+            db.set_meta(MODEL_META_KEY, "model-b")  # another process took the index over
+            return original(*arguments)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(db, "vec_search", rename_then_search)
         searcher = HybridSearcher(db, embedder)
         try:
             results = searcher.search("body number")

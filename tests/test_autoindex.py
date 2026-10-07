@@ -412,6 +412,68 @@ class TestTheService:
         finally:
             service.close()
 
+    @staticmethod
+    def _built_by_model_a(tmp_path: Path) -> ServerConfig:
+        root = _tree(tmp_path / "docs", ("a",))
+        (root / "sub").mkdir()
+        (root / "sub" / "b.md").write_text("# b\n\nbody of b\n")
+        config = ServerConfig(db_path=tmp_path / "index.db", docs_dir=root)
+        built = MarkdownMemoryService(config, embedder=FakeEmbedder(model_name="model-a"))
+        try:
+            built.index_directory()
+        finally:
+            built.close()
+        return config
+
+    def test_a_renamed_model_that_cannot_name_its_weights_is_reported_while_it_lasts(
+        self, tmp_path: Path
+    ) -> None:
+        """Indexing refuses such a model and search ranks by keyword (#91); the status says
+
+        why, for the root and a directory alike, and stops saying it the moment the model
+        that built the index is back - derived, so there is nothing left behind to clear.
+        """
+        config = self._built_by_model_a(tmp_path)
+        renamed = MarkdownMemoryService(config, embedder=FakeEmbedder(model_name="model-b"))
+        try:
+            for status in (renamed.index_status(), renamed.index_status("sub")):
+                assert not status.verified
+                assert "built by model-a" in (status.message() or "")
+                assert status.to_dict()["message"] == status.message()
+        finally:
+            renamed.close()
+        restored = MarkdownMemoryService(config, embedder=FakeEmbedder(model_name="model-a"))
+        try:
+            status = restored.index_status()
+            assert (status.verified, status.message()) == (True, None)
+        finally:
+            restored.close()
+
+    def test_a_renamed_model_that_cannot_name_its_weights_is_refused_once_not_per_search(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = self._built_by_model_a(tmp_path)
+        service = MarkdownMemoryService(config, embedder=FakeEmbedder(model_name="model-b"))
+        runs: list[None] = []
+        index_directory = service.index_directory
+
+        def counted(*arguments: object, **keywords: object) -> IndexReport:
+            runs.append(None)
+            return index_directory(*arguments, **keywords)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(service, "index_directory", counted)
+        try:
+            service.start_auto_index(request=False)
+            auto = service._auto
+            assert auto is not None
+            for _ in range(3):  # what every search_docs asks
+                service.index_status()
+                _wait(auto)
+            assert len(runs) == 1, "the refusal it cannot repair was retried"
+            assert service.list_documents(), "the refused run changed the index"
+        finally:
+            service.close()
+
 
 def _wait(runner: AutoIndexer) -> None:
     deadline = time.monotonic() + 5

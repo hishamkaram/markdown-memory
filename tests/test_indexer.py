@@ -193,12 +193,13 @@ class TestIncrementalIndexing:
         assert report.errors == ()
         assert db.list_documents()[0].title == "Caf�"
 
-    def test_changing_the_embedding_model_discards_stale_vectors(
+    def test_changing_the_embedding_model_re_embeds_stale_vectors(
         self, db: Database, docs: Path
     ) -> None:
         Indexer(db, FakeEmbedder(model_name="model-a")).index_directory(docs)
         assert db.get_meta("embedding_model") == "model-a"
-        report = Indexer(db, FakeEmbedder(model_name="model-b")).index_directory(docs)
+        renamed = FakeEmbedder(model_name="model-b", weights="b" * 40)
+        report = Indexer(db, renamed).index_directory(docs)
         assert report.files_indexed == 4  # hashes matched, but every vector was stale
         assert db.get_meta("embedding_model") == "model-b"
         assert db.count_rows("sections_vec") == 5

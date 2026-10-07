@@ -389,24 +389,87 @@ MUTATIONS = (
         tests="test_a_model_whose_weights_changed_re_embeds_the_index_in_place",
     ),
     Mutation(
-        name="weights: discard every document when a model with named weights is renamed",
+        name="weights: refuse a renamed model that names its weights",
         module="indexer.py",
         old=(
-            "            if renamed and self._embedder.weights_revision is None:\n"
-            "                # Vectors from"
+            "                if self._embedder.weights_revision is None:\n"
+            "                    raise ForeignWeightsError(\n"
         ),
-        new="            if renamed:\n                # Vectors from",
-        tests="test_a_renamed_model_with_named_weights_repairs_instead_of_discarding",
+        new="                if True:\n                    raise ForeignWeightsError(\n",
+        tests="test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
     ),
     Mutation(
-        name="weights: discard the index before a renamed lazy model can name its weights",
+        name="weights: refuse a renamed lazy model before it can name its weights",
         module="indexer.py",
         old=(
+            "                self._embedder.warm_up()\n"
+            "                if self._embedder.weights_revision is None:\n"
+        ),
+        new="                if self._embedder.weights_revision is None:\n",
+        tests="test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
+    ),
+    Mutation(
+        name="weights: let a renamed model that cannot name its weights write anyway",
+        module="indexer.py",
+        old="                    raise ForeignWeightsError(\n",
+        new="                    _ = (\n",
+        tests="test_a_renamed_model_that_cannot_name_its_weights_is_refused_not_discarded",
+    ),
+    Mutation(
+        name="weights: discard every root before refusing a renamed unnamed model",
+        module="indexer.py",
+        old=(
+            "                if self._embedder.weights_revision is None:\n"
+            "                    raise ForeignWeightsError(\n"
+        ),
+        new=(
+            "                if self._embedder.weights_revision is None:\n"
+            "                    self._db.clear()\n"
+            "                    raise ForeignWeightsError(\n"
+        ),
+        tests="test_a_renamed_model_that_cannot_name_its_weights_is_refused_not_discarded",
+    ),
+    Mutation(
+        name="weights: record the refusal where no run of the old model can clear it",
+        module="indexer.py",
+        old=(
+            "                if self._embedder.weights_revision is None:\n"
+            "                    raise ForeignWeightsError(\n"
+        ),
+        new=(
+            "                if self._embedder.weights_revision is None:\n"
+            "                    self._db.record_weights_mismatch('refused')\n"
+            "                    raise ForeignWeightsError(\n"
+        ),
+        tests=(
+            "test_a_renamed_model_that_cannot_name_its_weights_is_refused_not_discarded"
+            " or test_a_renamed_model_that_cannot_name_its_weights_is_refused_once_not_per_search"
+        ),
+    ),
+    Mutation(
+        name="weights: carry on past a renamed model that will not load",
+        module="indexer.py",
+        old=(
+            "                self._embedder.warm_up()\n"
+            "                if self._embedder.weights_revision is None:\n"
+        ),
+        new=(
             "                with contextlib.suppress(ModelLoadError):\n"
             "                    self._embedder.warm_up()\n"
+            "                if self._embedder.weights_revision is None:\n"
         ),
-        new="                with contextlib.suppress(ModelLoadError):\n                    pass\n",
-        tests="test_a_renamed_model_that_names_its_weights_once_loaded_repairs_too",
+        tests="test_a_renamed_model_that_will_not_load_leaves_the_index_it_found",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
+    ),
+    Mutation(
+        name="weights: refuse a rename over documents that hold no vector",
+        module="indexer.py",
+        old="                and self._db.has_vectors()\n",
+        new='                and self._db.count_rows("documents") > 0\n',
+        tests="test_a_renamed_model_over_an_index_without_vectors_takes_it_over",
+        fails_with="markdown_memory.exceptions.ForeignWeightsError",
     ),
     Mutation(
         name="weights: leave a pending repair to a model that has not loaded",
@@ -425,8 +488,8 @@ MUTATIONS = (
     Mutation(
         name="search: rank vectors stored unvouched while the lookup ran",
         module="search.py",
-        old="            best and recorded != self._embedder.weights_revision\n",
-        new="            False\n",
+        old="                best and recorded != self._embedder.weights_revision\n",
+        new="                False\n",
         tests="test_vectors_written_unvouched_during_the_lookup_are_not_ranked",
     ),
     Mutation(
@@ -1027,9 +1090,26 @@ MUTATIONS = (
     Mutation(
         name="search: trust a revision checked before the rows were read",
         module="search.py",
-        old="        if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (\n",
-        new="        if False or (  # the check speaks for rows read after it\n",
+        old="            self._db.get_meta(WEIGHTS_META_KEY) != recorded\n",
+        new="            False  # the check speaks for rows read after it\n",
         tests="test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on",
+    ),
+    Mutation(
+        name="search: trust a model name checked before the rows were read",
+        module="search.py",
+        old="            or self._db.get_meta(MODEL_META_KEY) != model\n",
+        new="            or False\n",
+        tests="test_a_model_renamed_mid_search_is_not_ranked_on",
+    ),
+    Mutation(
+        name="search: rank another model's vectors when neither names its weights",
+        module="search.py",
+        old=(
+            "                if renamed is not None:\n"
+            "                    raise SearchError(renamed)\n"
+        ),
+        new="                if False:\n                    raise SearchError(renamed)\n",
+        tests="test_vectors_another_model_built_are_not_ranked_when_neither_names_its_weights",
     ),
     Mutation(
         name="cache: look only at other revisions, and miss the graph this one replaced",
@@ -1101,7 +1181,7 @@ MUTATIONS = (
     Mutation(
         name="search: rank named weights against vectors no revision vouches for",
         module="search.py",
-        old='            if weights is None or self._db.count_rows("units_vec") == 0:\n',
+        old="            if not self._db.has_vectors():\n",
         new="            if True:\n",
         tests="test_vectors_no_revision_vouches_for_are_not_ranked_by_named_weights",
     ),
@@ -1266,7 +1346,7 @@ MUTATIONS = (
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",
-        old='    ("README.md", 11238),',
+        old='    ("README.md", 11290),',
         new='    ("README.md", 5654),',
         tests="test_every_file_on_the_diagram_still_costs_what_it_says "
         "or test_the_totals_the_readme_prints_are_the_sum_of_those_files",
@@ -2631,13 +2711,33 @@ MUTATIONS = (
         tests="test_the_weights_of_a_run_are_settled_once_however_many_workers_embed",
     ),
     Mutation(
+        name="status: say nothing of a renamed model that cannot name its weights",
+        module="server.py",
+        old="            renamed = unnamed_rename(self._db, self._embedder)\n",
+        new="            renamed = None\n",
+        tests="test_a_renamed_model_that_cannot_name_its_weights_is_reported_while_it_lasts",
+    ),
+    Mutation(
+        name="status: derive the rename for the root only, not for a directory",
+        module="server.py",
+        old=(
+            "            self._with_freshness("
+            "self._db.index_status(self._root, str(scope)), str(scope))\n"
+        ),
+        new=(
+            "            dataclasses.replace(self._db.index_status(self._root, str(scope)), "
+            "changed_files=self._freshness.changed_files(str(scope)))\n"
+        ),
+        tests="test_a_renamed_model_that_cannot_name_its_weights_is_reported_while_it_lasts",
+    ),
+    Mutation(
         name="freshness: never look at the disk",
         module="server.py",
         old=(
-            "        return dataclasses.replace("
+            "        status = dataclasses.replace("
             "status, changed_files=self._freshness.changed_files(scope))"
         ),
-        new="        return status",
+        new="        status = status",
         tests="test_an_edited_document_is_reported_without_unverifying_the_walk",
     ),
     Mutation(

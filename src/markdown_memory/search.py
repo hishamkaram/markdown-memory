@@ -27,7 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import pairwise
 from typing import NamedTuple, NoReturn, TypeVar
 
-from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
+from markdown_memory.db import MODEL_META_KEY, WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
 from markdown_memory.discovery import walk_order
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
@@ -755,15 +755,22 @@ class HybridSearcher:
         # After the embedding, never before: the embedder loads lazily and cannot say
         # which weights it is until it has loaded, so asking first would suppress
         # ranking on every first query of a process.
+        model = self._db.get_meta(MODEL_META_KEY)
         recorded = self._refuse_foreign_vectors()
         best, passages = self._nearest(embedding, limit)
-        # Again, against what was read rather than what was checked: a model *name* change
-        # in another process discards every vector and rebuilds it, and a check that
-        # happened before those rows were read cannot speak for them.
-        if self._db.get_meta(WEIGHTS_META_KEY) != recorded or (
-            # Let through only because nothing was stored to disagree with; whatever the
-            # lookup found was written since, by weights other than these.
-            best and recorded != self._embedder.weights_revision
+        # Again, against what was read rather than what was checked: another process may
+        # re-embed the index, or fill an empty one, while this one ranks, and a check that
+        # happened before those rows were read cannot speak for them. The model name is
+        # compared too, because when neither model names its weights it is all that
+        # changes (#91).
+        if (
+            self._db.get_meta(WEIGHTS_META_KEY) != recorded
+            or self._db.get_meta(MODEL_META_KEY) != model
+            or (
+                # Let through only because nothing was stored to disagree with; whatever the
+                # lookup found was written since, by weights other than these.
+                best and recorded != self._embedder.weights_revision
+            )
         ):
             raise SearchError(
                 "The index was rebuilt by another model while this search was ranking; "
@@ -790,8 +797,17 @@ class HybridSearcher:
             # first one - has nothing to rank against, so nothing to warn about either.
             return recorded
         if recorded is None:
-            if weights is None or self._db.count_rows("units_vec") == 0:
-                return None  # nothing named on either side, or nothing to rank
+            if weights is None:
+                # Nothing named on either side, so only the model's name can tell (#91).
+                # Not recorded: the index status derives the same sentence from the same
+                # facts, so it goes the moment they do - a recorded one would outlive a
+                # return to the old model, which no run could withdraw.
+                renamed = unnamed_rename(self._db, self._embedder)
+                if renamed is not None:
+                    raise SearchError(renamed)
+                return None
+            if not self._db.has_vectors():
+                return None  # nothing to rank
             # Vectors no revision vouches for, and weights that can say what they are:
             # nothing says the two are the same model, so they are not ranked together.
             # Recorded, so the next index run loads its model and re-embeds them.
@@ -873,6 +889,28 @@ class HybridSearcher:
 
 
 _R = TypeVar("_R")
+
+
+def unnamed_rename(db: Database, embedder: Embedder) -> str | None:
+    """Why this model's vectors may not meet the stored ones, when only a name can tell.
+
+    A model that cannot say which weights it runs, configured over vectors another model
+    built: no revision can tell the two apart, so the stored model name is all there is
+    (#91). Indexing refuses to write in that state, so it lasts until the person acts, and
+    this is computed rather than stored so that it ends exactly when they do.
+    """
+    if embedder.weights_revision is not None:
+        return None
+    previous = db.get_meta(MODEL_META_KEY)
+    if previous in {None, embedder.model_name} or not db.has_vectors():
+        return None
+    return (
+        f"This index was built by {previous}, and the configured model {embedder.model_name} "
+        "has not said which weights it runs, so their vectors are not compared: only keyword "
+        f"ranking is used. Configure {previous} again, point --db / MARKDOWN_MEMORY_DB at "
+        f"another file, or delete {db.path} with its -wal and -shm files while no "
+        "markdown-memory process uses it; the next index_directory rebuilds it."
+    )
 
 
 def _settle(future: Future[_R], empty: _R) -> tuple[_R, MarkdownMemoryError | None]:

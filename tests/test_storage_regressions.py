@@ -25,10 +25,11 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 import markdown_memory.indexer as indexer_module
 from markdown_memory import discovery
 from markdown_memory.config import ServerConfig
-from markdown_memory.db import SCHEMA_VERSION, WEIGHTS_REVOKED, Database
+from markdown_memory.db import MODEL_META_KEY, SCHEMA_VERSION, WEIGHTS_REVOKED, Database
 from markdown_memory.discovery import iter_markdown_files
 from markdown_memory.exceptions import (
     DatabaseError,
+    ForeignWeightsError,
     IndexBusyError,
     IndexingError,
     ModelLoadError,
@@ -161,6 +162,19 @@ def test_fts_row_count_reads_the_index_not_the_content_table(
     assert db.count_rows("sections_fts") == 0  # COUNT(*) on the FTS table would still say 3
 
 
+def _stored(db: Database) -> tuple[object, ...]:
+    """Every row a refused run could have touched, as one value to compare."""
+    conn = sqlite3.connect(f"file:{db.path}?mode=ro", uri=True)
+    try:
+        tables = ("meta", "documents", "sections", "units", "index_coverage", "index_failures")
+        rows = tuple(
+            conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall() for table in tables
+        )
+    finally:
+        conn.close()
+    return (*rows, db.count_rows("units_vec"), db.count_rows("sections_vec"))
+
+
 class TestIndexerSafety:
     def test_fifo_named_like_markdown_does_not_hang_the_run(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -251,23 +265,58 @@ class TestIndexerSafety:
         (dependency_docs / "api.md").unlink()  # its own root still notices real deletions
         assert indexer.index_directory(dependency_docs).files_purged == 1
 
-    def test_model_change_reports_everything_it_discarded(
+    def test_a_renamed_model_that_cannot_name_its_weights_is_refused_not_discarded(
         self, db: Database, tmp_path: Path
     ) -> None:
+        """It used to empty every root in the file (#91): rebuilding is the person's call.
+
+        Two models' vectors cannot share one table, and with no revision on either side
+        nothing could tell them apart afterwards - so nothing is written, and the run says
+        how to recover, as a database of another vector size does (#90).
+        """
         first, second = tmp_path / "one", tmp_path / "two"
         for root in (first, second):
             root.mkdir()
-            (root / "doc.md").write_text(f"# {root.name}\n")
+            (root / "doc.md").write_text(f"# {root.name}\n\nbody\n")
         old = Indexer(db, FakeEmbedder(model_name="model-a"))
         old.index_directory(first)
         old.index_directory(second)
-        report = Indexer(db, FakeEmbedder(model_name="model-b")).index_directory(first)
-        assert len(report.notes) == 1
-        assert "model-a -> model-b" in report.notes[0]
-        assert "discarded all 2 previously indexed documents" in report.notes[0]
-        assert "NOTE Embedding model changed" in report.summary()
-        assert [Path(d.file_path).parent.name for d in db.list_documents()] == ["one"]
-        assert Indexer(db, FakeEmbedder(model_name="model-b")).index_directory(first).notes == ()
+        before = _stored(db)
+        for _ in range(2):  # and on the next run too: it refused without changing anything
+            with pytest.raises(ForeignWeightsError) as refused:
+                Indexer(db, FakeEmbedder(model_name="model-b")).index_directory(first)
+            assert _stored(db) == before
+        message = str(refused.value)
+        assert "built by model-a" in message and "model model-b" in message
+        assert "Nothing was changed in the index" in message
+        assert str(db.path) in message
+
+    def test_a_renamed_model_that_will_not_load_leaves_the_index_it_found(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """A model that could not load used to empty the index first and fail after (#91)."""
+
+        class Unloadable(FakeEmbedder):
+            def warm_up(self) -> None:
+                raise ModelLoadError("Cannot load embedding model: offline")
+
+        (tmp_path / "doc.md").write_text("# Doc\n\nbody\n")
+        Indexer(db, FakeEmbedder(model_name="old")).index_directory(tmp_path)
+        before = _stored(db)
+        with pytest.raises(ModelLoadError, match="offline"):
+            Indexer(db, Unloadable(model_name="new")).index_directory(tmp_path)
+        assert _stored(db) == before
+
+    def test_a_renamed_model_over_an_index_without_vectors_takes_it_over(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """Headings alone embed nothing, so there is no vector a rename could mix up."""
+        (tmp_path / "doc.md").write_text("# Only a heading\n")
+        Indexer(db, FakeEmbedder(model_name="old")).index_directory(tmp_path)
+        assert db.count_rows("documents") == 1 and not db.has_vectors()
+        report = Indexer(db, FakeEmbedder(model_name="new")).index_directory(tmp_path)
+        assert report.errors == ()
+        assert db.get_meta(MODEL_META_KEY) == "new"
 
     def test_undecodable_file_name_fails_alone_and_stays_json_safe(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -541,20 +590,18 @@ class TestNoticesSurviveAnAbortedRun:
             (root / "doc.md").write_text(f"# {root.name}\n\nbody\n")
         return first, second
 
-    def test_model_change_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
+    def test_a_discard_notice_is_kept_until_a_run_reports_it(self, tmp_path: Path) -> None:
         first, second = self.two_roots(tmp_path)
         with Database(tmp_path / "model.db") as database:
-            indexer = Indexer(database, FakeEmbedder(model_name="old"))
+            indexer = Indexer(database, FakeEmbedder())
             indexer.index_directory(first)
             indexer.index_directory(second)
+            database.clear(notice=lambda count: f"discarded all {count} documents")
             with pytest.raises(ModelLoadError):
-                Indexer(database, self.NoModel(model_name="new")).index_directory(first)
-            assert database.count_rows("documents") == 0
-            report = Indexer(database, FakeEmbedder(model_name="new")).index_directory(first)
-            assert len(report.notes) == 1
-            assert "Embedding model changed (old -> new)" in report.notes[0]
-            assert "discarded all 2 previously indexed documents" in report.notes[0]
-            again = Indexer(database, FakeEmbedder(model_name="new")).index_directory(first)
+                Indexer(database, self.NoModel()).index_directory(first)
+            report = Indexer(database, FakeEmbedder()).index_directory(first)
+            assert report.notes == ("discarded all 2 documents",)
+            again = Indexer(database, FakeEmbedder()).index_directory(first)
             assert again.notes == ()  # told once
 
     def test_notice_added_after_a_partial_dismissal_gets_a_fresh_key(
@@ -1427,15 +1474,16 @@ class TestOnlyAWholeWalkVouchesForATree:
         """A run's own housekeeping is not an abort.
 
         Changing the embedding model makes every stored vector incomparable, so the run
-        discards the index itself and rebuilds it. Counting that discard as somebody
-        else's leaves the tree it just rebuilt from scratch reported as unvouched-for -
-        for good, since every later run finds nothing to do.
+        re-embeds the index itself. Counting that as somebody else's work leaves the tree
+        it just rebuilt reported as unvouched-for - for good, since every later run finds
+        nothing to do.
         """
         (tmp_path / "a.md").write_text("# A\n\nbody\n")
         Indexer(db, FakeEmbedder(model_name="alpha")).index_directory(tmp_path)
         assert db.index_status(str(tmp_path)).verified
 
-        report = Indexer(db, FakeEmbedder(model_name="beta")).index_directory(tmp_path)
+        beta = FakeEmbedder(model_name="beta", weights="b" * 40)
+        report = Indexer(db, beta).index_directory(tmp_path)
         assert (report.files_indexed, report.errors) == (1, ())
         assert db.index_status(str(tmp_path)).verified, "the run blamed itself for its own wipe"
 

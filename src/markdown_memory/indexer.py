@@ -23,6 +23,7 @@ from pathlib import Path
 
 from markdown_memory import discovery
 from markdown_memory.db import (
+    MODEL_META_KEY,
     VECTOR_FORMAT,
     WEIGHTS_META_KEY,
     WEIGHTS_MISMATCH_KEY,
@@ -71,9 +72,6 @@ Reuse = Callable[[str, Sequence[str], str], Mapping[str, Sequence[float]]]
 # that genuinely cancel land near 1e-16; a real centroid of normalised passages is >= 1/n
 # of one passage, which for the 64-passage ceiling is ~0.015.
 _MIN_POOLED_NORM = 1e-6
-
-
-_MODEL_META_KEY = "embedding_model"
 
 
 def _index_workers() -> int:
@@ -269,39 +267,39 @@ class Indexer:
                     self._db.mark_scan_started(str(root))
                     retracted = True
 
-            previous_model = self._db.get_meta(_MODEL_META_KEY)
-            renamed = previous_model not in {None, self._embedder.model_name}
-            if renamed and self._embedder.weights_revision is None:
-                # A model that names its weights only once loaded is loaded now: this run
-                # re-embeds everything anyway, and knowing the weights is what spares the
-                # index the discard below. One that will not load is discarded as before.
-                with contextlib.suppress(ModelLoadError):
-                    self._embedder.warm_up()
-            if renamed and self._embedder.weights_revision is None:
+            previous_model = self._db.get_meta(MODEL_META_KEY)
+            if (
+                previous_model not in {None, self._embedder.model_name}
+                and self._embedder.weights_revision is None
+                and self._db.has_vectors()
+            ):
                 # Vectors from different models are not comparable, and they share one
-                # vector table. A model that names its weights up front leaves this to the
-                # per-document stamps, which re-embed each document in place while keyword
-                # search keeps answering; one that cannot would leave nothing to tell old
-                # vectors from new, so every document has to go, not only those under
-                # `root`. Nothing is announced when there was nothing left to discard.
-                self._db.clear(
-                    notice=lambda discarded: (
-                        f"Embedding model changed ({previous_model} -> "
-                        f"{self._embedder.model_name}): discarded all {discarded} previously "
-                        "indexed documents from every directory. Re-run index_directory for "
-                        "any other documentation root."
+                # vector table. A model that names its weights - up front, or once loaded,
+                # which is why it is loaded now - leaves this to the per-document stamps,
+                # which re-embed each document in place while keyword search keeps
+                # answering. One that cannot would leave nothing to tell old vectors from
+                # new, and rebuilding every root in the file is minutes to hours of
+                # embedding that is for the person to decide (#91): refused, as a vector
+                # size is (#90), before anything is written. A model that will not load
+                # stops here too, with the index it found.
+                self._embedder.warm_up()
+                if self._embedder.weights_revision is None:
+                    raise ForeignWeightsError(
+                        f"This index was built by {previous_model}, and the configured model "
+                        f"{self._embedder.model_name} cannot say which weights it runs, so its "
+                        "vectors could never be told apart from the stored ones. Nothing was "
+                        f"changed in the index. Configure {previous_model} again, point --db / "
+                        f"MARKDOWN_MEMORY_DB at another file, or delete {self._db.path} with "
+                        "its -wal and -shm files while no markdown-memory process uses it; "
+                        "the next run rebuilds it from the Markdown files."
                     )
-                )
-            self._db.set_meta(_MODEL_META_KEY, self._embedder.model_name)
-            # Whatever emptied the index (new format, new model) left a
-            # notice. They are dismissed only once the report carrying them exists: a run
-            # that aborts - the model cannot be loaded - leaves them for the next one.
+            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)
+            # Whatever emptied the index (an older vector format) left a notice. They are
+            # dismissed only once the report carrying them exists: a run that aborts - the
+            # model cannot be loaded - leaves them for the next one.
             notices = self._db.pending_notices()
-            # Captured here, after this run has done its own discarding and just before it
-            # reads the hashes it will trust: a discard *after* this point means the walk
-            # measured a database that no longer exists. Captured any earlier and the run
-            # counts its own model-change wipe as somebody else's, then refuses to certify
-            # the index it just rebuilt from scratch.
+            # Captured just before the run reads the hashes it will trust: a discard *after*
+            # this point means the walk measured a database that no longer exists.
             generation = self._db.generation()
             identity = self._run_identity()
             known_hashes = self._db.document_hashes(str(root))

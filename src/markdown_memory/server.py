@@ -66,7 +66,7 @@ from markdown_memory.models import (
     SearchResult,
 )
 from markdown_memory.parser import join_parts
-from markdown_memory.search import HybridSearcher
+from markdown_memory.search import HybridSearcher, unnamed_rename
 
 logger = logging.getLogger(__name__)
 
@@ -281,8 +281,19 @@ class MarkdownMemoryService:
         about the disk, so this is composed here rather than there. It asks only about
         rows the index holds - a file nobody has indexed yet is found by walking the tree,
         which is the expensive half of indexing and not something a search should pay for.
+
+        And what only the configured model knows: whether the stored vectors are another
+        model's that no revision can tell apart from its own (#91). Derived on every read
+        rather than recorded, so it ends the moment the person restores that model,
+        rebuilds, or points at another database - and every status, the root's and a
+        scoped one, the one the background runner decides on included, comes through here.
         """
-        return dataclasses.replace(status, changed_files=self._freshness.changed_files(scope))
+        status = dataclasses.replace(status, changed_files=self._freshness.changed_files(scope))
+        if status.weights_mismatch is None:
+            renamed = unnamed_rename(self._db, self._embedder)
+            if renamed is not None:
+                status = dataclasses.replace(status, verified=False, weights_mismatch=renamed)
+        return status
 
     # ------------------------------------------------------------------ resolution
 
