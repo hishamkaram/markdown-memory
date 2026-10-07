@@ -77,7 +77,8 @@ When the change moves section boundaries, score the base with its own labels
 (`--queries ../base/scripts/eval_data/queries.json`) and pass `--allow-label-changes`; every
 migrated label is listed. A PASS covers its own corpus, preset and split only: every shipped
 preset on every evaluated corpus must pass unless excluded, with its reason, before any result
-is seen; compare held-out once, at the end.
+is seen; compare held-out once, at the end. A held-out stratum that decided something is
+spent: it is retired and replaced by queries written in isolation, never reused.
 
 ## Rules
 
