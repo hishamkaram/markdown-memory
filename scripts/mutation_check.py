@@ -3022,7 +3022,10 @@ MUTATIONS = (
         module="discovery.py",
         old="(0, False, name))\n",
         new="(2, False, name))\n",
-        tests="test_walk_order_is_the_order_of_the_walk or test_a_fresh_build_numbers_sections",
+        tests=(
+            "test_walk_order_is_the_order_of_the_walk"
+            " or test_a_fresh_build_numbers_sections_in_walk_order"
+        ),
     ),
     Mutation(
         name="identifiers: let a vector-only neighbour win the tie on its place in the walk",
