@@ -310,13 +310,20 @@ class TestIndexerSafety:
     def test_a_renamed_model_over_an_index_without_vectors_takes_it_over(
         self, db: Database, tmp_path: Path
     ) -> None:
-        """Headings alone embed nothing, so there is no vector a rename could mix up."""
-        (tmp_path / "doc.md").write_text("# Only a heading\n")
-        Indexer(db, FakeEmbedder(model_name="old")).index_directory(tmp_path)
-        assert db.count_rows("documents") == 1 and not db.has_vectors()
-        report = Indexer(db, FakeEmbedder(model_name="new")).index_directory(tmp_path)
+        """Headings alone embed nothing, so there is no vector a rename could mix up.
+
+        Nor anything to discard: a root the new model's run never walks keeps its documents.
+        """
+        mine, other = tmp_path / "mine", tmp_path / "other"
+        for root in (mine, other):
+            root.mkdir()
+            (root / "doc.md").write_text("# Only a heading\n")
+            Indexer(db, FakeEmbedder(model_name="old")).index_directory(root)
+        assert db.count_rows("documents") == 2 and not db.has_vectors()
+        report = Indexer(db, FakeEmbedder(model_name="new")).index_directory(mine)
         assert report.errors == ()
         assert db.get_meta(MODEL_META_KEY) == "new"
+        assert [d.file_path for d in db.list_documents(str(other))] == [str(other / "doc.md")]
 
     def test_undecodable_file_name_fails_alone_and_stays_json_safe(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
@@ -1486,6 +1493,28 @@ class TestOnlyAWholeWalkVouchesForATree:
         report = Indexer(db, beta).index_directory(tmp_path)
         assert (report.files_indexed, report.errors) == (1, ())
         assert db.index_status(str(tmp_path)).verified, "the run blamed itself for its own wipe"
+
+    def test_a_clean_run_after_an_earlier_revocation_vouches_for_the_tree(
+        self, tmp_path: Path, db: Database
+    ) -> None:
+        """Only a revocation *during* the walk stands a run down.
+
+        A run whose weights cannot be named is refused over a named index, and that refusal
+        revokes every certificate. The run of the right model that follows walks a database
+        nothing touches while it runs, so it vouches again - judging it by how many times
+        the index was ever revoked would leave the tree unvouched-for for good.
+        """
+        doc = tmp_path / "a.md"
+        doc.write_text("# A\n\nbody\n")
+        named = FakeEmbedder(model_name="alpha", weights="a" * 40)
+        Indexer(db, named).index_directory(tmp_path)
+        doc.write_text("# A\n\nedited body\n")
+        with pytest.raises(ForeignWeightsError):
+            Indexer(db, FakeEmbedder(model_name="alpha")).index_directory(tmp_path)
+        assert db.generation() > 0 and not db.index_status(str(tmp_path)).verified
+
+        Indexer(db, named).index_directory(tmp_path)
+        assert db.index_status(str(tmp_path)).verified, "an old revocation stood the run down"
 
     def test_a_pruned_directory_that_could_not_be_listed_keeps_its_own_failure(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path

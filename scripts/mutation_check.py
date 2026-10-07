@@ -432,6 +432,17 @@ MUTATIONS = (
         tests="test_a_renamed_model_that_cannot_name_its_weights_is_refused_not_discarded",
     ),
     Mutation(
+        name="weights: discard every root on a rename over documents that hold no vector",
+        module="indexer.py",
+        old="            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)\n",
+        new=(
+            "            if previous_model not in {None, self._embedder.model_name}:\n"
+            "                self._db.clear()\n"
+            "            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)\n"
+        ),
+        tests="test_a_renamed_model_over_an_index_without_vectors_takes_it_over",
+    ),
+    Mutation(
         name="weights: record the refusal where no run of the old model can clear it",
         module="indexer.py",
         old=(
@@ -2525,11 +2536,11 @@ MUTATIONS = (
         tests="test_a_document_left_on_an_older_vector_format_is_not_called_whole",
     ),
     Mutation(
-        name="coverage: count a run's own model-change wipe against it",
+        name="coverage: count a revocation from before the run against it",
         module="indexer.py",
         old="            generation = self._db.generation()\n            identity =",
         new="            generation = 0\n            identity =",
-        tests="test_a_clean_run_after_a_model_change_vouches_for_the_tree",
+        tests="test_a_clean_run_after_an_earlier_revocation_vouches_for_the_tree",
     ),
     Mutation(
         name="index: ask whether a pruned directory's parent was walkable",

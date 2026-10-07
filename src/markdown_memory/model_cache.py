@@ -31,8 +31,8 @@ GEMMA_REVISION = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
 # projections with `MatMulNBits`. Earlier versions ran `onnx/model_quantized.onnx` (int8)
 # and rewrote it on each machine to gather the vocabulary before dequantizing it; this
 # graph does that natively, in half the download and half the CPU per query. The file name
-# is part of the embedder's `model_name`, so changing it discards every stored vector -
-# which is correct, because the two graphs' vectors are not comparable.
+# is part of the embedder's `model_name` and `weights_revision`, so changing it re-embeds
+# every stored vector in place - the two graphs' vectors are not comparable.
 GEMMA_MODEL_FILE = "onnx/model_q4.onnx"
 
 
