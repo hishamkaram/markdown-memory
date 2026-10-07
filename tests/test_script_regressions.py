@@ -457,6 +457,25 @@ class TestTheRealDocsCorpus:
         finally:
             service.close()
 
+    def test_no_v2_held_out_answer_is_a_dev_answer(self, evaluation: object) -> None:
+        """#100: a held-out question answered by a section dev already tunes on measures dev."""
+        corpus = evaluation.corpora()["v2"]  # type: ignore[attr-defined]
+        queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
+        tuned = {
+            label
+            for cases in queries["dev"].values()
+            for case in cases
+            if "expected" in case
+            for label in (case["expected"], *case.get("also_valid", {}))
+        }
+        shared = [
+            case["expected"]
+            for kind in ("paraphrase", "identifier")
+            for case in queries["held_out"][kind]
+            if case["expected"] in tuned
+        ]
+        assert not shared, f"{len(shared)} held-out answer(s) are dev answers too"
+
     def test_v2_keeps_its_own_index_and_baseline(self, evaluation: object) -> None:
         import eval_cache
 

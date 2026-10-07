@@ -1,5 +1,5 @@
 {
-  "_about": "Labelled retrieval queries over scripts/eval_data/corpus_v2 (97 upstream docs: cargo, compose-spec, gh, prometheus, ripgrep). Report-only: no floors. 'expected' is 'rel/path.md::Heading path' (file relative to corpus_v2). 'paraphrase' holds plain-language questions. 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. 'dev' are the 40 queries of issue #75. 'held_out' was written by a fresh session from the corpus alone, excluding every dev query, intent and answering section, and committed before the identifier-lookup change it measures; it must never be used to tune. Labels were proposed by two reviewers independently and reconciled in a joint pass. 'mixed' (#78) holds questions that name an identifier verbatim, 4 per project per split: dev and held_out were written by two separate fresh sessions from the corpus alone (held_out without seeing dev, the issue or any design), labelled independently by Codex and Gemini - who chose the same expected section for all 40 - and reconciled (also_valid grade 1 only for a section that answers an explicit part of the question). Committed before any change it measures; its held_out must never be used to tune.",
+  "_about": "Labelled retrieval queries over scripts/eval_data/corpus_v2 (97 upstream docs: cargo, compose-spec, gh, prometheus, ripgrep). Report-only: no floors. 'expected' is 'rel/path.md::Heading path' (file relative to corpus_v2). 'paraphrase' holds plain-language questions. 'also_valid' grades other acceptable answers: 2 = equally correct, 1 = partially answers. 'dev' are the 40 queries of issue #75. 'held_out' was written by a fresh session from the corpus alone, excluding every dev query, intent and answering section, and committed before the identifier-lookup change it measures; it must never be used to tune. Labels were proposed by two reviewers independently and reconciled in a joint pass. 'mixed' (#78) holds questions that name an identifier verbatim, 4 per project per split: dev and held_out were written by two separate fresh sessions from the corpus alone (held_out without seeing dev, the issue or any design), labelled independently by Codex and Gemini - who chose the same expected section for all 40 - and reconciled (also_valid grade 1 only for a section that answers an explicit part of the question). Committed before any change it measures; its held_out must never be used to tune. The held_out paraphrase and identifier strata were retired after they decided #80 and replaced (#100) by 40 queries written by a fresh session from the corpus alone, given only the answer sections to avoid (every dev, retired and mixed label) and no query text; labelled independently by Codex and Gemini (same expected section for 39 of 40) and reconciled by an isolated session. The retired rows remain in git history.",
   "dev": {
     "paraphrase": [
       {
@@ -343,251 +343,169 @@
   "held_out": {
     "paraphrase": [
       {
-        "query": "How do I create a new Cargo package in a specific directory?",
-        "expected": "cargo/doc/book/src/commands/cargo-new.md::cargo-new(1) > DESCRIPTION",
+        "query": "When my benchmarks open fixture files by relative path, which directory are those paths resolved from?",
+        "expected": "cargo/doc/book/src/commands/cargo-bench.md::cargo-bench(1) > DESCRIPTION > Working directory of benchmarks"
+      },
+      {
+        "query": "why does the dependency graph view merge features from dev and normal deps and put an asterisk on one of them",
+        "expected": "cargo/doc/book/src/commands/cargo-tree.md::cargo-tree(1) > DESCRIPTION > Feature Unification"
+      },
+      {
+        "query": "Can new fields show up in the workspace JSON description without the format version being bumped?",
+        "expected": "cargo/doc/book/src/commands/cargo-metadata.md::cargo-metadata(1) > OUTPUT FORMAT > Compatibility"
+      },
+      {
+        "query": "how are the code snippets in my library's doc comments compiled and executed during the test run",
+        "expected": "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > DESCRIPTION > Documentation tests"
+      },
+      {
+        "query": "What units can I use when writing a memory size as a string in a Compose file?",
+        "expected": "compose-spec/spec.md::Extension > Specifying byte values"
+      },
+      {
+        "query": "spread a service's replicas evenly across zones in swarm",
+        "expected": "compose-spec/deploy.md::Compose Deploy Specification > Attributes > placement > preferences"
+      },
+      {
+        "query": "How can I create a network that is cut off from any outside connectivity?",
+        "expected": "compose-spec/spec.md::Networks top-level element > internal"
+      },
+      {
+        "query": "My override file adds its ports on top of the base file's ones; how do I make it replace the whole list instead?",
+        "expected": "compose-spec/spec.md::Merge and override > Exceptions > Replace value"
+      },
+      {
+        "query": "I have two accounts on our GitHub Enterprise Server; how do I make sure the CLI logs in as the right one?",
+        "expected": "gh/docs/multiple-accounts.md::Multiple Accounts with the CLI - v2.40.0 > What are some sharp edges in this release? > Account Switcher on GitHub Enterprise"
+      },
+      {
+        "query": "how can a user see the open source licenses of the dependencies bundled into their installed gh binary",
+        "expected": "gh/docs/license-compliance.md::License Compliance > Viewing License Information"
+      },
+      {
+        "query": "Installing the GitHub CLI on Fedora with the newer DNF release",
+        "expected": "gh/docs/install_linux.md::Installing gh on Linux and BSD > Recommended (Official) > RPM > DNF5"
+      },
+      {
+        "query": "How are the Windows installers code-signed through Azure during a release?",
+        "expected": "gh/docs/release-process-deep-dive.md::Jobs Deep Dive > OS Builds > windows > Signing"
+      },
+      {
+        "query": "Can I query whether an alert is currently pending or firing as a time series?",
+        "expected": "prometheus/docs/configuration/alerting_rules.md::Inspecting alerts during runtime"
+      },
+      {
+        "query": "evaluate a rule group slightly in the past so late remote-write data is included",
+        "expected": "prometheus/docs/configuration/recording_rules.md::Recording rules > <rule_group>",
         "also_valid": {
-          "cargo/doc/book/src/commands/cargo-new.md::cargo-new(1) > EXAMPLES": 1
+          "prometheus/docs/configuration/recording_rules.md::Rule query offset": 1
         }
       },
       {
-        "query": "Where do unit and integration tests run when I use cargo test?",
-        "expected": "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > DESCRIPTION > Working directory of tests"
+        "query": "In an alert template, how do I print a byte count using 1024-based units?",
+        "expected": "prometheus/docs/configuration/template_reference.md::Functions > Numbers"
       },
       {
-        "query": "How do I fetch dependencies for just one target architecture?",
-        "expected": "cargo/doc/book/src/commands/cargo-fetch.md::cargo-fetch(1) > OPTIONS > Fetch options",
-        "also_valid": {
-          "cargo/doc/book/src/commands/cargo-fetch.md::cargo-fetch(1) > DESCRIPTION": 1
-        }
+        "query": "How do I take a backup copy of the time series database through the HTTP API?",
+        "expected": "prometheus/docs/querying/api.md::TSDB Admin APIs > Snapshot"
       },
       {
-        "query": "How can I locate the workspace root Cargo.toml instead of the member manifest?",
-        "expected": "cargo/doc/book/src/commands/cargo-locate-project.md::cargo-locate-project(1) > DESCRIPTION",
-        "also_valid": {
-          "cargo/doc/book/src/commands/cargo-locate-project.md::cargo-locate-project(1) > OPTIONS": 2
-        }
+        "query": "My rg preprocessing script for PDFs errors out on files that aren't PDFs; how do I make it fall back to plain output?",
+        "expected": "ripgrep/GUIDE.md::User Guide > Preprocessor > A more robust preprocessor"
       },
       {
-        "query": "How do I start a service from an existing image?",
-        "expected": "compose-spec/05-services.md::Services top-level element > image",
-        "also_valid": {
-          "compose-spec/spec.md::Services top-level element > image": 2
-        }
+        "query": "a case-insensitive regex with an alternation was skipping text it should have matched in ripgrep; which release fixed that false negative",
+        "expected": "ripgrep/CHANGELOG.md::14.1.1 (2024-09-08)"
       },
       {
-        "query": "How can I disable networking for a Compose service?",
-        "expected": "compose-spec/05-services.md::Services top-level element > network_mode",
-        "also_valid": {
-          "compose-spec/spec.md::Services top-level element > network_mode": 2
-        }
+        "query": "ripgrep prints results late when I follow a growing log file; which version fixed that?",
+        "expected": "ripgrep/CHANGELOG.md::15.1.0 (2025-10-22)"
       },
       {
-        "query": "How can I make a service's filesystem read-only?",
-        "expected": "compose-spec/05-services.md::Services top-level element > read_only",
-        "also_valid": {
-          "compose-spec/spec.md::Services top-level element > read_only": 2
-        }
-      },
-      {
-        "query": "How can one Compose application include resources from another Compose file?",
-        "expected": "compose-spec/spec.md::Include",
-        "also_valid": {
-          "compose-spec/spec.md::Include > Long syntax": 1,
-          "compose-spec/spec.md::Include > Short syntax": 1
-        }
-      },
-      {
-        "query": "How do I run just the focused test for a changed gh command?",
-        "expected": "gh/docs/testing.md::Testing > Local validation"
-      },
-      {
-        "query": "Which function implements the logic of gh issue list after command dispatch?",
-        "expected": "gh/docs/project-layout.md::GitHub CLI project layout > How GitHub CLI works",
-        "also_valid": {
-          "gh/docs/command-development.md::Command development > Structure and lifecycle": 1
-        }
-      },
-      {
-        "query": "Can gh be built for a different operating system or CPU architecture?",
-        "expected": "gh/docs/install_source.md::Installation from source > Cross-compiling binaries for different platforms",
-        "also_valid": {
-          "gh/docs/source.md::Installation from source > Cross-compiling binaries for different platforms": 2
-        }
-      },
-      {
-        "query": "What should I do after removing a faulty release?",
-        "expected": "gh/docs/releasing.md::Releasing > Cleaning up a bad release"
-      },
-      {
-        "query": "How can I evaluate a PromQL vector at a specific Unix timestamp?",
-        "expected": "prometheus/docs/querying/basics.md::Time series selectors > @ modifier",
-        "also_valid": {
-          "prometheus/docs/querying/api.md::Expression queries > Instant queries": 1
-        }
-      },
-      {
-        "query": "How do I run an instant query over a range with a chosen resolution?",
-        "expected": "prometheus/docs/querying/basics.md::Subquery",
-        "also_valid": {
-          "prometheus/docs/querying/api.md::Expression queries > Range queries": 1,
-          "prometheus/docs/querying/examples.md::Subquery": 2
-        }
-      },
-      {
-        "query": "Which endpoint returns metadata for metrics scraped directly by Prometheus targets?",
-        "expected": "prometheus/docs/querying/api.md::Querying target metadata",
-        "also_valid": {
-          "prometheus/docs/querying/api.md::Querying metric metadata": 1
-        }
-      },
-      {
-        "query": "How can I mark a selected time range of series for deletion?",
-        "expected": "prometheus/docs/querying/api.md::TSDB Admin APIs > Delete Series"
-      },
-      {
-        "query": "Does ripgrep include line numbers in normal matching output?",
-        "expected": "ripgrep/GUIDE.md::User Guide > Basics"
-      },
-      {
-        "query": "Does ripgrep search the current directory recursively when I omit a path?",
-        "expected": "ripgrep/GUIDE.md::User Guide > Recursive search"
-      },
-      {
-        "query": "How can I keep ripgrep from searching TOML files?",
-        "expected": "ripgrep/GUIDE.md::User Guide > Manual filtering: globs"
-      },
-      {
-        "query": "How can I avoid invoking ripgrep's preprocessor for every file?",
-        "expected": "ripgrep/GUIDE.md::User Guide > Preprocessor > Reducing preprocessor overhead",
-        "also_valid": {
-          "ripgrep/GUIDE.md::User Guide > Preprocessor": 1
-        }
+        "query": "ripgrep's memory use kept climbing without limit while walking a big directory tree; in which version was that fixed?",
+        "expected": "ripgrep/CHANGELOG.md::14.1.0 (2024-01-06)"
       }
     ],
     "identifier": [
       {
-        "query": "--all-features",
-        "expected": "cargo/doc/book/src/commands/cargo-build.md::cargo-build(1) > OPTIONS > Feature Selection",
-        "also_valid": {
-          "cargo/doc/book/src/commands/cargo-bench.md::cargo-bench(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-check.md::cargo-check(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-doc.md::cargo-doc(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-fix.md::cargo-fix(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-install.md::cargo-install(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-metadata.md::cargo-metadata(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-package.md::cargo-package(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-publish.md::cargo-publish(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-run.md::cargo-run(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-rustc.md::cargo-rustc(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-rustdoc.md::cargo-rustdoc(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > OPTIONS > Feature Selection": 2,
-          "cargo/doc/book/src/commands/cargo-tree.md::cargo-tree(1) > OPTIONS > Feature Selection": 2
-        }
+        "query": "--charset",
+        "expected": "cargo/doc/book/src/commands/cargo-tree.md::cargo-tree(1) > OPTIONS > Tree Formatting Options"
       },
       {
-        "query": "--target-dir",
-        "expected": "cargo/doc/book/src/commands/cargo-clean.md::cargo-clean(1) > OPTIONS > Clean Options",
-        "also_valid": {
-          "cargo/doc/book/src/commands/cargo-bench.md::cargo-bench(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-build.md::cargo-build(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-check.md::cargo-check(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-doc.md::cargo-doc(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-fix.md::cargo-fix(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-install.md::cargo-install(1) > OPTIONS > Compilation Options": 2,
-          "cargo/doc/book/src/commands/cargo-package.md::cargo-package(1) > OPTIONS > Compilation Options": 2,
-          "cargo/doc/book/src/commands/cargo-publish.md::cargo-publish(1) > OPTIONS > Compilation Options": 2,
-          "cargo/doc/book/src/commands/cargo-run.md::cargo-run(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-rustc.md::cargo-rustc(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-rustdoc.md::cargo-rustdoc(1) > OPTIONS > Output Options": 2,
-          "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > OPTIONS > Output Options": 2
-        }
+        "query": "--no-track",
+        "expected": "cargo/doc/book/src/commands/cargo-install.md::cargo-install(1) > OPTIONS > Install Options"
       },
       {
-        "query": "--document-private-items",
-        "expected": "cargo/doc/book/src/commands/cargo-doc.md::cargo-doc(1) > OPTIONS > Documentation Options"
+        "query": "--versioned-dirs",
+        "expected": "cargo/doc/book/src/commands/cargo-vendor.md::cargo-vendor(1) > OPTIONS > Vendor Options"
       },
       {
-        "query": "--no-fail-fast",
-        "expected": "cargo/doc/book/src/commands/cargo-test.md::cargo-test(1) > OPTIONS > Test Options",
-        "also_valid": {
-          "cargo/doc/book/src/commands/cargo-bench.md::cargo-bench(1) > OPTIONS > Benchmark Options": 2
-        }
+        "query": "--publish-time",
+        "expected": "cargo/doc/book/src/commands/cargo-generate-lockfile.md::cargo-generate-lockfile(1) > OPTIONS > Manifest Options"
       },
       {
-        "query": "additional_contexts",
-        "expected": "compose-spec/build.md::Compose Build Specification > Attributes > additional_contexts"
+        "query": "attachable",
+        "expected": "compose-spec/spec.md::Networks top-level element > Attributes > attachable"
       },
       {
-        "query": "cache_to",
-        "expected": "compose-spec/build.md::Compose Build Specification > Attributes > cache_to"
+        "query": "dockerfile_inline",
+        "expected": "compose-spec/build.md::Compose Build Specification > Attributes > dockerfile_inline"
       },
       {
-        "query": "healthcheck",
-        "expected": "compose-spec/05-services.md::Services top-level element > healthcheck",
-        "also_valid": {
-          "compose-spec/spec.md::Services top-level element > healthcheck": 2
-        }
+        "query": "sbom",
+        "expected": "compose-spec/build.md::Compose Build Specification > entitlements > sbom"
       },
       {
-        "query": "stop_grace_period",
-        "expected": "compose-spec/05-services.md::Services top-level element > stop_grace_period",
-        "also_valid": {
-          "compose-spec/spec.md::Services top-level element > stop_grace_period": 2
-        }
+        "query": "rollback_config",
+        "expected": "compose-spec/deploy.md::Compose Deploy Specification > Attributes > rollback_config"
       },
       {
-        "query": "RunE",
-        "expected": "gh/docs/command-development.md::Command development > Structure and lifecycle",
-        "also_valid": {
-          "gh/docs/project-layout.md::GitHub CLI project layout > How GitHub CLI works": 1
-        }
+        "query": "--insecure-storage",
+        "expected": "gh/docs/multiple-accounts.md::Multiple Accounts with the CLI - v2.40.0 > What are some sharp edges in this release? > Data Migration > Forward Compatibility Exclusion"
       },
       {
-        "query": "GH_ACCEPTANCE_HOST",
-        "expected": "gh/docs/testing.md::Testing > CI and live acceptance tests are different"
+        "query": "HostForAPIHost",
+        "expected": "gh/docs/api-host.md::api_host > How it resolves"
       },
       {
-        "query": "GH_APIHOST_EXPECTED_LOGIN",
-        "expected": "gh/docs/api-host-test-harness.md::The api_host test harness > Running it"
+        "query": "cmdutil.AddJSONFlags",
+        "expected": "gh/docs/command-development.md::Command development > Output and scriptability"
       },
       {
-        "query": "GH_APIHOST_ACCEPTANCE",
-        "expected": "gh/docs/api-host-test-harness.md::The api_host test harness > Running it > With the acceptance subset"
+        "query": "NO_COLOR",
+        "expected": "gh/docs/primer/foundations/README.md::Foundations > Customizability"
       },
       {
-        "query": "absent()",
-        "expected": "prometheus/docs/querying/functions.md::absent()"
+        "query": "predict_linear",
+        "expected": "prometheus/docs/querying/functions.md::predict_linear()"
       },
       {
-        "query": "increase()",
-        "expected": "prometheus/docs/querying/functions.md::increase()"
+        "query": "limit_ratio",
+        "expected": "prometheus/docs/querying/operators.md::Aggregation operators > Detailed explanations > limit_ratio"
       },
       {
-        "query": "avg_over_time()",
-        "expected": "prometheus/docs/querying/functions.md::<aggregation>_over_time()"
+        "query": "kuma_sd_config",
+        "expected": "prometheus/docs/configuration/configuration.md::Configuration file > <kuma_sd_config>"
       },
       {
-        "query": "--web.enable-remote-write-receiver",
-        "expected": "prometheus/docs/querying/api.md::Remote Write Receiver"
+        "query": "/api/v1/format_query",
+        "expected": "prometheus/docs/querying/api.md::Formatting query expressions"
       },
       {
-        "query": "--encoding",
-        "expected": "ripgrep/GUIDE.md::User Guide > File encoding"
+        "query": "GIT_CONFIG_GLOBAL",
+        "expected": "ripgrep/CHANGELOG.md::15.2.0 (2026-07-15)"
       },
       {
-        "query": "--binary",
-        "expected": "ripgrep/GUIDE.md::User Guide > Binary data"
+        "query": "--stop-on-nonmatch",
+        "expected": "ripgrep/CHANGELOG.md::14.0.0 (2023-11-26)"
       },
       {
-        "query": "--files",
-        "expected": "ripgrep/GUIDE.md::User Guide > Common options"
+        "query": "--include-zero",
+        "expected": "ripgrep/CHANGELOG.md::12.0.0 (2020-03-15)"
       },
       {
-        "query": "--type",
-        "expected": "ripgrep/GUIDE.md::User Guide > Manual filtering: file types",
-        "also_valid": {
-          "ripgrep/GUIDE.md::User Guide > Manual filtering: file types > The special all file type": 1
-        }
+        "query": "--one-file-system",
+        "expected": "ripgrep/CHANGELOG.md::0.10.0 (2018-09-07)"
       }
     ],
     "mixed": [
