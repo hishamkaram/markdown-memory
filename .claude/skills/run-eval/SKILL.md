@@ -75,8 +75,9 @@ any-valid@1 lost, nDCG@5 down by more than 1e-9, a default page that came back e
 changed no-answer page), and 2 when the records are malformed or measure different things.
 When the change moves section boundaries, score the base with its own labels
 (`--queries ../base/scripts/eval_data/queries.json`) and pass `--allow-label-changes`; every
-migrated label is listed. A PASS covers its own corpus, preset and split only: decide which
-cells must pass before seeing any result, and compare held-out once, at the end.
+migrated label is listed. A PASS covers its own corpus, preset and split only: every shipped
+preset on every evaluated corpus must pass unless excluded, with its reason, before any result
+is seen; compare held-out once, at the end.
 
 ## Rules
 

@@ -147,9 +147,10 @@ base.json` with `PYTHONPATH=<worktree of the base>/src`, `--record candidate.jso
 `scripts/eval_compare.py base.json candidate.json`. It exits 1 when any query got worse (a
 lower rank, a lost any-valid@1, nDCG@5 down by more than 1e-9, a default page that came back
 empty, a changed no-answer page) and 2 when the records are not comparable; a label migration
-needs `--allow-label-changes` and is listed. Decide which cells (corpus x preset) must pass
-before seeing any result: every compared cell applies the same rule, and held-out is compared
-once, at the end. After an
+needs `--allow-label-changes` and is listed. Every shipped preset on every evaluated corpus
+is a cell that must pass, unless one is excluded, with its reason, before any result is seen:
+every compared cell applies the same rule, and held-out is compared once, at the end - a
+held-out stratum that decided something is spent and is replaced, not reused. After an
 accepted change, record the new numbers with `--update-baseline` and update the table in
 `README.md`. Rerankers (MiniLM, bge-reranker-base, jina, ColBERT) were benchmarked and
 rejected: all lowered accuracy and cost 2-12 s per query.

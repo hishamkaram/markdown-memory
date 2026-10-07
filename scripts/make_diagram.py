@@ -68,8 +68,8 @@ W, H = 1120, 430
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
     ("README.md", 11238),
-    ("CLAUDE.md", 5563),
-    ("evaluation-protocol.md", 1661),
+    ("CLAUDE.md", 5600),
+    ("evaluation-protocol.md", 1743),
     ("AGENTS.md", 1698),
 ]
 RIGHT_HITS = [
