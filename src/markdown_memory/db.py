@@ -1396,6 +1396,25 @@ class Database:
                 conn.execute("COMMIT")
         return found
 
+    def section_positions(self, section_ids: Sequence[int]) -> dict[int, tuple[str, int, int]]:
+        """Where each section is: its document's path, its first line and its part number.
+
+        Ids that no longer exist are absent: a re-index may have replaced them since.
+        """
+        positions: dict[int, tuple[str, int, int]] = {}
+        with self._reading() as conn:
+            for start in range(0, len(section_ids), _SQL_VARIABLE_BATCH):
+                batch = section_ids[start : start + _SQL_VARIABLE_BATCH]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    "SELECT s.id, d.file_path, s.start_line, s.part_index FROM sections s "
+                    f"JOIN documents d ON d.id = s.doc_id WHERE s.id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                for section_id, file_path, start_line, part_index in rows:
+                    positions[int(section_id)] = (str(file_path), int(start_line), int(part_index))
+        return positions
+
     def sections_with_passages(self, section_ids: Sequence[int]) -> set[int]:
         """The subset of ``section_ids`` that has a body (heading-only sections have none)."""
         if not section_ids:

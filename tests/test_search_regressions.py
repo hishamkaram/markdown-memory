@@ -13,6 +13,7 @@ from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
 from markdown_memory.db import WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.discovery import walk_order
 from markdown_memory.exceptions import DatabaseError, SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
@@ -696,7 +697,7 @@ class TestIdentifierLookups:
         })  # fmt: skip
         try:
             # Vectors prefer the prose; on its own the keyword hit would tie at 1/61 and the
-            # prose, holding the lower id, would win.
+            # prose, which the walk reaches first, would win.
             self.vectors_rank(searcher, monkeypatch, "Primer > Language")
             page = searcher.search_page("GH_REPO", limit=1)
         finally:
@@ -1741,3 +1742,186 @@ class TestEveryExcerptOfBothCorporaIsVerbatim:
                     assert not ends_inside_fence(shown), f"{path}: leaves a fence open"
                     checked += 1
         assert checked > {"corpus": 12, "corpus_v2": 3000}[corpus], checked
+
+
+class TestExactTiesFollowTheWalk:
+    """#103: an exact tie goes to the section the walk reaches first, not to the lower id.
+
+    Ids follow the walk only on a fresh build: an edited document is stored again under new,
+    higher ids, so a tie decided by id would go to whichever document was edited longest ago.
+    """
+
+    @staticmethod
+    def ids(searcher: HybridSearcher) -> dict[str, int]:
+        rows = searcher._db.connection().execute("SELECT id, heading_path FROM sections")
+        return {path: int(sid) for sid, path in rows}
+
+    @classmethod
+    def lanes(
+        cls,
+        searcher: HybridSearcher,
+        monkeypatch: pytest.MonkeyPatch,
+        keyword: Sequence[str],
+        vector: Sequence[str],
+    ) -> None:
+        """Make each side rank these heading paths, in this order."""
+        ids = cls.ids(searcher)
+        by_keyword = _Keyword([ids[path] for path in keyword], "matched")
+        by_vector = [ids[path] for path in vector]
+        monkeypatch.setattr(searcher, "_keyword_pass", lambda query, limit: by_keyword)
+        monkeypatch.setattr(searcher, "_vector_ranking", lambda query, limit: (by_vector, {}))
+
+    def test_a_tie_between_documents_survives_an_edit(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Alpha\n\nalpha text\n")
+        (root / "b.md").write_text("# Beta\n\nbeta text\n")
+        indexer = Indexer(db, fake_embedder)
+        indexer.index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        pages: list[list[str]] = []
+        try:
+            for edit in ("alpha text, edited", "alpha text, edited again"):
+                # Alpha: keyword 1, vector 2. Beta: keyword 2, vector 1. Both 1/61 + 1/62.
+                self.lanes(searcher, monkeypatch, ["Alpha", "Beta"], ["Beta", "Alpha"])
+                page = searcher.search_page("text", limit=2)
+                pages.append([result.heading_path for result in page.results])
+                (root / "a.md").write_text(f"# Alpha\n\n{edit}\n")
+                indexer.index_directory(root)
+                ids = self.ids(searcher)
+                assert ids["Alpha"] > ids["Beta"], "the edit stored Alpha again, after Beta"
+        finally:
+            searcher.close()
+        assert pages == [["Alpha", "Beta"], ["Alpha", "Beta"]]
+
+    def test_a_vector_distance_tie_goes_to_the_walk_up_to_the_cut(
+        self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
+    ) -> None:
+        # The same passage in two documents embeds to the same vector: an exact distance tie.
+        # Beta is indexed first, so it holds the lower ids; the walk reaches Alpha first.
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "b.md").write_text("# Beta\n\nthe same passage in both\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        (root / "a.md").write_text("# Alpha\n\nthe same passage in both\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            ids = self.ids(searcher)
+            full, _ = searcher._vector_ranking("the same passage in both", 5)
+            cut, _ = searcher._vector_ranking("the same passage in both", 1)
+        finally:
+            searcher.close()
+        assert ids["Beta"] < ids["Alpha"]
+        assert full == [ids["Alpha"], ids["Beta"]]
+        assert cut == [ids["Alpha"]], "the cut keeps the one the walk reaches first"
+
+    def test_a_tie_inside_one_document_goes_to_the_earlier_section(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text(
+            "# Guide\n\n## First\n\nfirst text\n\n## Second\n\nsecond text\n"
+        )
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        try:
+            # Keyword lists Second first, so the order the scores were met in is no answer.
+            self.lanes(
+                searcher, monkeypatch, ["Guide > Second", "Guide > First"],
+                ["Guide > First", "Guide > Second"],
+            )  # fmt: skip
+            page = searcher.search_page("text", limit=2)
+        finally:
+            searcher.close()
+        assert [result.heading_path for result in page.results] == [
+            "Guide > First",
+            "Guide > Second",
+        ]
+
+    def test_a_section_gone_since_the_ranking_goes_after_its_tie(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Alpha\n\nalpha text\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        rankings: list[str] = []
+
+        def vector(query: str, limit: int) -> tuple[list[int], dict[int, tuple[int, str]]]:
+            rankings.append(query)
+            return [0], {}  # an id no section holds - lower than any that does
+
+        try:
+            alpha = self.ids(searcher)["Alpha"]
+            by_keyword = _Keyword([alpha], "matched")
+            monkeypatch.setattr(searcher, "_keyword_pass", lambda query, limit: by_keyword)
+            monkeypatch.setattr(searcher, "_vector_ranking", vector)
+            page = searcher.search_page("text", limit=1)
+        finally:
+            searcher.close()
+        assert [result.heading_path for result in page.results] == ["Alpha"]
+        assert len(rankings) == 1, "the page was full before the gone section: no second pass"
+
+    def test_positions_are_read_only_when_something_ties(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# Alpha\n\nalpha text\n")
+        (root / "b.md").write_text("# Beta\n\nbeta text\n")
+        Indexer(db, fake_embedder).index_directory(root)
+        searcher = HybridSearcher(db, fake_embedder)
+        looked_up: list[list[int]] = []
+
+        def positions(section_ids: Sequence[int]) -> dict[int, tuple[str, int, int]]:
+            looked_up.append(list(section_ids))
+            return {}
+
+        try:
+            self.lanes(searcher, monkeypatch, ["Alpha", "Beta"], ["Alpha", "Beta"])  # no tie
+            monkeypatch.setattr(searcher._db, "section_positions", positions)
+            page = searcher.search_page("text", limit=2)
+        finally:
+            searcher.close()
+        assert [result.heading_path for result in page.results] == ["Alpha", "Beta"]
+        assert looked_up == []
+
+    def test_a_fresh_build_numbers_sections_in_walk_order(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """Why the change leaves every ranking of a fresh index as it was: ids already
+        followed the walk there, so breaking a tie by the walk picks what the id picked.
+
+        The v1 corpus only: corpus_v2 takes half a minute to build, and its eval indexes are
+        checked the same way, read-only, whenever a change to ranking is measured."""
+        root = Path(__file__).parent.parent / "scripts" / "eval_data" / "corpus"
+        Indexer(db, fake_embedder).index_directory(root)
+        rows = db.connection().execute(
+            "SELECT d.file_path, s.start_line, s.part_index FROM sections s "
+            "JOIN documents d ON d.id = s.doc_id ORDER BY s.id"
+        )
+        places = [(walk_order(path), line, part) for path, line, part in rows]
+        assert len(places) > 50
+        assert places == sorted(places)
+        assert len(set(places)) == len(places), "two sections at one place: a tie left open"

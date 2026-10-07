@@ -49,7 +49,7 @@ BUDGETS = {
     # and from 460 for #76: the top hit as its matched passage and neighbours (a list
     # counted as one block), and every check that decides when the whole section is sent;
     # and from 568 for #79: a plain call (`rate()`) is an identifier, and never a stopword.
-    "search.py": 573,
+    "search.py": 586,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
     # sent relative to the root, a relative path resolved back under it first, and the

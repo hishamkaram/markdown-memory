@@ -351,7 +351,7 @@ class TestKeywordMatch:
     def test_matched_speaks_of_the_ranking_even_when_limit_one_shows_a_neighbour(
         self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The best vector-only hit ties the best keyword hit at 1/61 and wins on section id.
+        # The best vector-only hit ties the best keyword hit at 1/61 and the walk reaches it first.
         # Words, not an identifier: an identifier lookup puts the section naming it first (#75).
         first = min(int(row[0]) for row in db.connection().execute("SELECT id FROM sections"))
         monkeypatch.setattr(fake_searcher, "_vector_ranking", lambda query, limit: ([first], {}))

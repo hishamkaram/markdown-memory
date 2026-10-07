@@ -18,7 +18,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from markdown_memory.exceptions import IndexCancelled
 
@@ -255,6 +255,24 @@ def _in_repository(root: Path) -> bool:
     return any(os.path.lexists(directory / ".git") for directory in (root, *root.parents))
 
 
+def _directory_order(name: str) -> tuple[bool, str]:
+    """Where a sub-directory goes among its siblings in the walk: by name, dot-directories last."""
+    return (name.startswith("."), name)
+
+
+def walk_order(file_path: str) -> tuple[tuple[int, bool, str], ...]:
+    """Where `iter_markdown_files` reaches ``file_path``: a directory's own files by name, then
+    its sub-directories, each walked whole, in `_directory_order`.
+
+    Search breaks an exact tie with it (#103). Section ids follow this order on a fresh build,
+    but an edited document is stored again under new ids, so a tie decided by id goes to
+    whichever document was edited least recently. The stored spelling is compared, never a
+    resolved path: that is the walk's own.
+    """
+    *directories, name = PurePath(file_path).parts
+    return (*((1, *_directory_order(part)) for part in directories), (0, False, name))
+
+
 def iter_markdown_files(
     directory: Path,
     on_error: Callable[[OSError], None] | None = None,
@@ -286,7 +304,7 @@ def iter_markdown_files(
                 for name in dirnames
                 if name not in _SKIPPED_DIRECTORIES and not owned.excludes(here / name)
             ),
-            key=lambda name: (name.startswith("."), name),
+            key=_directory_order,
         )
         for filename in sorted(filenames):
             if should_stop is not None and should_stop():

@@ -1240,9 +1240,9 @@ def test_several_workers_build_exactly_the_index_one_worker_builds(
 ) -> None:
     """Workers embed; the driver writes, in the order the tree was walked.
 
-    Section ids are handed out as documents are stored, and search breaks a scoring tie
-    by section id - so an index whose ids depend on which worker finished first would
-    quietly answer the same query two ways on two machines.
+    Section ids are handed out as documents are stored, and a fresh build's ids follow the
+    walk - which is why breaking a scoring tie by the walk (#103) changed no ranking of a
+    fresh index. Ids that depended on which worker finished first would not.
     """
     root = _corpus(tmp_path / "docs", 12)
     built: list[list[tuple[int, str, str]]] = []
