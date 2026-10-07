@@ -55,6 +55,10 @@ SCHEMA_VERSION = 7
 #: the new one is left alone - a format change repairs a tree file by file, and resumes
 #: where it stopped if it is interrupted.
 VECTOR_FORMAT = 2
+#: Meta key holding the name of the model the stored vectors were built by. Indexing writes
+#: it; search and the index status read it to tell a renamed model from the one that built
+#: the index when neither can name its weights (#91).
+MODEL_META_KEY = "embedding_model"
 #: Meta key holding the weights revision the stored vectors were built from. It lives here
 #: because `clear()` has to forget it in the same transaction that deletes them.
 WEIGHTS_META_KEY = "embedding_weights_revision"
@@ -578,7 +582,9 @@ class Database:
             stored = conn.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()
             if stored is None or int(stored[0]) == self._embedding_dim:
                 return
-            model = conn.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+            model = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (MODEL_META_KEY,)
+            ).fetchone()
         except sqlite3.Error as exc:
             raise DatabaseError(f"Cannot read the index's vector size: {exc}") from exc
         built_by = f"built by {model[0]}" if model else "built by an unrecorded model"
@@ -717,11 +723,12 @@ class Database:
             )
 
     def revoke_coverage(self, conn: sqlite3.Connection | None = None) -> None:
-        """Nothing is vouched for any more - the index itself was discarded.
+        """Nothing is vouched for any more - the index was discarded, or cannot be trusted.
 
-        A model change that cannot name its weights empties every document in the database,
-        including roots this process never looked at. A certificate that outlives its subject is
-        worse than none: it says a tree is whole when nothing of it is left.
+        `clear()` empties every document in the database, including roots this process never
+        looked at; weights that cannot be named may not write into an index that names its
+        own. A certificate that outlives its subject is worse than none: it says a tree is
+        whole when nothing of it is left.
 
         The generation is bumped in the same breath. Revoking only settles the
         certificates that exist *now*; a scan already running has read its file hashes,
@@ -1530,6 +1537,11 @@ class Database:
         if stored_dim != str(self._embedding_dim):
             problems.append(f"meta embedding_dim is {stored_dim}, expected {self._embedding_dim}")
         return problems
+
+    def has_vectors(self) -> bool:
+        """Whether any passage vector is stored, without counting them all."""
+        with self._reading() as conn:
+            return conn.execute("SELECT 1 FROM units_vec LIMIT 1").fetchone() is not None
 
     def count_rows(self, table: str) -> int:
         """Row count of one of the known tables (diagnostics and integrity tests)."""

@@ -174,7 +174,9 @@ another's file (#82). Changing the weights at the same dimension does not discar
 each document is stamped with the weights that embedded it (`documents.weights_revision`),
 the index-wide revision is revoked while stamps disagree, and a run re-embeds the stale
 documents in place, restoring the revision once no vector-bearing row in the database is
-stale. Only a renamed model that cannot name its weights still discards the index.
+stale. A renamed model that cannot name its weights discards nothing either: over stored
+vectors it is refused before anything is written, and search ranks by keyword alone until
+the old model is back, the database is rebuilt, or another one is configured (#91).
 
 The gate keeps its index in `$XDG_CACHE_HOME/markdown-memory/eval/`, keyed on the corpus
 content, the chunking constants, the source of the modules that decide what is indexed

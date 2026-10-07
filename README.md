@@ -13,27 +13,27 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 20,279
+       alt="One question asked of four documentation files. Reading them whole costs 20,376
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 20,279 tokens in all:
+`docs/evaluation-protocol.md`, 20,376 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
 
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
            excerpt: the passage that matched and the three after it come back (275 tok)
-  712 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
+  764 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
   738 tok  README.md  markdown-memory
   303 tok  README.md  markdown-memory > The embedding model > When it goes wrong
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 20,279**: the passage that answers and the three after it, verbatim,
+**275 tokens instead of 20,376**: the passage that answers and the three after it, verbatim,
 marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
 not enough. The other four come back as pointers - where each section is, what reading it
 costs, and the passage that matched - so when the first is not the answer, one
@@ -296,7 +296,9 @@ index whose vectors no revision vouches for - built while the weights could not 
 is not ranked against a query from weights that can name themselves - from the upgrade to
 schema v6 on - and the first run with such weights re-embeds it. A server that loaded
 `bge-small` while its revision could not be read keeps it unnamed until it restarts: the
-revision is read beside the weights it loads, never after them.
+revision is read beside the weights it loads, never after them. Nor may a renamed model that
+cannot name its weights: indexing refuses, changing nothing, and search ranks by keyword
+alone until the old model is back, `--db` names another file, or the database is rebuilt.
 
 ### Presets
 
