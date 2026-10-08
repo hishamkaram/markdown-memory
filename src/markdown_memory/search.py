@@ -764,7 +764,7 @@ class HybridSearcher:
             matched[term] = self._db.fts_matching(term, hits) if frequency else set()
         budget = sum(weights.values()) or 1.0
         # A term that merely looks like an identifier ("HTTP", "RAM", "2024") and occurs
-        # all over the corpus is vocabulary: admitting every section that mentions it is
+        # all over this root is vocabulary: admitting every section that mentions it is
         # exactly the noise this gate exists to remove. It still counts towards coverage.
         rare = _rare(total)
         exact: set[int] = set()

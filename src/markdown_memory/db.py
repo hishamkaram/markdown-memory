@@ -1345,10 +1345,10 @@ class Database:
 
         How rare a term is belongs to the documentation being searched: another root in the
         same database must not make a word common here look rare, or the reverse (#83).
-        Counting through the scope joins every match to its document, about ten times the
-        index's own count; a database holding nothing outside the scope - one per root is
-        the default - gets the same numbers from the index alone. The check and the counts
-        share one snapshot, so a root committed in between cannot reach them.
+        Counting through the scope joins every match to its document, several times the
+        cost of the index's own count; a database holding nothing outside the scope - one
+        per root is the default - gets the same numbers from the index alone. The check and
+        the counts share one snapshot, so a root committed in between cannot reach them.
         """
         with self._reading() as conn:
             conn.execute("BEGIN")
