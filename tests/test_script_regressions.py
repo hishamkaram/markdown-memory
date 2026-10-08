@@ -1165,6 +1165,8 @@ class TestTheExcerptHarness:
             "payload_tokens": tokens.get("payload", 100),
             "section_payload_tokens": tokens.get("baseline", 200),
             "read_tokens": tokens.get("read", 150),
+            "query_sha256": "query of " + item_id,
+            "section_sha256": "section of " + (cluster or item_id),
         }
 
     def test_a_judge_sees_one_text_the_section_or_the_excerpt(self) -> None:
@@ -1301,12 +1303,76 @@ class TestTheExcerptHarness:
         import eval_excerpts
 
         keys = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: A")]
-        frozen = {"eligible": [keys[0]["id"]], "clusters": {keys[0]["id"]: "a.md :: A"}}
+        item_id = keys[0]["id"]
+        frozen = {
+            "eligible": [item_id],
+            "clusters": {item_id: "a.md :: A"},
+            "queries": {item_id: keys[0]["query_sha256"]},
+            "sections": {item_id: keys[0]["section_sha256"]},
+        }
         assert eval_excerpts.drifted(keys, frozen) == ""
         assert "missing" in eval_excerpts.drifted([], frozen)
         assert "repeated" in eval_excerpts.drifted(keys * 2, frozen)
         moved = [self.key("v2-sealed-paraphrase-00", "A", "a.md :: B")]
         assert "another section" in eval_excerpts.drifted(moved, frozen)
+        # #87: the same section, under the same heading, is not the same text. A query edited
+        # in its label file, or a document edited under its heading, would otherwise be scored
+        # against verdicts the judges gave for what was there before.
+        asked = [dict(keys[0], query_sha256="another")]
+        assert "another query" in eval_excerpts.drifted(asked, frozen)
+        edited = [dict(keys[0], section_sha256="another")]
+        assert "other section text" in eval_excerpts.drifted(edited, frozen)
+        unhashed = [{k: v for k, v in keys[0].items() if not k.endswith("_sha256")}]
+        assert "build it again" in eval_excerpts.drifted(unhashed, frozen)
+        # Never None == None: a frozen file written before #87 vouches for no text at all.
+        older = {k: v for k, v in frozen.items() if k not in ("queries", "sections")}
+        assert "freeze it again" in eval_excerpts.drifted(unhashed, older)
+        assert "freeze it again" in eval_excerpts.drifted(keys, older)
+
+    def test_freeze_records_what_the_judges_read_and_score_refuses_what_moved(
+        self, tmp_path: Path
+    ) -> None:
+        """#87, through the commands themselves: build's key, freeze, then score."""
+        import hashlib
+        import random
+
+        import eval_excerpts
+
+        text = self.page(dict(self.TOP, content="# B\n\nthe section"))
+        item = eval_excerpts.make_item(
+            "v2-sealed-paraphrase-00",
+            "the qüery",
+            text,
+            text,
+            "# B\n\nthe section",
+            random.Random(0),
+        )
+        assert item is not None
+        assert item.key["query_sha256"] == hashlib.sha256("the qüery".encode()).hexdigest()
+        section = hashlib.sha256(b"# B\n\nthe section").hexdigest()
+        assert item.key["section_sha256"] == section
+        keys, judges = tmp_path / "key.jsonl", []
+        keys.write_text(json.dumps(item.key) + "\n", encoding="utf-8")
+        for n in range(eval_excerpts.JUDGES):
+            judges += ["--judge", str(tmp_path / f"judge{n}.json")]
+            (tmp_path / f"judge{n}.json").write_text(
+                json.dumps([{"id": item.key["id"], "A": "yes"}]), encoding="utf-8"
+            )
+        frozen = tmp_path / "eligible.json"
+        assert eval_excerpts.main(["freeze", str(keys), *judges, "--out", str(frozen)]) == 0
+        recorded = json.loads(frozen.read_text(encoding="utf-8"))
+        assert recorded.get("queries") == {item.key["id"]: item.key["query_sha256"]}
+        assert recorded.get("sections") == {item.key["id"]: section}
+        assert eval_excerpts.drifted([item.key], recorded) == ""  # the same build still scores
+
+        keys.write_text(json.dumps(dict(item.key, query_sha256="x")) + "\n", encoding="utf-8")
+        with pytest.raises(SystemExit, match="no longer matches .* another query"):
+            eval_excerpts.main(["score", str(keys), *judges, "--eligible", str(frozen)])
+
+        old = {k: v for k, v in item.key.items() if not k.endswith("_sha256")}
+        keys.write_text(json.dumps(old) + "\n", encoding="utf-8")
+        with pytest.raises(SystemExit, match="build it again"):
+            eval_excerpts.main(["freeze", str(keys), *judges, "--out", str(tmp_path / "e2.json")])
 
     def test_the_prompt_asks_for_the_letter_the_score_reads(self) -> None:
         import eval_excerpts
