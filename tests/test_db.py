@@ -307,6 +307,23 @@ class TestRepository:
         assert distances == sorted(distances)
         assert 0.0 <= distances[0] < distances[-1] <= 2.0  # cosine distance
 
+    def test_term_counts_are_a_roots_own_whatever_else_the_database_holds(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """#83: alone, a root is counted by the index; beside others, through its documents."""
+        terms = ['"sigterm"', '"installer"', '"absent"']
+        store(db, fake_embedder, "/docs/a.md", SECTIONS)
+        alone = db.term_counts(terms, "/docs")
+        assert alone == (3, {'"sigterm"': 1, '"installer"': 1, '"absent"': 0})
+        # A sibling whose name extends the root's, holding the same words, is another root.
+        store(db, fake_embedder, "/docs2/b.md", [*SECTIONS, draft("Extra", "## Extra\n\nMore.")])
+        assert db.term_counts(terms, "/docs") == alone
+        assert db.term_counts(terms, "/docs2") == (
+            4,
+            {'"sigterm"': 1, '"installer"': 1, '"absent"': 0},
+        )
+        assert db.term_counts(terms, None) == (7, {'"sigterm"': 2, '"installer"': 2, '"absent"': 0})
+
     def test_porter_stemming_is_active(self, db: Database, fake_embedder: FakeEmbedder) -> None:
         store(db, fake_embedder, "/docs/a.md", SECTIONS)
         assert len(db.fts_search('"draining"', 10)) == 1

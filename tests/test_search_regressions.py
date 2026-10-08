@@ -1064,6 +1064,75 @@ class TestIdentifierLookups:
             searcher.close()
 
 
+class TestRarityIsCountedInTheSearchedRoot:
+    """#83: another root in the same database leaves this root's gate and lookups as they were.
+
+    Rarity was sized from every section in the database, and IDF from every root's words: a
+    large neighbour made this root's common words rare, and its own words common.
+    """
+
+    @staticmethod
+    def fill(db: Database, embedder: FakeEmbedder, path: str, bodies: Sequence[str]) -> None:
+        drafts = [draft(f"S{n}", f"## S{n}\n\n{body}") for n, body in enumerate(bodies)]
+        db.replace_document(
+            file_path=path, title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
+            sections=drafts, vectors=vectors_for(embedder, drafts),
+        )  # fmt: skip
+
+    @staticmethod
+    def titles(db: Database, ranked: tuple[list[int], object]) -> list[str]:
+        found = db.get_sections_with_documents(ranked[0])
+        return [found[sid][0].heading_title for sid in ranked[0]]
+
+    def test_a_large_neighbour_does_not_make_a_common_term_rare(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """HTTP is in 4 of 10 sections here (rare is 3); 310 sections in all would make it 15."""
+        filler = [f"Plain words, take {n}." for n in range(5)]
+        http = [f"Serve HTTP on port {n}." for n in range(4)]
+        self.fill(db, fake_embedder, "/mine/a.md", ["Set the request deadline.", *http, *filler])
+        searcher = HybridSearcher(db, fake_embedder, scope="/mine")
+        try:
+            alone = searcher._keyword_ranking("HTTP deadline", 20)
+            self.fill(db, fake_embedder, "/other/b.md", ["Unrelated prose."] * 300)
+            beside = searcher._keyword_ranking("HTTP deadline", 20)
+        finally:
+            searcher.close()
+        assert alone == beside
+        assert self.titles(db, alone) == ["S0"]
+
+    def test_another_roots_words_do_not_reweigh_this_roots_query(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """alpha (2 sections) outweighs beta (3) here; 300 more alphas would invert that."""
+        bodies = ["alpha one.", "alpha two.", "beta one.", "beta two.", "beta three."]
+        self.fill(db, fake_embedder, "/mine/a.md", [*bodies, *(f"Filler {n}." for n in range(5))])
+        searcher = HybridSearcher(db, fake_embedder, scope="/mine")
+        try:
+            alone = searcher._keyword_ranking("alpha beta", 20)
+            self.fill(db, fake_embedder, "/other/b.md", ["alpha elsewhere."] * 300)
+            beside = searcher._keyword_ranking("alpha beta", 20)
+        finally:
+            searcher.close()
+        assert alone == beside
+        assert set(self.titles(db, alone)) == {"S0", "S1"}
+
+    def test_a_large_neighbour_does_not_make_a_common_identifier_one(
+        self, db: Database, fake_embedder: FakeEmbedder
+    ) -> None:
+        """The issue's case: API is in 5 of 10 sections here, vocabulary, not an identifier."""
+        api = [f"Call the API, take {n}." for n in range(5)]
+        self.fill(db, fake_embedder, "/mine/a.md", [*api, *(f"Filler {n}." for n in range(5))])
+        searcher = HybridSearcher(db, fake_embedder, scope="/mine")
+        try:
+            alone = searcher._keyword_pass("API", 20)
+            self.fill(db, fake_embedder, "/other/b.md", ["Unrelated prose."] * 300)
+            beside = searcher._keyword_pass("API", 20)
+        finally:
+            searcher.close()
+        assert not alone.literal and alone == beside
+
+
 class TestPlainCalls:
     """#79: a plain call (`rate()`) is an identifier lookup, answered by sections calling it.
 
