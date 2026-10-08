@@ -1391,7 +1391,7 @@ MUTATIONS = (
         name="diagram: leave the call out of what the picture says to a screen reader",
         module="make_diagram.py",
         area="scripts",
-        old="f'{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.\">'",
+        old="f'~{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.\">'",
         new="f'{spell(POINTER_COUNT)} pointers to the rest.\">'",
         tests="test_the_committed_drawing_is_the_one_the_generator_draws",
     ),

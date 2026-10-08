@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 20,444
+       alt="One question asked of four documentation files. Reading them whole costs 20,446
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
-            407-token section, in a 608-token call with four pointers to the rest.">
+            407-token section, in a ~608-token call with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 20,444 tokens in all:
+`docs/evaluation-protocol.md`, 20,446 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -33,7 +33,7 @@ search_docs("where does the embedding model get downloaded")
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**A 275-token excerpt in a 608-token call, instead of 20,444**: the passage that answers and
+**A 275-token excerpt in a ~608-token call, instead of 20,446**: the passage that answers and
 the three after it, verbatim, marked `excerpt: true` - one `read_section` returns
 the whole 407-token section when that is not enough. The other four come back as pointers -
 where each section is, what reading it costs, and the passage that matched - so when the first
@@ -326,7 +326,7 @@ of it - pointers to the rest and `index_status`), beside
 the section that answers each query, as a median, a p95 and a median ratio per set
 (`--show-costs` lists every query). It is informational - it never gates and never enters
 the baseline. Paths in results are sent relative to the documentation root; `index_status.root`
-itself is absolute, so the figure grows by a token for every four characters of where the
+itself is absolute, so the figure grows by about a token for every four characters of where the
 repository is checked out. On this corpus the
 default call costs a median of about 380-430 tokens against answering sections of
 roughly 50-80; an identifier lookup that abstains costs about 140, its `keyword_message`

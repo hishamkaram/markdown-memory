@@ -631,7 +631,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             f"{make_diagram.EXCERPT_TOKENS} tokens of a {make_diagram.FULL_TOKENS}-token section"
         )
         expected.append(f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers")
-        expected.append(f"{make_diagram.CALL_TOKENS}-token call")
+        expected.append(f"~{make_diagram.CALL_TOKENS}-token call")
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
             # Only what the <text> elements draw. Searching the whole file would score the
@@ -662,7 +662,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 f"{make_diagram.EXCERPT_TOKENS} tokens of a "
                 f"{make_diagram.FULL_TOKENS}-token section",
                 f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers",
-                f"{make_diagram.CALL_TOKENS}-token call",
+                f"~{make_diagram.CALL_TOKENS}-token call",
             ):
                 assert figure in label.group(1), (
                     f"{svg}'s aria-label does not carry {figure!r}: it describes a "
@@ -802,10 +802,10 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         total = make_diagram.TOTAL_TOKENS
         excerpt = make_diagram.EXCERPT_TOKENS
         call = make_diagram.CALL_TOKENS
-        headline = f"**A {excerpt}-token excerpt in a {call}-token call, instead of {total:,}**"
+        headline = f"**A {excerpt}-token excerpt in a ~{call}-token call, instead of {total:,}**"
         assert headline in readme, f"the README's headline is not {headline!r}"
         # The <img> alt text describes the same picture, call included (#88).
-        assert f"in a {call}-token call" in readme.split("</picture>")[0]
+        assert f"in a ~{call}-token call" in readme.split("</picture>")[0]
         assert f"({excerpt} tok)" in example.group(1), "the example does not show the excerpt"
         assert f"the whole {sizes[0]}-token section" in readme
         assert sizes[0] == make_diagram.FULL_TOKENS and len(sizes) - 1 == make_diagram.POINTER_COUNT
@@ -859,6 +859,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         import make_diagram
 
         from markdown_memory.models import estimate_tokens
+        from markdown_memory.server import _json as server_json
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         example = re.search(r'```\nsearch_docs\("(.*?)"\)\n\n(.*?)```', readme, re.DOTALL)
@@ -883,8 +884,11 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         ranked = [(hit["file_path"], hit["heading_path"]) for hit in payload["results"]]
         if ranked != shown:
             pytest.skip(f"this machine ranks the worked example differently: {ranked}")
-        named = json.dumps(payload["index_status"]["root"])[1:-1]
-        measured = estimate_tokens(text.replace(named, "", 1))
+        # Re-encoded with the server's own encoder, which must give back the text it sent, so
+        # the root is removed as a field - whatever characters its path holds - and nothing else.
+        assert server_json(payload) == text
+        payload["index_status"]["root"] = ""
+        measured = estimate_tokens(server_json(payload))
         assert measured == make_diagram.CALL_TOKENS, (
             f"the call is {measured} tokens without its root, the README says "
             f"{make_diagram.CALL_TOKENS}: set CALL_TOKENS and re-run scripts/make_diagram.py"

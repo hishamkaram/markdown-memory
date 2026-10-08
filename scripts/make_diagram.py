@@ -67,7 +67,7 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 11358),
+    ("README.md", 11360),
     ("CLAUDE.md", 5645),
     ("evaluation-protocol.md", 1743),
     ("AGENTS.md", 1698),
@@ -86,7 +86,7 @@ RIGHT_HITS = [
 EXCERPT_ANCHOR = 0
 EXCERPT_TOKENS = 275
 # What the whole search_docs call sends for that query - the excerpt, the pointers and
-# index_status - without the absolute path of the documentation root, which the call names and
+# index_status - but without the absolute path of the documentation root, which the call names and
 # which differs between checkouts (#88). Measured with the real model; the embedding test in
 # tests/test_agent_docs.py measures it again wherever the worked example ranks the same.
 CALL_TOKENS = 608
@@ -145,7 +145,7 @@ def draw(c: dict) -> str:
         f'height="{H}" role="img" aria-label="One question: reading {spell(len(LEFT_FILES))} '
         f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns the passage "
         f"that answers, {EXCERPT_TOKENS} tokens of a {FULL_TOKENS}-token section, in a "
-        f'{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.">'
+        f'~{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
 
@@ -293,7 +293,8 @@ def draw(c: dict) -> str:
         text(
             732,
             354,
-            f"a {CALL_TOKENS}-token call, with {spell(POINTER_COUNT)} pointers read only if needed",
+            f"a ~{CALL_TOKENS}-token call, with {spell(POINTER_COUNT)} pointers "
+            "read only if needed",
             fill=c["muted"],
             size=11,
         )
