@@ -67,7 +67,7 @@ W, H = 1120, 430
 # tests/test_agent_docs.py re-derives all of them from the real files, so editing the
 # documentation without redrawing the picture is a test failure rather than a quiet lie.
 LEFT_FILES = [
-    ("README.md", 11290),
+    ("README.md", 11360),
     ("CLAUDE.md", 5645),
     ("evaluation-protocol.md", 1743),
     ("AGENTS.md", 1698),
@@ -75,7 +75,7 @@ LEFT_FILES = [
 RIGHT_HITS = [
     (407, "What downloads, when, and where", True),
     (764, "Pre-download it, or install offline", False),
-    (738, "markdown-memory  (preamble)", False),
+    (787, "markdown-memory  (preamble)", False),
     (303, "When it goes wrong", False),
     (119, "Install > Get it", False),
 ]
@@ -85,6 +85,14 @@ RIGHT_HITS = [
 # and tests/test_agent_docs.py recomputes that from the README.
 EXCERPT_ANCHOR = 0
 EXCERPT_TOKENS = 275
+# What the whole search_docs call sends for that query - the excerpt, the pointers and
+# index_status - but without the absolute path of the documentation root, which the call names
+# and which differs between checkouts (#88). Measured with the real model, which also chose the
+# ranking, the excerpt and each pointer's matched passage; CALL_CHOICES fingerprints those
+# choices, and the embedding test in tests/test_agent_docs.py measures the call again wherever
+# the model makes the same ones.
+CALL_TOKENS = 608
+CALL_CHOICES = "9e4d7235f000f893"
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # Every figure the drawing prints is derived from the two lists above - the totals, the
 # caption and the aria-label alike. Writing any of them out by hand is how the caption and
@@ -139,8 +147,8 @@ def draw(c: dict) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
         f'height="{H}" role="img" aria-label="One question: reading {spell(len(LEFT_FILES))} '
         f"whole files costs {TOTAL_TOKENS:,} tokens; markdown-memory returns the passage "
-        f"that answers, {EXCERPT_TOKENS} tokens of a {FULL_TOKENS}-token section, with "
-        f'{spell(POINTER_COUNT)} pointers to the rest.">'
+        f"that answers, {EXCERPT_TOKENS} tokens of a {FULL_TOKENS}-token section, in a "
+        f'~{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.">'
     ]
     o.append(f'<rect width="{W}" height="{H}" fill="{c["bg"]}"/>')
 
@@ -288,7 +296,8 @@ def draw(c: dict) -> str:
         text(
             732,
             354,
-            f"plus {spell(POINTER_COUNT)} pointers, read only if the first is not the answer",
+            f"a ~{CALL_TOKENS}-token call, with {spell(POINTER_COUNT)} pointers "
+            "read only if needed",
             fill=c["muted"],
             size=11,
         )

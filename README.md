@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 20,376
+       alt="One question asked of four documentation files. Reading them whole costs 20,446
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
-            407-token section, with four pointers to the rest.">
+            407-token section, in a ~608-token call with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 20,376 tokens in all:
+`docs/evaluation-protocol.md`, 20,446 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -28,16 +28,18 @@ search_docs("where does the embedding model get downloaded")
   407 tok  README.md  markdown-memory > The embedding model > What downloads, when, and where
            excerpt: the passage that matched and the three after it come back (275 tok)
   764 tok  README.md  markdown-memory > The embedding model > Pre-download it, or install offline
-  738 tok  README.md  markdown-memory
+  787 tok  README.md  markdown-memory
   303 tok  README.md  markdown-memory > The embedding model > When it goes wrong
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**275 tokens instead of 20,376**: the passage that answers and the three after it, verbatim,
-marked `excerpt: true` - one `read_section` returns the whole 407-token section when that is
-not enough. The other four come back as pointers - where each section is, what reading it
-costs, and the passage that matched - so when the first is not the answer, one
-`read_section` fetches the one that is.
+**A 275-token excerpt in a ~608-token call, instead of 20,446**: the passage that answers and
+the three after it, verbatim, marked `excerpt: true` - one `read_section` returns
+the whole 407-token section when that is not enough. The other four come back as pointers -
+where each section is, what reading it costs, and the passage that matched - so when the first
+is not the answer, one `read_section` fetches the one that is. The call is everything
+`search_docs` sends: the excerpt, the pointers and `index_status`, plus the path of your
+checkout, which it names in full.
 
 It is a local [Model Context Protocol](https://modelcontextprotocol.io) server - MCP is the
 protocol agents use to call tools - and it runs entirely on your machine: parsing with
@@ -323,8 +325,9 @@ text block the MCP server actually sends (the top hit - its section in full, or 
 of it - pointers to the rest and `index_status`), beside
 the section that answers each query, as a median, a p95 and a median ratio per set
 (`--show-costs` lists every query). It is informational - it never gates and never enters
-the baseline. Paths are sent relative to the documentation root, so the figure no longer depends
-on where the repository is checked out. On this corpus the
+the baseline. Paths in results are sent relative to the documentation root; `index_status.root`
+itself is absolute, so the figure grows by about a token for every four characters of where the
+repository is checked out. On this corpus the
 default call costs a median of about 380-430 tokens against answering sections of
 roughly 50-80; an identifier lookup that abstains costs about 140, its `keyword_message`
 included.
