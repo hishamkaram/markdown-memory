@@ -1,0 +1,64 @@
+{
+  "_about": "Probe queries for issue #96 over scripts/eval_data/corpus_v2: calls written with arguments (rate(x[5m])). Written by the #96 session, not collected from users (#43/#45 hold no real queries yet), and labelled from the corpus before any search ran. Dev only: there is no held-out split, so nothing here may claim held-out evidence. Report-only, run with --corpus v2 --split dev --queries. 'identifier' holds the call probes; abs(v) and the 'paraphrase' file(s) question are controls the change must leave unchanged; step(1) is rewritten to step(). rate(http_requests_total[5m]) is a literal the corpus holds verbatim (examples.md): it is rewritten like the others and must stay answered (any-valid@1 kept, rank not worse). 'mixed' holds a call inside a question.",
+  "dev": {
+    "paraphrase": [
+      {
+        "query": "which file(s) does ripgrep ignore",
+        "expected": "ripgrep/GUIDE.md::User Guide > Automatic filtering"
+      }
+    ],
+    "identifier": [
+      {
+        "query": "rate(x[5m])",
+        "expected": "prometheus/docs/querying/functions.md::rate()"
+      },
+      {
+        "query": "rate(my_metric[5m])",
+        "expected": "prometheus/docs/querying/functions.md::rate()"
+      },
+      {
+        "query": "increase(errors_total[1h])",
+        "expected": "prometheus/docs/querying/functions.md::increase()"
+      },
+      {
+        "query": "irate(node_cpu_seconds_total[1m])",
+        "expected": "prometheus/docs/querying/functions.md::irate()"
+      },
+      {
+        "query": "histogram_quantile(0.9, rate(x[5m]))",
+        "expected": "prometheus/docs/querying/functions.md::histogram_quantile()"
+      },
+      {
+        "query": "`rate(x[5m])`",
+        "expected": "prometheus/docs/querying/functions.md::rate()"
+      },
+      {
+        "query": "rate(x[5m])?",
+        "expected": "prometheus/docs/querying/functions.md::rate()"
+      },
+      {
+        "query": "rate(http_requests_total[5m])",
+        "expected": "prometheus/docs/querying/functions.md::rate()",
+        "also_valid": {
+          "prometheus/docs/querying/examples.md::Subquery": 2,
+          "prometheus/docs/querying/examples.md::Using functions, operators, etc.": 2
+        }
+      },
+      {
+        "query": "abs(v)",
+        "expected": "prometheus/docs/querying/functions.md::abs()"
+      },
+      {
+        "query": "step(1)",
+        "expected": "prometheus/docs/querying/functions.md::step()"
+      }
+    ],
+    "mixed": [
+      {
+        "query": "how does rate(x[5m]) work",
+        "expected": "prometheus/docs/querying/functions.md::rate()"
+      }
+    ],
+    "no_answer": []
+  }
+}

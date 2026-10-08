@@ -1247,7 +1247,15 @@ class TestPlainCalls:
 
     @pytest.mark.parametrize(
         "query",
-        ["zebra giraffe", "zqxabsent(x)", "zqxabsent(", "zqxabsent( )", "cargo zqxabsent"],
+        [
+            "zebra giraffe",
+            "zqxabsent(x)",
+            "zqxabsent(",
+            "zqxabsent( )",
+            "cargo zqxabsent",
+            "zqxabsent(s)",  # prose (#96): `flag(s)` is a plural, not a call
+            "zqxabsent(v)",
+        ],
     )
     def test_plain_call_syntax_does_not_expand_other_queries(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path, query: str
@@ -1275,6 +1283,72 @@ class TestPlainCalls:
     def test_only_an_empty_call_is_read_as_one(self, term: str, expected: bool) -> None:
         assert _is_identifier(fts_terms(term)[0]) is expected
         assert not _is_identifier_lookup(fts_terms("cargo metadata"))
+
+    @pytest.mark.parametrize(
+        ("query", "terms"),
+        [
+            ("rate(x[5m])", ["rate()"]),
+            ("`rate(x[5m])`", ["rate()"]),
+            ("rate(x[5m])?", ["rate()"]),
+            ("rate(my_metric[5m])", ["rate()"]),
+            # The inner call closes the outer one: an argument, not a second call to rank.
+            ("histogram_quantile(0.9, rate(x[5m]))", ["histogram_quantile()", "rate(x[5m]))"]),
+            ("sum(rate(x[1m]))", ["sum()"]),  # the outer call only: arguments are not parsed
+            ("step(1)", ["step()"]),
+            ("rate(x[5m]) rate(y[1m])", ["rate()"]),
+            ("how does rate(x[5m]) work", ["rate()", "work"]),
+            ("abs(v)", ["abs(v)"]),  # nothing in the arguments reads as code
+            ("rate(errors)", ["rate(errors)"]),
+            ("flag(s)", ["flag(s)"]),
+            ("option(s)", ["option(s)"]),
+            ("e.g.(x)", ["e.g.(x)"]),
+            ("obj.method(1)", ["obj.method(1)"]),
+            ("x[5m]", ["x[5m]"]),
+            ("rate(", ["rate("]),
+        ],
+    )
+    def test_a_call_written_with_arguments_is_searched_as_the_call(
+        self, query: str, terms: list[str]
+    ) -> None:
+        """#96: the arguments are the asker's own metric and range; the function is documented."""
+        assert fts_terms(query) == [f'"{term}"' for term in terms]
+
+    @pytest.mark.parametrize(
+        ("query", "definition"),
+        [
+            ("rate(x[5m])", "rate()"),
+            ("`rate(x[5m])`", "rate()"),
+            ("rate(x[5m])?", "rate()"),
+            ("rate(my_metric[5m])", "rate()"),
+            ("histogram_quantile(0.9, rate(x[5m]))", "histogram_quantile()"),
+        ],
+    )
+    def test_a_call_written_with_arguments_is_answered_by_its_definition(
+        self,
+        db: Database,
+        fake_embedder: FakeEmbedder,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+        definition: str,
+    ) -> None:
+        """No document holds the asker's metric, so the whole call matched nothing: empty page."""
+        searcher = self.searcher(db, fake_embedder, tmp_path / "docs", {
+            "functions.md": (
+                "# Functions\n\n## irate()\n\nirate(v range-vector) is the instant rate.\n\n"
+                "## rate()\n\nrate(v range-vector) is the per-second average rate.\n\n"
+                "## histogram_quantile()\n\nhistogram_quantile(φ scalar, b instant-vector) "
+                "takes the φ-quantile of the buckets.\n"
+            ),
+            "notes.md": "# Notes\n\n## Rates\n\nThe rate rate rate of requests.\n",
+        })  # fmt: skip
+        try:
+            self.vectors_rank(searcher, monkeypatch, "Notes > Rates", "Functions > rate()")
+            page = searcher.search_page(query, limit=3)
+        finally:
+            searcher.close()
+        assert page.keyword_match == "matched"
+        assert [r.heading_path for r in page.results][:1] == [f"Functions > {definition}"]
 
     def test_a_call_named_only_in_prose_keeps_its_keyword_hits(
         self, db: Database, fake_embedder: FakeEmbedder, tmp_path: Path
