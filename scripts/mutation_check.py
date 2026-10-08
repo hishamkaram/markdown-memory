@@ -3079,8 +3079,8 @@ MUTATIONS = (
     Mutation(
         name="calls: miss a call whose closing parenthesis is in another piece",
         module="search.py",
-        old='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)", re.DOTALL)',
-        new='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)\\)", re.DOTALL)',
+        old='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)")',
+        new='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)\\)")',
         tests="test_a_call_written_with_arguments_is_searched_as_the_call",
     ),
     Mutation(

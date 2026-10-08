@@ -238,7 +238,7 @@ def _is_plain_call(term: str) -> bool:
 
 
 # A name, `(`, and something in it; the `)` may have gone to the next whitespace piece.
-_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\((.+)", re.DOTALL)
+_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\((.+)")
 
 
 def _called(term: str) -> str:
