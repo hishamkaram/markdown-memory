@@ -1379,6 +1379,23 @@ MUTATIONS = (
         tests="test_a_half_redrawn_diagram_is_a_failure_and_not_a_warning",
     ),
     Mutation(
+        name="diagram: price the call at a figure the README does not print",
+        module="make_diagram.py",
+        area="scripts",
+        old="CALL_TOKENS = 608\n",
+        new="CALL_TOKENS = 609\n",
+        tests="test_the_worked_example_says_what_comes_back "
+        "or test_the_call_the_headline_prices_is_the_call_search_docs_sends",
+    ),
+    Mutation(
+        name="diagram: leave the call out of what the picture says to a screen reader",
+        module="make_diagram.py",
+        area="scripts",
+        old="f'{CALL_TOKENS}-token call with {spell(POINTER_COUNT)} pointers to the rest.\">'",
+        new="f'{spell(POINTER_COUNT)} pointers to the rest.\">'",
+        tests="test_the_committed_drawing_is_the_one_the_generator_draws",
+    ),
+    Mutation(
         name="diagram: stop drawing the token count beside each returned section",
         module="make_diagram.py",
         area="scripts",

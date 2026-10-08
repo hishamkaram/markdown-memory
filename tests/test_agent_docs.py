@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import re
@@ -630,6 +631,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
             f"{make_diagram.EXCERPT_TOKENS} tokens of a {make_diagram.FULL_TOKENS}-token section"
         )
         expected.append(f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers")
+        expected.append(f"{make_diagram.CALL_TOKENS}-token call")
         for svg in ("how-it-works-light.svg", "how-it-works-dark.svg"):
             rendered = (ROOT / "docs/assets" / svg).read_text(encoding="utf-8")
             # Only what the <text> elements draw. Searching the whole file would score the
@@ -660,6 +662,7 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
                 f"{make_diagram.EXCERPT_TOKENS} tokens of a "
                 f"{make_diagram.FULL_TOKENS}-token section",
                 f"{make_diagram.spell(make_diagram.POINTER_COUNT)} pointers",
+                f"{make_diagram.CALL_TOKENS}-token call",
             ):
                 assert figure in label.group(1), (
                     f"{svg}'s aria-label does not carry {figure!r}: it describes a "
@@ -798,8 +801,11 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         sizes = [int(n) for n in re.findall(r"(\d+) tok\b(?!\))", example.group(1))]
         total = make_diagram.TOTAL_TOKENS
         excerpt = make_diagram.EXCERPT_TOKENS
-        headline = f"**{excerpt} tokens instead of {total:,}**"
-        assert headline in readme, f"the excerpt is {excerpt} tokens; the README says otherwise"
+        call = make_diagram.CALL_TOKENS
+        headline = f"**A {excerpt}-token excerpt in a {call}-token call, instead of {total:,}**"
+        assert headline in readme, f"the README's headline is not {headline!r}"
+        # The <img> alt text describes the same picture, call included (#88).
+        assert f"in a {call}-token call" in readme.split("</picture>")[0]
         assert f"({excerpt} tok)" in example.group(1), "the example does not show the excerpt"
         assert f"the whole {sizes[0]}-token section" in readme
         assert sizes[0] == make_diagram.FULL_TOKENS and len(sizes) - 1 == make_diagram.POINTER_COUNT
@@ -836,4 +842,50 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         assert estimate_tokens(text) == make_diagram.EXCERPT_TOKENS, (
             f"the excerpt is {estimate_tokens(text)} tokens, the README says "
             f"{make_diagram.EXCERPT_TOKENS}"
+        )
+
+    @pytest.mark.embedding
+    def test_the_call_the_headline_prices_is_the_call_search_docs_sends(
+        self, tmp_path: Path, real_embedder: Embedder
+    ) -> None:
+        """#88: the headline prices the whole call, which only the real model can produce.
+
+        The ranking comes from 4-bit kernels that differ between CPUs, so where this machine
+        ranks the worked example differently the figure cannot be checked here and is skipped,
+        not failed. Where it ranks the same, the call must cost what the README says. The
+        documentation root's own path is left out: the call names it in full, and it is
+        wherever the reader checked the repository out.
+        """
+        import make_diagram
+
+        from markdown_memory.models import estimate_tokens
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        example = re.search(r'```\nsearch_docs\("(.*?)"\)\n\n(.*?)```', readme, re.DOTALL)
+        assert example
+        shown = re.findall(r"\d+ tok\s+(\S+)\s+(.+?)\s*$", example.group(2), re.M)
+        root = tmp_path / "docs"
+        for name in ("README.md", "CLAUDE.md", "AGENTS.md", "docs/evaluation-protocol.md"):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text((ROOT / name).read_text(encoding="utf-8"), encoding="utf-8")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "index.db", docs_dir=root), embedder=real_embedder
+        )
+        try:
+            service.index_directory()
+            outcome = asyncio.run(
+                create_server(service=service).call_tool("search_docs", {"query": example.group(1)})
+            )
+        finally:
+            service.close()
+        text = outcome.content[0].text  # type: ignore[union-attr]
+        payload = json.loads(text)
+        ranked = [(hit["file_path"], hit["heading_path"]) for hit in payload["results"]]
+        if ranked != shown:
+            pytest.skip(f"this machine ranks the worked example differently: {ranked}")
+        named = json.dumps(payload["index_status"]["root"])[1:-1]
+        measured = estimate_tokens(text.replace(named, "", 1))
+        assert measured == make_diagram.CALL_TOKENS, (
+            f"the call is {measured} tokens without its root, the README says "
+            f"{make_diagram.CALL_TOKENS}: set CALL_TOKENS and re-run scripts/make_diagram.py"
         )
