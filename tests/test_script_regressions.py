@@ -1363,6 +1363,7 @@ class TestTheExcerptHarness:
         recorded = json.loads(frozen.read_text(encoding="utf-8"))
         assert recorded.get("queries") == {item.key["id"]: item.key["query_sha256"]}
         assert recorded.get("sections") == {item.key["id"]: section}
+        assert eval_excerpts.drifted([item.key], recorded) == ""  # the same build still scores
 
         keys.write_text(json.dumps(dict(item.key, query_sha256="x")) + "\n", encoding="utf-8")
         with pytest.raises(SystemExit, match="no longer matches .* another query"):

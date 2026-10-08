@@ -1318,6 +1318,14 @@ MUTATIONS = (
         tests="test_a_build_that_drifted_from_the_frozen_denominator_is_not_scored",
     ),
     Mutation(
+        name="excerpt harness: freeze without recording the queries",
+        module="eval_excerpts.py",
+        area="scripts",
+        old='                "queries": {key["id"]: key.get("query_sha256") for key in keys},',
+        new="",
+        tests="test_freeze_records_what_the_judges_read_and_score_refuses_what_moved",
+    ),
+    Mutation(
         name="excerpt harness: freeze without recording the section texts",
         module="eval_excerpts.py",
         area="scripts",
