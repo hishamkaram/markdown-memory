@@ -449,8 +449,20 @@ def evaluate(service: MarkdownMemoryService, cases: list[dict[str, object]]) -> 
     )
 
 
-def print_deltas(preset: str, scores: dict[str, Scores]) -> None:
-    """Compare ``scores`` with the frozen baseline for ``preset`` (if one is recorded)."""
+def cases_sha256(queries: Mapping[str, Mapping[str, object]], name: str) -> str:
+    """The fingerprint of the cases set ``name`` (``split/kind``) holds in ``queries``."""
+    split, kind = name.split("/")
+    return _sha256(json.dumps(queries[split][kind], sort_keys=True).encode())
+
+
+def print_deltas(
+    preset: str, scores: dict[str, Scores], queries: Mapping[str, Mapping[str, object]]
+) -> None:
+    """Compare ``scores`` with the frozen baseline for ``preset`` (if one is recorded).
+
+    Only a set scored on the same cases has a delta (#116): #105 replaced two held-out sets
+    in place, and their baseline, recorded on the retired queries, read as a 30-point drop.
+    """
     recorded = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
     baseline = recorded.get(preset)
     if baseline is None:
@@ -461,6 +473,13 @@ def print_deltas(preset: str, scores: dict[str, Scores]) -> None:
         before = baseline.get(name)
         if before is None:
             continue
+        scored_on = before.get("cases_sha256")
+        if scored_on is None:
+            print(f"  {name:<22} no delta: the baseline does not say which queries it scored")
+            continue
+        if scored_on != cases_sha256(queries, name):
+            print(f"  {name:<22} no delta: the baseline was scored on other queries (re-record it)")
+            continue
         accuracy = "  ".join(
             f"{field} {(getattr(result, field) - before[field]) * 100:+.0f}pp"
             for field in ACCURACY_FIELDS
@@ -469,10 +488,15 @@ def print_deltas(preset: str, scores: dict[str, Scores]) -> None:
         print(f"  {name:<22} {accuracy}  median {latency:+.0f}ms")
 
 
-def update_baseline(preset: str, scores: dict[str, Scores]) -> None:
+def update_baseline(
+    preset: str, scores: dict[str, Scores], queries: Mapping[str, Mapping[str, object]]
+) -> None:
     recorded = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
     recorded[preset] = {
-        name: {k: round(v, 4) for k, v in asdict(result).items() if k != "cases"}
+        name: {
+            **{k: round(v, 4) for k, v in asdict(result).items() if k != "cases"},
+            "cases_sha256": cases_sha256(queries, name),
+        }
         for name, result in scores.items()
     }
     BASELINE.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -809,18 +833,18 @@ def main() -> int:
         return 1
 
     preset = arguments.embedder
-    print_deltas(corpus.baseline_key(preset), scores)
+    print_deltas(corpus.baseline_key(preset), scores, queries)
     if report_only:
         print(f"\nGATES NOT CHECKED: report-only run ({'; '.join(report_only)})")
         return 0
     if corpus.name != "v1":
         if arguments.update_baseline:
-            update_baseline(corpus.baseline_key(preset), scores)
+            update_baseline(corpus.baseline_key(preset), scores, queries)
         print(f"\nREPORT ONLY: corpus {corpus.name!r} has no floors; the gate is corpus 'v1'")
         return 0
     if preset != DEFAULT_EMBEDDER:
         if arguments.update_baseline:
-            update_baseline(preset, scores)
+            update_baseline(preset, scores, queries)
         # The floors are calibrated for the default embedder. Say so: a silent exit 0
         # would read as "gates passed".
         print(f"\nGATES NOT CHECKED: floors apply to {DEFAULT_EMBEDDER!r} only, not {preset!r}")
@@ -847,7 +871,7 @@ def main() -> int:
             print("not recording a baseline for a run that fails the floors")
         return 1
     if arguments.update_baseline:
-        update_baseline(preset, scores)
+        update_baseline(preset, scores, queries)
     print("\nOK: held-out floors met (Top-1 >= 80%, Top-5 >= 90%, identifiers 100%)")
     return 0
 

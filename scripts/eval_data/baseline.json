@@ -2,6 +2,7 @@
   "bge-small": {
     "dev/identifier": {
       "any_valid_top1": 1.0,
+      "cases_sha256": "e40f313c5c19f81c56c4db5e37ee80c95f5d67c3f551a7f14b6c99143aa64102",
       "median_ms": 16.3724,
       "ndcg5": 1.0,
       "p95_ms": 81.1803,
@@ -11,6 +12,7 @@
     },
     "dev/paraphrase": {
       "any_valid_top1": 0.6176,
+      "cases_sha256": "4f5c949fcc263f3ceacc71fb10e739ced6c08c4c82a3dc508e092431c152b70b",
       "median_ms": 26.0138,
       "ndcg5": 0.6783,
       "p95_ms": 46.6221,
@@ -20,6 +22,7 @@
     },
     "held_out/identifier": {
       "any_valid_top1": 1.0,
+      "cases_sha256": "a790f563b7a1b59ccc953842e06716c3f815d5496ee445f69164b63893b47565",
       "median_ms": 33.2547,
       "ndcg5": 1.0,
       "p95_ms": 143.5501,
@@ -29,6 +32,7 @@
     },
     "held_out/paraphrase": {
       "any_valid_top1": 0.7059,
+      "cases_sha256": "86f1d45910ae821ae7800d01433bd7639c4c53b7838ce79e34990d6d9062eb35",
       "median_ms": 19.8893,
       "ndcg5": 0.7789,
       "p95_ms": 81.0438,
@@ -40,6 +44,7 @@
   "embeddinggemma": {
     "dev/identifier": {
       "any_valid_top1": 1.0,
+      "cases_sha256": "e40f313c5c19f81c56c4db5e37ee80c95f5d67c3f551a7f14b6c99143aa64102",
       "median_ms": 100.8963,
       "ndcg5": 1.0,
       "p95_ms": 132.5065,
@@ -49,6 +54,7 @@
     },
     "dev/paraphrase": {
       "any_valid_top1": 0.8235,
+      "cases_sha256": "4f5c949fcc263f3ceacc71fb10e739ced6c08c4c82a3dc508e092431c152b70b",
       "median_ms": 119.8179,
       "ndcg5": 0.8513,
       "p95_ms": 252.035,
@@ -58,6 +64,7 @@
     },
     "held_out/identifier": {
       "any_valid_top1": 1.0,
+      "cases_sha256": "a790f563b7a1b59ccc953842e06716c3f815d5496ee445f69164b63893b47565",
       "median_ms": 91.2537,
       "ndcg5": 1.0,
       "p95_ms": 119.82,
@@ -67,6 +74,7 @@
     },
     "held_out/paraphrase": {
       "any_valid_top1": 0.8824,
+      "cases_sha256": "86f1d45910ae821ae7800d01433bd7639c4c53b7838ce79e34990d6d9062eb35",
       "median_ms": 94.7355,
       "ndcg5": 0.931,
       "p95_ms": 125.4448,
@@ -78,6 +86,7 @@
   "embeddinggemma@v2": {
     "dev/identifier": {
       "any_valid_top1": 0.95,
+      "cases_sha256": "0ed3bfb0c3b952f60dd35e04b4621d5a24267a85f5085986b1f201fd4e2c55bf",
       "median_ms": 164.1954,
       "ndcg5": 0.9123,
       "p95_ms": 235.0579,
@@ -87,6 +96,7 @@
     },
     "dev/mixed": {
       "any_valid_top1": 0.9,
+      "cases_sha256": "c5da3d8c66f7f4d64456efb5e39ed92976050c4ed52cf6725a0333c883bfad39",
       "median_ms": 209.0805,
       "ndcg5": 0.9351,
       "p95_ms": 291.232,
@@ -96,6 +106,7 @@
     },
     "dev/paraphrase": {
       "any_valid_top1": 0.65,
+      "cases_sha256": "0f4dbf986b3d9db943d3b4df9c1929992fdce34d3ea713bb72edafea768b7b62",
       "median_ms": 206.1932,
       "ndcg5": 0.7925,
       "p95_ms": 315.1593,
@@ -105,6 +116,7 @@
     },
     "held_out/identifier": {
       "any_valid_top1": 1.0,
+      "cases_sha256": "5854bd2f4e417d9d5a44fc00161315f90d2e619afd45c69426e94524a8d6d9a9",
       "median_ms": 164.2738,
       "ndcg5": 0.9683,
       "p95_ms": 205.7479,
@@ -114,6 +126,7 @@
     },
     "held_out/mixed": {
       "any_valid_top1": 0.95,
+      "cases_sha256": "5a5d79cbf0bd2f2f0b43dec9ec29c5241efa348f919b0be0627ce39fd5f362e6",
       "median_ms": 217.3497,
       "ndcg5": 0.957,
       "p95_ms": 297.5424,
@@ -123,6 +136,7 @@
     },
     "held_out/paraphrase": {
       "any_valid_top1": 0.75,
+      "cases_sha256": "a05f36121bb454cf195ccded549c4c2cad501b0575397acf00b88f546115df48",
       "median_ms": 204.7911,
       "ndcg5": 0.8342,
       "p95_ms": 293.3631,
