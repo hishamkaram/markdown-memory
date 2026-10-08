@@ -148,6 +148,10 @@ def _call(service: MarkdownMemoryService, tool: str, arguments: dict[str, Any]) 
     return asyncio.run(call())
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def make_item(
     item_id: str,
     query: str,
@@ -181,6 +185,10 @@ def make_item(
         "payload_tokens": estimate_tokens(payload_text),
         "section_payload_tokens": estimate_tokens(baseline_text),
         "read_tokens": estimate_tokens(section_text),
+        # What the judges read, so a frozen verdict is only ever scored against the same text
+        # (#87): the cluster names a heading, and a heading can hold other words next time.
+        "query_sha256": _sha256(query),
+        "section_sha256": _sha256(section_text),
     }
     if top.get("excerpt"):
         excerpt_first = rng.random() < 0.5
@@ -286,8 +294,12 @@ def drifted(keys: Sequence[Mapping[str, Any]], frozen: Mapping[str, Any]) -> str
     """Why a build cannot be scored against a frozen denominator, or "" when it can.
 
     Every frozen eligible item must be in the build exactly once, answered by the section it
-    was frozen with: a changed ranking or a rebuilt index would otherwise score a different
-    section against a verdict about another.
+    was frozen with, for the same query and the same section text: a changed ranking, a
+    rebuilt index, an edited query or a document edited under the same heading would
+    otherwise score a verdict against text the judges never read (#87). The two payload
+    costs are not frozen - they are what the change being scored is meant to move - and
+    `read_tokens` follows from the section text. `judge_input.jsonl` is not read here: that
+    the judges were given this build's texts rests on both files coming from one `build`.
     """
     counts: dict[str, int] = {}
     for key in keys:
@@ -300,12 +312,28 @@ def drifted(keys: Sequence[Mapping[str, Any]], frozen: Mapping[str, Any]) -> str
     clusters = frozen.get("clusters")
     if clusters is None:
         return "the frozen file records no sections; freeze it again"
-    problems += [
-        f"{key['id']} now answered by another section"
-        for key in keys
-        if key["id"] in set(frozen["eligible"]) and clusters.get(key["id"]) != key["cluster"]
-    ]
+    queries, sections = frozen.get("queries"), frozen.get("sections")
+    if queries is None or sections is None:
+        return "the frozen file records no texts; freeze it again"
+    eligible = set(frozen["eligible"])
+    for key in keys:
+        if key["id"] not in eligible:
+            continue
+        if clusters.get(key["id"]) != key["cluster"]:
+            problems.append(f"{key['id']} now answered by another section")
+        if unhashed(key):
+            problems.append(f"{key['id']} records no text hashes; build it again")
+            continue
+        if queries.get(key["id"]) != key.get("query_sha256"):
+            problems.append(f"{key['id']} asks another query")
+        if sections.get(key["id"]) != key.get("section_sha256"):
+            problems.append(f"{key['id']} answered by other section text")
     return "; ".join(problems)
+
+
+def unhashed(key: Mapping[str, Any]) -> bool:
+    """A key built before #87: it cannot say which texts its verdicts were about."""
+    return key.get("query_sha256") is None or key.get("section_sha256") is None
 
 
 def majority_yes(item_id: str, judges: Sequence[Mapping[str, str]]) -> bool:
@@ -530,12 +558,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len({key["id"] for key in keys}) != len(keys):
             raise SystemExit("an item id appears twice in the keys")
         if arguments.command == "freeze":
+            old = [key["id"] for key in keys if unhashed(key)]
+            if old:
+                raise SystemExit(f"{', '.join(old)} records no text hashes; build it again")
             ids = [key["id"] for key in keys]
             judges = [read_verdicts(path, ids) for path in arguments.judge]
             frozen = {
                 "eligible": [item_id for item_id in ids if majority_yes(item_id, judges)],
                 "items": len(ids),
                 "clusters": {key["id"]: key["cluster"] for key in keys},
+                "queries": {key["id"]: key.get("query_sha256") for key in keys},
+                "sections": {key["id"]: key.get("section_sha256") for key in keys},
             }
             arguments.out.write_text(json.dumps(frozen, indent=1) + "\n", encoding="utf-8")
             print(
