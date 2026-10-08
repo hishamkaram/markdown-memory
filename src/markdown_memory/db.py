@@ -1340,13 +1340,55 @@ class Database:
             ).fetchall()
         return {int(row[0]) for row in rows}
 
-    def fts_document_frequency(self, term: str) -> int:
-        """Number of sections matching the single FTS5 ``term``."""
+    def term_counts(self, terms: Sequence[str], scope: str | None) -> tuple[int, dict[str, int]]:
+        """Sections under ``scope``, and how many of them match each single FTS5 term.
+
+        How rare a term is belongs to the documentation being searched: another root in the
+        same database must not make a word common here look rare, or the reverse (#83).
+        Counting through the scope joins every match to its document, several times the
+        cost of the index's own count; a database holding nothing outside the scope - one
+        per root is the default - gets the same numbers from the index alone. The check and
+        the counts share one snapshot, so a root committed in between cannot reach them.
+        """
         with self._reading() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM sections_fts WHERE sections_fts MATCH ?", (term,)
-            ).fetchone()
-        return int(row[0])
+            conn.execute("BEGIN")
+            try:
+                prefix = _directory_prefix(scope) if scope is not None else ""
+                outside = scope is not None and bool(
+                    conn.execute(
+                        "SELECT EXISTS (SELECT 1 FROM documents "
+                        "WHERE substr(file_path, 1, length(?)) != ?)",
+                        (prefix, prefix),
+                    ).fetchone()[0]
+                )
+                if not outside:
+                    total = conn.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
+                    counts = {
+                        term: conn.execute(
+                            "SELECT COUNT(*) FROM sections_fts WHERE sections_fts MATCH ?",
+                            (term,),
+                        ).fetchone()[0]
+                        for term in terms
+                    }
+                else:
+                    total = conn.execute(
+                        "SELECT COUNT(*) FROM sections s JOIN documents d ON d.id = s.doc_id "
+                        "WHERE substr(d.file_path, 1, length(?)) = ?",
+                        (prefix, prefix),
+                    ).fetchone()[0]
+                    counts = {
+                        term: conn.execute(
+                            "SELECT COUNT(*) FROM sections_fts f "
+                            "JOIN sections s ON s.id = f.rowid "
+                            "JOIN documents d ON d.id = s.doc_id "
+                            "WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ?",
+                            (term, prefix, prefix),
+                        ).fetchone()[0]
+                        for term in terms
+                    }
+            finally:
+                conn.execute("COMMIT")
+        return int(total), {term: int(count) for term, count in counts.items()}
 
     def first_passages(self, section_ids: Sequence[int]) -> dict[int, str]:
         """Each section's first passage (ordinal 0), as the parser stored it: plain text."""

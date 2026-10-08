@@ -3219,7 +3219,7 @@ MUTATIONS = (
         name="identifiers: judge rarity by the keyword index's count alone",
         module="search.py",
         old="            if found[literal] and len(found[literal]) * spread(term) <= rare",
-        new="            if found[literal] and self._db.fts_document_frequency(term) <= rare",
+        new="            if found[literal] and frequencies[term] <= rare",
         tests="test_an_identifier_whose_words_are_common_is_still_rare",
     ),
     Mutation(
@@ -3256,12 +3256,56 @@ MUTATIONS = (
     Mutation(
         name="identifiers: count another root's sections towards this one's rarity",
         module="search.py",
-        old=(
-            "            return max(1.0, "
-            "len(self._db.fts_search(term, everywhere, self._scope)) / checked)"
-        ),
-        new="            return max(1.0, everywhere / checked)",
+        old="            return max(1.0, frequencies[term] / checked)",
+        new="            return max(1.0, self._db.term_counts([term], None)[1][term] / checked)",
         tests="test_rarity_in_one_root_is_not_judged_by_another_roots_words",
+    ),
+    Mutation(
+        name="rarity: size the lookup's limit from every root in the database",
+        module="search.py",
+        old="        rare = _rare(total)\n        literals = [_Literal(term) for term in terms]",
+        new=(
+            '        rare = _rare(self._db.count_rows("sections"))\n'
+            "        literals = [_Literal(term) for term in terms]"
+        ),
+        tests="test_a_large_neighbour_does_not_make_a_common_identifier_one",
+    ),
+    Mutation(
+        name="rarity: size the gate's limit from every root in the database",
+        module="search.py",
+        old="        rare = _rare(total)\n        exact: set[int] = set()",
+        new=(
+            '        rare = _rare(self._db.count_rows("sections"))\n        exact: set[int] = set()'
+        ),
+        tests="test_a_large_neighbour_does_not_make_a_common_term_rare",
+    ),
+    Mutation(
+        name="rarity: weigh a query's terms by every root's words",
+        module="search.py",
+        old="term_counts(terms, self._scope)\n        weights",
+        new="term_counts(terms, None)\n        weights",
+        tests="test_another_roots_words_do_not_reweigh_this_roots_query",
+    ),
+    Mutation(
+        name="rarity: count by the index alone whatever else the database holds",
+        module="db.py",
+        old="                outside = scope is not None and bool(",
+        new="                outside = False and bool(",
+        tests="test_term_counts_are_a_roots_own_whatever_else_the_database_holds",
+    ),
+    Mutation(
+        name="rarity: count a scope's matches in every root",
+        module="db.py",
+        old='"WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ?",',
+        new='"WHERE sections_fts MATCH ? AND ? = ?",',
+        tests="test_term_counts_are_a_roots_own_whatever_else_the_database_holds",
+    ),
+    Mutation(
+        name="rarity: count a scope's sections in every root",
+        module="db.py",
+        old='                        "WHERE substr(d.file_path, 1, length(?)) = ?",',
+        new='                        "WHERE ? = ?",',
+        tests="test_term_counts_are_a_roots_own_whatever_else_the_database_holds",
     ),
     Mutation(
         name="identifiers: keep a backtick a sentence's full stop left behind",

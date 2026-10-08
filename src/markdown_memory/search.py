@@ -291,6 +291,14 @@ def _is_identifier_lookup(terms: Sequence[str]) -> bool:
     return 0 < len(terms) < _MAX_QUERY_TERMS and all(_is_identifier(term) for term in terms)
 
 
+def _rare(total: int) -> int:
+    """How many of ``total`` sections an identifier may be found in and still be one.
+
+    The keyword gate and the identifier lookup both judge by this, so they cannot disagree.
+    """
+    return max(IDENTIFIER_MAX_SECTIONS, int(total * IDENTIFIER_MAX_SHARE))
+
+
 _SENTENCE_PUNCTUATION = "\"'()[]{}<>?!.,;:"
 
 
@@ -678,8 +686,8 @@ class HybridSearcher:
         stale = len(texts) < len(ranking)
         if not texts:
             return _Keyword([], "matched", stale=stale)
-        total = self._db.count_rows("sections")
-        rare = max(IDENTIFIER_MAX_SECTIONS, int(total * IDENTIFIER_MAX_SHARE))
+        total, frequencies = self._db.term_counts(terms, self._scope)
+        rare = _rare(total)
         literals = [_Literal(term) for term in terms]
         found = {
             literal: {sid for sid, (_, text) in texts.items() if literal.found(text)}
@@ -694,10 +702,7 @@ class HybridSearcher:
             cannot judge rarity - `--files` matches "files" 495 times and names the flag 7.
             """
             checked = max(1, len(self._db.fts_matching(term, list(texts))))
-            everywhere = self._db.fts_document_frequency(term)  # every root in the database
-            if everywhere <= checked:
-                return 1.0
-            return max(1.0, len(self._db.fts_search(term, everywhere, self._scope)) / checked)
+            return max(1.0, frequencies[term] / checked)
 
         wanted = [
             literal
@@ -749,20 +754,19 @@ class HybridSearcher:
         """Keep the hits whose matched terms carry >= ``KEYWORD_GATE`` of the query's IDF."""
         if len(terms) < 2 or not hits:
             return hits
-        total = self._db.count_rows("sections")
+        # Counted in this root, like the lookup's rarity: another root's words weigh nothing here.
+        total, frequencies = self._db.term_counts(terms, self._scope)
         weights: dict[str, float] = {}
-        frequencies: dict[str, int] = {}
         matched: dict[str, set[int]] = {}
         for term in terms:
-            frequency = self._db.fts_document_frequency(term)
+            frequency = frequencies[term]
             weights[term] = math.log(1 + (total - frequency + 0.5) / (frequency + 0.5))
             matched[term] = self._db.fts_matching(term, hits) if frequency else set()
-            frequencies[term] = frequency
         budget = sum(weights.values()) or 1.0
         # A term that merely looks like an identifier ("HTTP", "RAM", "2024") and occurs
-        # all over the corpus is vocabulary: admitting every section that mentions it is
+        # all over this root is vocabulary: admitting every section that mentions it is
         # exactly the noise this gate exists to remove. It still counts towards coverage.
-        rare = max(IDENTIFIER_MAX_SECTIONS, int(total * IDENTIFIER_MAX_SHARE))
+        rare = _rare(total)
         exact: set[int] = set()
         for term in terms:
             if _is_identifier(term) and frequencies[term] <= rare:
