@@ -354,10 +354,125 @@ class TestTheCostReport:
             logging.disable(logging.NOTSET)
         recorded = json.loads((tmp_path / "eval_data" / "baseline.json").read_text())
         fields = set(recorded["embeddinggemma"]["dev/paraphrase"])
-        assert fields == {"top1", "top3", "top5", "any_valid_top1", "ndcg5", "median_ms", "p95_ms"}
+        assert fields == {
+            "top1", "top3", "top5", "any_valid_top1", "ndcg5", "median_ms", "p95_ms",
+            "cases_sha256",
+        }  # fmt: skip
 
     def test_p95_is_the_same_rule_for_latency_and_cost(self, evaluation: object) -> None:
         assert evaluation._p95([float(n) for n in range(1, 21)]) == 19.0  # type: ignore[attr-defined]
+
+
+class TestTheBaselineNamesItsQueries:
+    """#116: a delta is printed only against a baseline scored on the same cases.
+
+    #105 replaced two corpus_v2 held-out sets in place; the baseline recorded on the retired
+    queries then read as a 30-point regression of the new ones.
+    """
+
+    # Sets whose committed baseline was scored on other cases than today's, and why. Each
+    # stays here until its baseline is re-recorded.
+    STALE = {
+        ("embeddinggemma@v2", "held_out/paraphrase"): "replaced by #105; #80 undecided; #118",
+        ("embeddinggemma@v2", "held_out/identifier"): "replaced by #105; #80 undecided; #118",
+    }
+
+    @pytest.fixture
+    def evaluation(self) -> object:
+        import eval_retrieval
+
+        return eval_retrieval
+
+    @staticmethod
+    def queries() -> dict[str, dict[str, list[dict[str, object]]]]:
+        case = {"query": "how do I retry", "expected": "a.md::A > B", "shape": "question"}
+        return {"dev": {"paraphrase": [case], "identifier": [dict(case, query="RETRY_MAX")]}}
+
+    def test_a_delta_is_printed_only_against_the_same_cases(
+        self, evaluation: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        queries = self.queries()
+        numbers = dict.fromkeys(evaluation.ACCURACY_FIELDS, 0.25) | {"median_ms": 1.0}
+        other = dict(queries, dev={"paraphrase": [{"query": "a retired question"}]})
+        fingerprint = evaluation.cases_sha256
+        baseline = {
+            "p": {
+                "dev/paraphrase": numbers
+                | {"cases_sha256": fingerprint(queries, "dev/paraphrase")},
+                "dev/identifier": numbers | {"cases_sha256": fingerprint(other, "dev/paraphrase")},
+                "held_out/paraphrase": numbers,
+            }
+        }
+        monkeypatch.setattr(evaluation, "BASELINE", tmp_path / "baseline.json")
+        evaluation.BASELINE.write_text(json.dumps(baseline))
+        queries["held_out"] = {"paraphrase": []}
+        scores = {name: _passing_scores(evaluation) for name in baseline["p"]}
+        evaluation.print_deltas("p", scores, queries)
+        lines = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()[2:]}
+        assert "top1 +75pp" in lines["dev/paraphrase"]
+        assert lines["dev/identifier"].endswith("scored on other queries (re-record it)")
+        assert lines["held_out/paraphrase"].endswith("does not say which queries it scored")
+        assert "pp" not in lines["dev/identifier"] + lines["held_out/paraphrase"]
+
+    def test_the_fingerprint_follows_every_field_of_a_case_and_no_key_order(
+        self, evaluation: Any
+    ) -> None:
+        queries = self.queries()
+        case = queries["dev"]["paraphrase"][0]
+        same = dict(reversed(list(case.items())))
+        assert evaluation.cases_sha256(queries, "dev/paraphrase") == evaluation.cases_sha256(
+            {"dev": {"paraphrase": [same]}}, "dev/paraphrase"
+        )
+        for field, value in (
+            ("query", "how do I retry twice"), ("expected", "a.md::A > C"),
+            ("shape", "identifier"), ("also_valid", {"a.md::A": 1}),
+        ):  # fmt: skip
+            edited = {"dev": {"paraphrase": [dict(case, **{field: value})]}}
+            assert evaluation.cases_sha256(edited, "dev/paraphrase") != evaluation.cases_sha256(
+                queries, "dev/paraphrase"
+            ), field
+
+    def test_another_label_file_gets_no_delta_for_a_set_it_changes(
+        self, evaluation: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        labels = json.loads((evaluation.DATA / "queries.json").read_text())
+        labels["dev"]["paraphrase"][0]["query"] += " (edited)"
+        edited = tmp_path / "labels.json"
+        edited.write_text(json.dumps(labels))
+        monkeypatch.setattr(evaluation, "evaluate", lambda *_args: _passing_scores(evaluation))
+        monkeypatch.setattr(sys, "argv", ["eval_retrieval.py", "--queries", str(edited)])
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        stub = _EvalStubService(ServerConfig(db_path=tmp_path / "x.db", docs_dir=tmp_path))
+        monkeypatch.setattr(evaluation, "open_service", lambda *_args: (stub, False))
+        monkeypatch.setattr(evaluation, "resolve_answers", lambda *_args: {})
+        monkeypatch.setattr(evaluation, "measure_costs", lambda *_args: {})
+        monkeypatch.setattr(evaluation, "_payloads", lambda _service, qs: tuple(0 for _ in qs))
+        try:
+            assert evaluation.main() == 0
+        finally:
+            logging.disable(logging.NOTSET)
+        out = capsys.readouterr().out
+        assert "dev/paraphrase         no delta: the baseline was scored on other queries" in out
+        assert "dev/identifier         top1 " in out
+
+    def test_every_committed_baseline_names_the_cases_it_was_scored_on(
+        self, evaluation: Any
+    ) -> None:
+        baseline = json.loads(evaluation.BASELINE.read_text())
+        stale, checked = set(), set()
+        for corpus in evaluation.corpora().values():
+            queries = json.loads(corpus.queries.read_text())
+            for preset in baseline:
+                if corpus.baseline_key(preset.split("@")[0]) != preset:
+                    continue
+                checked.add(preset)
+                for name, entry in baseline[preset].items():
+                    if entry["cases_sha256"] != evaluation.cases_sha256(queries, name):
+                        stale.add((preset, name))
+        assert checked == set(baseline)
+        assert stale == set(self.STALE)
 
 
 class TestTheRealDocsCorpus:
