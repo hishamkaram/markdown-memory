@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import re
@@ -850,11 +851,14 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
     ) -> None:
         """#88: the headline prices the whole call, which only the real model can produce.
 
-        The ranking comes from 4-bit kernels that differ between CPUs, so where this machine
-        ranks the worked example differently the figure cannot be checked here and is skipped,
-        not failed. Where it ranks the same, the call must cost what the README says. The
-        documentation root's own path is left out: the call names it in full, and it is
-        wherever the reader checked the repository out.
+        The model chooses more than the ranking: which passage the excerpt is cut around, and
+        which passage each pointer quotes. Its 4-bit kernels differ between CPUs - an arm64
+        runner ranked the five hits the same and still sent 738 tokens, not 608 - so where this
+        machine chooses differently the figure cannot be checked here and is skipped, not
+        failed. Where it chooses the same, the call must cost what the README says. Line
+        numbers are not choices: an edit above these sections moves them, and the figure is
+        checked again rather than skipped. The documentation root's own path is left out: the
+        call names it in full, and it is wherever the reader checked the repository out.
         """
         import make_diagram
 
@@ -884,6 +888,19 @@ class TestTheDiagramStillMeasuresTheFilesItClaimsTo:
         ranked = [(hit["file_path"], hit["heading_path"]) for hit in payload["results"]]
         if ranked != shown:
             pytest.skip(f"this machine ranks the worked example differently: {ranked}")
+        chosen = [
+            [
+                hit["heading_path"],
+                hit["content"] if hit.get("excerpt") else hit.get("matched_passage"),
+            ]
+            for hit in payload["results"]
+        ]
+        choices = hashlib.sha256(json.dumps(chosen).encode()).hexdigest()[:16]
+        if choices != make_diagram.CALL_CHOICES:
+            pytest.skip(
+                f"this machine cuts the excerpt or quotes a pointer differently (choices "
+                f"{choices}, measured with {make_diagram.CALL_CHOICES}): {chosen}"
+            )
         # Re-encoded with the server's own encoder, which must give back the text it sent, so
         # the root is removed as a field - whatever characters its path holds - and nothing else.
         assert server_json(payload) == text

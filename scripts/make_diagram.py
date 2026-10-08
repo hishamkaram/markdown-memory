@@ -86,10 +86,13 @@ RIGHT_HITS = [
 EXCERPT_ANCHOR = 0
 EXCERPT_TOKENS = 275
 # What the whole search_docs call sends for that query - the excerpt, the pointers and
-# index_status - but without the absolute path of the documentation root, which the call names and
-# which differs between checkouts (#88). Measured with the real model; the embedding test in
-# tests/test_agent_docs.py measures it again wherever the worked example ranks the same.
+# index_status - but without the absolute path of the documentation root, which the call names
+# and which differs between checkouts (#88). Measured with the real model, which also chose the
+# ranking, the excerpt and each pointer's matched passage; CALL_CHOICES fingerprints those
+# choices, and the embedding test in tests/test_agent_docs.py measures the call again wherever
+# the model makes the same ones.
 CALL_TOKENS = 608
+CALL_CHOICES = "9e4d7235f000f893"
 MAX_TOKENS = max(tokens for _, tokens in LEFT_FILES)
 # Every figure the drawing prints is derived from the two lists above - the totals, the
 # caption and the aria-label alike. Writing any of them out by hand is how the caption and
