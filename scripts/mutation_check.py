@@ -3056,6 +3056,44 @@ MUTATIONS = (
         tests="test_plain_call_definition_wins",
     ),
     Mutation(
+        name="calls: search a call written with arguments as the whole expression",
+        module="search.py",
+        old="        _called(term)\n",
+        new="        term\n",
+        tests="test_a_call_written_with_arguments_is_answered_by_its_definition",
+    ),
+    Mutation(
+        name="calls: read any parenthesised word as a call",
+        module="search.py",
+        old="        or not any(\n",
+        new="        or False and not any(\n",
+        tests="test_plain_call_syntax_does_not_expand_other_queries",
+    ),
+    Mutation(
+        name="calls: miss a call written in backticks or ending a question",
+        module="search.py",
+        old="    call = _CALL_WITH_ARGUMENTS.fullmatch(_unwrapped(term))\n",
+        new="    call = _CALL_WITH_ARGUMENTS.fullmatch(term)\n",
+        tests="test_a_call_written_with_arguments_is_answered_by_its_definition",
+    ),
+    Mutation(
+        name="calls: miss a call whose closing parenthesis is in another piece",
+        module="search.py",
+        old='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)", re.DOTALL)',
+        new='_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\\((.+)\\)", re.DOTALL)',
+        tests="test_a_call_written_with_arguments_is_searched_as_the_call",
+    ),
+    Mutation(
+        name="calls: rank an argument call against the call it is an argument of",
+        module="search.py",
+        old='        or call[2].count(")") > call[2].count("(") + 1\n',
+        new="",
+        tests=(
+            "test_a_call_written_with_arguments_is_searched_as_the_call"
+            " or test_a_call_written_with_arguments_is_answered_by_its_definition"
+        ),
+    ),
+    Mutation(
         name="calls: discard stopword-named calls",
         module="search.py",
         old="if _is_plain_call(term) or not word.isalpha()",

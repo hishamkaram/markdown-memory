@@ -201,7 +201,9 @@ def fts_terms(query: str) -> list[str]:
     ranks sections matching more (and rarer) terms first.
     """
     terms = [
-        term for term in _sanitize(query).split() if any(character.isalnum() for character in term)
+        _called(term)
+        for term in _sanitize(query).split()
+        if any(character.isalnum() for character in term)
     ]
     # Stopwords go first, duplicates second: "where is the WHERE clause" must keep the
     # keyword even though its lower-case twin (a stopword) came earlier.
@@ -225,11 +227,42 @@ def _without_duplicates(terms: Iterable[str]) -> list[str]:
 _IDENTIFIER_MARKS = frozenset("_./\\:@#$=")
 
 
+def _unwrapped(term: str) -> str:
+    """``term`` without the quotes or backticks around it, or the punctuation ending a sentence."""
+    return term.strip("\"'`").rstrip("?!,;:").removesuffix(".").strip("\"'`")
+
+
 def _is_plain_call(term: str) -> bool:
     """`rate()`: a name and an empty call, as an agent writes a function it means."""
-    term = term.strip("\"'`")
-    term = term.rstrip("?!,;:").removesuffix(".").strip("\"'`")
-    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", term) is not None
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", _unwrapped(term)) is not None
+
+
+# A name, `(`, and something in it; the `)` may have gone to the next whitespace piece.
+_CALL_WITH_ARGUMENTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\((.+)", re.DOTALL)
+
+
+def _called(term: str) -> str:
+    """`rate(x[5m])` is searched as the call `rate()` (#96).
+
+    Written whole, it is one FTS5 phrase - `rate x 5m` - that no document holds unless it uses
+    that very metric and range; and as the digit makes it an identifier, finding nothing empties
+    the page. The function is what the documentation describes, so the name is what is looked
+    for, with the call boundary #79 gave `rate()`. Only when the arguments read as code - a
+    digit, an identifier mark or a bracket: `flag(s)` and `abs(v)` stay what they were. A piece
+    closing more than it opens - `rate(x[5m]))` of `histogram_quantile(0.9, rate(x[5m]))` - is an
+    argument of the call asked about, and is not made a call of its own to compete with it.
+    """
+    call = _CALL_WITH_ARGUMENTS.fullmatch(_unwrapped(term))
+    if (
+        call is None
+        or call[2].count(")") > call[2].count("(") + 1
+        or not any(
+            character.isdigit() or character in _IDENTIFIER_MARKS or character in "[]{}"
+            for character in call[2]
+        )
+    ):
+        return term
+    return call[1] + "()"
 
 
 def _is_identifier(quoted_term: str) -> bool:
