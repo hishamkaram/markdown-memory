@@ -118,8 +118,35 @@ them, not pooled, because its competing-tool rule is a different condition.
 - Stop and redesign if more than 10% of sessions fail to publish a result, or if any
   repository's index reports coverage other than `verified` at the start.
 
+## Amendment 1 (2026-10-09, before the rerun)
+
+The first 10 sessions (5 uv tasks x 2 agents) ran under the frozen setup above and showed that
+the setup could not measure adoption: the server was registered and connected, but **neither
+agent could call it**.
+
+- Claude in Delegate's `read-only` mode runs in plan mode, which denies MCP calls whatever the
+  allow rules say ("Cannot call ... while in plan mode"). The auto-mode classifier also denied
+  read-only `grep`/`rg` pipelines in 4 of 5 sessions.
+- Codex `exec` runs with approval policy `never`, so an MCP call that needs approval fails
+  ("MCP tool call requires approval, but approval policy is never").
+
+Those 10 sessions are reported separately as the *permission-denied* condition and are not
+pooled. All 120 sessions are rerun from scratch under these changes, confirmed by a forced probe
+in a neutral one-file repository (both agents' `search_docs` succeeded there):
+
+| Item | Was | Now |
+| --- | --- | --- |
+| Claude permission | `read-only` (plan mode) | `workspace-write`, plus repository-local allow rules for the four retrieval tools and read-only `rg`/`grep`/`sed -n`/`head`/`cat`/`wc`/`ls`; `index_directory` is not allowed |
+| Codex permission | `read-only`, server tools need approval | `read-only` sandbox, `approval_mode = "approve"` for the four retrieval tools only |
+| Private repository | Primary checkout | A detached worktree at the same commit, pre-indexed like the others |
+| Edit check | None | `git status --porcelain` after every session; a session that changed a tracked file is reported and excluded |
+
+The allow rules are invisible to the model, so they do not nudge it towards the server. The
+private repository's Codex configuration pre-approves its code-graph server's tools, so there both
+agents have a pre-approved competing tool.
+
 ## Reporting
 
 Results go to #43 as a comment: per agent x repository cells, the measures above, the excluded
-sessions, and the forced probe if it ran. The private repository contributes counts and
+sessions, the permission-denied condition, and the forced probes. The private repository contributes counts and
 proportions only: no paths, identifiers, questions or answer text.
