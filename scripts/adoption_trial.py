@@ -124,10 +124,19 @@ def claude_init(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
 
 
 def init_ok(records: Sequence[Mapping[str, Any]]) -> bool:
-    """Our server is the only MCP server, it connected, and no plugin is loaded."""
+    """Our server is the only MCP server, it connected, and no plugin is loaded.
+
+    Claude Code's own built-in plugins (path `builtin`) ship with the agent build and load in
+    both arms alike, so they do not count (Amendment 1 of step-c.md).
+    """
     init = claude_init(records)
     servers = [(s.get("name"), s.get("status")) for s in init.get("mcp_servers") or []]
-    return servers == [(SERVER, "connected")] and not init.get("plugins")
+    added = [
+        p
+        for p in init.get("plugins") or []
+        if p.get("path") != "builtin" or not str(p.get("source", "")).endswith("@builtin")
+    ]
+    return servers == [(SERVER, "connected")] and not added
 
 
 def normalize_claude(lines: Iterable[str]) -> list[dict[str, Any]]:
