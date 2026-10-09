@@ -1,0 +1,364 @@
+{
+  "repository": "astral-sh/uv",
+  "commit": "f3e56e16e0302e26ea456cb51b676b35958572a0",
+  "built_with": "git grep and reading the Markdown at the commit; never markdown-memory",
+  "tasks": [
+    {
+      "id": "uv-01",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/indexes.md",
+          "section": "Package indexes > Pinning a package to an index",
+          "lines": "55-112"
+        },
+        {
+          "file": "docs/concepts/indexes.md",
+          "section": "Package indexes > Searching across multiple indexes",
+          "lines": "114-138"
+        }
+      ],
+      "answer": "Define the private index as a named `[[tool.uv.index]]` and pin the package to it with `[tool.uv.sources]` `pkg = { index = \"<name>\" }` (optionally `explicit = true` so the index serves only pinned packages); with the default `first-index` strategy a package found on that index is never taken from PyPI.",
+      "note": ""
+    },
+    {
+      "id": "uv-02",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/cache.md",
+          "section": "Caching > Cache directory",
+          "lines": "186-206"
+        },
+        {
+          "file": "docs/concepts/cache.md",
+          "section": "Caching > Clearing the cache",
+          "lines": "135-164"
+        }
+      ],
+      "answer": "Set `UV_CACHE_DIR` (or `--cache-dir` / `tool.uv.cache-dir`) to move the cache, and run `uv cache prune` to remove only unused cache entries (unlike `uv cache clean`, which removes everything).",
+      "note": ""
+    },
+    {
+      "id": "uv-03",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guides/integration/github.md",
+          "section": "Using uv in GitHub Actions > Caching",
+          "lines": "206-276"
+        },
+        {
+          "file": "docs/concepts/cache.md",
+          "section": "Caching > Caching in continuous integration",
+          "lines": "166-184"
+        }
+      ],
+      "answer": "Use `astral-sh/setup-uv` with `enable-cache: true`, or manage it with `actions/cache` on a constant `UV_CACHE_DIR` keyed on `hashFiles('uv.lock')`, and run `uv cache prune --ci` at the end of the job.",
+      "note": ""
+    },
+    {
+      "id": "uv-04",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guides/scripts.md",
+          "section": "Running scripts > Declaring script dependencies",
+          "lines": "148-218"
+        }
+      ],
+      "answer": "Run `uv add --script example.py <deps>` to write an inline `# /// script` metadata block with `dependencies = [...]` (and optionally `requires-python`), then `uv run example.py` builds an environment with those dependencies.",
+      "note": ""
+    },
+    {
+      "id": "uv-05",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guides/integration/pytorch.md",
+          "section": "Using uv with PyTorch > Using a PyTorch index",
+          "lines": "57-274"
+        },
+        {
+          "file": "docs/guides/integration/pytorch.md",
+          "section": "Using uv with PyTorch > Installing PyTorch",
+          "lines": "19-55"
+        }
+      ],
+      "answer": "Add a `[[tool.uv.index]]` for the CUDA wheel index (e.g. `name = \"pytorch-cu130\"`, `url = \"https://download.pytorch.org/whl/cu130\"`, `explicit = true`) and point `torch`/`torchvision` at it in `[tool.uv.sources]`, gated with a `sys_platform` marker for Linux/Windows.",
+      "note": ""
+    },
+    {
+      "id": "uv-06",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/tools.md",
+          "section": "Tools > The `uv tool` interface",
+          "lines": "10-22"
+        },
+        {
+          "file": "docs/concepts/tools.md",
+          "section": "Tools > Execution vs installation",
+          "lines": "24-29"
+        },
+        {
+          "file": "docs/concepts/tools.md",
+          "section": "Tools > Tool environments",
+          "lines": "31-45"
+        }
+      ],
+      "answer": "`uvx` (an alias of `uv tool run`) runs a tool in a temporary, disposable environment kept in the uv cache, while `uv tool install` creates a persistent environment in the tools directory and puts the tool's executables on the `PATH` until it is uninstalled.",
+      "note": ""
+    },
+    {
+      "id": "uv-07",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/projects/sync.md",
+          "section": "Locking and syncing > Automatic lock and sync",
+          "lines": "7-33"
+        },
+        {
+          "file": "docs/concepts/projects/sync.md",
+          "section": "Locking and syncing > Checking the lockfile",
+          "lines": "35-56"
+        }
+      ],
+      "answer": "Pass `--locked` (e.g. `uv sync --locked`), which raises an error instead of updating an out-of-date lockfile, or run `uv lock --check`.",
+      "note": ""
+    },
+    {
+      "id": "uv-08",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/projects/workspaces.md",
+          "section": "Using workspaces > Workspace sources",
+          "lines": "59-124"
+        },
+        {
+          "file": "docs/concepts/projects/dependencies.md",
+          "section": "Managing dependencies > Dependency sources > Workspace member",
+          "lines": "473-498"
+        }
+      ],
+      "answer": "List the member in `project.dependencies` and add it to `[tool.uv.sources]` with `{ workspace = true }` (e.g. `bird-feeder = { workspace = true }`); such dependencies are editable.",
+      "note": ""
+    },
+    {
+      "id": "uv-09",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/authentication/certificates.md",
+          "section": "TLS certificates > System certificates",
+          "lines": "18-31"
+        }
+      ],
+      "answer": "Pass `--system-certs`, set `UV_SYSTEM_CERTS=true`, or set `system-certs = true` in `uv.toml` so uv uses the platform's native certificate store instead of its bundled Mozilla roots.",
+      "note": ""
+    },
+    {
+      "id": "uv-10",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/projects/build.md",
+          "section": "Building distributions > Preventing publish to PyPI",
+          "lines": "81-94"
+        }
+      ],
+      "answer": "Add the classifier `\"Private :: Do Not Upload\"` to `[project] classifiers`, which makes PyPI reject the upload (and use per-project PyPI API tokens).",
+      "note": ""
+    },
+    {
+      "id": "uv-11",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/projects/export.md",
+          "section": "Exporting a lockfile > Overview of export formats",
+          "lines": "14-41"
+        },
+        {
+          "file": "docs/concepts/projects/export.md",
+          "section": "Exporting a lockfile > `requirements.txt` format > Basic usage",
+          "lines": "48-62"
+        }
+      ],
+      "answer": "Run `uv export --format requirements.txt --output-file requirements.txt` (without `--output-file` it prints to stdout).",
+      "note": ""
+    },
+    {
+      "id": "uv-12",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guides/integration/aws.md",
+          "section": "AWS CodeArtifact > Authenticate with an AWS access token",
+          "lines": "24-55"
+        },
+        {
+          "file": "docs/guides/integration/aws.md",
+          "section": "AWS CodeArtifact > Authenticate with `keyring` and `keyrings.codeartifact`",
+          "lines": "57-89"
+        }
+      ],
+      "answer": "Generate a token with `aws codeartifact get-authorization-token` and set `UV_INDEX_<NAME>_USERNAME=aws` and `UV_INDEX_<NAME>_PASSWORD` to it for the named index (or use `keyring` with `keyrings.codeartifact` and `UV_KEYRING_PROVIDER=subprocess`).",
+      "note": ""
+    },
+    {
+      "id": "uv-13",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guides/integration/docker.md",
+          "section": "Using uv in Docker > Optimizations > Intermediate layers",
+          "lines": "394-430"
+        },
+        {
+          "file": "docs/guides/integration/docker.md",
+          "section": "Using uv in Docker > Optimizations > Caching",
+          "lines": "355-392"
+        }
+      ],
+      "answer": "First run `uv sync --frozen --no-install-project` with only `uv.lock` bind-mounted (and a cache mount on `/root/.cache/uv`), then `COPY` the project and run `uv sync --locked`, so the dependency layer is reused while the project changes.",
+      "note": ""
+    },
+    {
+      "id": "uv-14",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/projects/config.md",
+          "section": "Configuring projects > Conflicting dependencies",
+          "lines": "568-599"
+        },
+        {
+          "file": "docs/concepts/resolution.md",
+          "section": "Resolution > Conflicting dependencies",
+          "lines": "612-779"
+        }
+      ],
+      "answer": "Declare them under `[tool.uv]` as `conflicts = [[{ extra = \"extra1\" }, { extra = \"extra2\" }]]`, so uv resolves them separately (and refuses to install both together).",
+      "note": ""
+    },
+    {
+      "id": "uv-15",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/preview.md",
+          "section": "Preview features > Enabling preview features",
+          "lines": "6-57"
+        }
+      ],
+      "answer": "Use `--preview-features <name>` (or `UV_PREVIEW_FEATURES`, or `preview-features = [\"<name>\"]` in `uv.toml`/`[tool.uv]`) for a specific feature, or `--preview` / `UV_PREVIEW=1` for all of them.",
+      "note": ""
+    },
+    {
+      "id": "uv-16",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/concepts/python-versions.md",
+          "section": "Python versions > Requesting a version > Python version files",
+          "lines": "59-75"
+        },
+        {
+          "file": "docs/concepts/python-versions.md",
+          "section": "Python versions > Project Python versions",
+          "lines": "217-222"
+        }
+      ],
+      "answer": "Run `uv python pin <version>`, which writes a `.python-version` file that uv uses as the default request (within the project's `requires-python`).",
+      "note": ""
+    },
+    {
+      "id": "uv-17",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe a `UV_MAX_PARALLEL_BUILDS_PER_HOST` environment variable.",
+      "absence": [
+        {
+          "command": "git -C <clone> grep -n -i -e 'UV_MAX_PARALLEL_BUILDS_PER_HOST' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'MAX_PARALLEL_BUILDS' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'UV_CONCURRENT_BUILDS' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'per-host' -- '*.md'",
+          "result": "(no output)"
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "uv-18",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe mirroring downloaded packages to an S3 bucket.",
+      "absence": [
+        {
+          "command": "git -C <clone> grep -n -i -e 'S3 bucket' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 's3://' -- '*.md'",
+          "result": "docs/guides/integration/coiled.md:38 and :101 only (`\"s3://coiled-data/uber/part.0.parquet\",` in an example script) - unrelated"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'mirror' -- '*.md'",
+          "result": "16+ hits, none in docs/: CHANGELOG.md, changelogs/*.md, agents/* about Python/uv/Ruff download mirrors (e.g. changelogs/0.4.x.md:180 'Support `file://` URLs for `UV_PYTHON_INSTALL_MIRROR`') - unrelated to mirroring packages to S3"
+        }
+      ],
+      "note": "Not a label problem, but `s3://` and `mirror` are not empty: `s3://` hits only docs/guides/integration/coiled.md:38,101 (a script reading `s3://coiled-data/uber/part.0.parquet`), and `mirror` hits only CHANGELOG.md/changelogs/agents files about Python/uv release-download mirrors (e.g. CHANGELOG.md:24 'Support custom installation mirrors for GraalPy'); plain `S3` also hits changelogs/0.8.x.md:1041 'Add support for S3 request signing' and changelogs/0.9.x.md:818 'Enable uploads to S3 via pre-signed URLs'. None describes mirroring packages to S3; no hit in docs/ beyond coiled.md."
+    },
+    {
+      "id": "uv-19",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe any usage telemetry in uv or a way to turn it off.",
+      "absence": [
+        {
+          "command": "git -C <clone> grep -n -i -e 'telemetry' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'analytics' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'DO_NOT_TRACK' -- '*.md'",
+          "result": "(no output)"
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "uv-20",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe a `uv doctor` command.",
+      "absence": [
+        {
+          "command": "git -C <clone> grep -n -i -e 'uv doctor' -- '*.md'",
+          "result": "(no output)"
+        },
+        {
+          "command": "git -C <clone> grep -n -i -e 'doctor' -- '*.md'",
+          "result": "(no output)"
+        }
+      ],
+      "note": ""
+    }
+  ]
+}

@@ -1,0 +1,317 @@
+{
+  "repository": "vitejs/vite",
+  "commit": "7a89794331526a67bc9b29047b86957c581c128c",
+  "built_with": "git grep and reading the Markdown at the commit; never markdown-memory",
+  "tasks": [
+    {
+      "id": "vite-01",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/env-and-mode.md",
+          "section": "Env Variables and Modes > Env Variables",
+          "lines": "32-61"
+        },
+        {
+          "file": "docs/config/shared-options.md",
+          "section": "Shared Options > envPrefix",
+          "lines": "589-608"
+        }
+      ],
+      "answer": "Only variables prefixed with `VITE_` are exposed to client code via `import.meta.env`; the prefix is changed with the `envPrefix` option (string or string[], default `VITE_`, must not be `''`).",
+      "note": ""
+    },
+    {
+      "id": "vite-02",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/config/server-options.md",
+          "section": "Server Options > server.proxy",
+          "lines": "102-168"
+        }
+      ],
+      "answer": "Configure `server.proxy` in vite.config, e.g. `'/api': { target: 'http://backend', changeOrigin: true, rewrite: (path) => path.replace(/^\\/api/, '') }` (or the string shorthand `'/api': 'http://host'`); requests whose path starts with the key are forwarded to the target.",
+      "note": ""
+    },
+    {
+      "id": "vite-03",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/build.md",
+          "section": "Building for Production > Library Mode",
+          "lines": "135-265"
+        },
+        {
+          "file": "docs/config/build-options.md",
+          "section": "Build Options > build.lib",
+          "lines": "187-211"
+        }
+      ],
+      "answer": "Use library mode via the `build.lib` option (`entry`, `name`, `fileName`, optional `formats`, default `['es','umd']`) and externalize dependencies you do not want bundled with `build.rolldownOptions.external` (plus `output.globals` for UMD).",
+      "note": ""
+    },
+    {
+      "id": "vite-04",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/static-deploy.md",
+          "section": "Deploying a Static Site > GitHub Pages",
+          "lines": "76-99"
+        }
+      ],
+      "answer": "Set `base` to `'/<REPO>/'` in vite.config.js when deploying to `https://<USERNAME>.github.io/<REPO>/`, then set Settings > Pages > Source to GitHub Actions and add a `.github/workflows/deploy.yml` workflow that builds and deploys.",
+      "note": ""
+    },
+    {
+      "id": "vite-05",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/dep-pre-bundling.md",
+          "section": "Dependency Pre-Bundling > Caching > File System Cache",
+          "lines": "64-76"
+        }
+      ],
+      "answer": "Start the dev server with the `--force` flag, or delete the `node_modules/.vite` cache directory (the config equivalent is `optimizeDeps.force: true`).",
+      "note": "The config option is documented separately in docs/config/dep-optimization-options.md, 'Dependency Optimization Options > optimizeDeps.force' (lines 71-76); the CLI flag also appears in docs/guide/cli.md `vite` options table (line 24)."
+    },
+    {
+      "id": "vite-06",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/api-hmr.md",
+          "section": "HMR API > Required Conditional Guard",
+          "lines": "53-62"
+        },
+        {
+          "file": "docs/guide/api-hmr.md",
+          "section": "HMR API > `hot.accept(cb)`",
+          "lines": "75-118"
+        }
+      ],
+      "answer": "Call `import.meta.hot.accept((newModule) => { ... })` (written exactly as `import.meta.hot.accept(` for Vite's static analysis) inside an `if (import.meta.hot) { ... }` block, because the guard lets the HMR code be tree-shaken out of the production build.",
+      "note": ""
+    },
+    {
+      "id": "vite-07",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/performance.md",
+          "section": "Performance > Avoid Barrel Files",
+          "lines": "58-71"
+        }
+      ],
+      "answer": "Avoid barrel files (index files that re-export a directory): importing one API from a barrel forces Vite to fetch and transform every file it re-exports, so import the individual module directly, e.g. `import { slash } from './utils/slash.js'`.",
+      "note": "The docs frame barrel files as slowing the initial page load (more files fetched and transformed), not server start-up itself."
+    },
+    {
+      "id": "vite-08",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/assets.md",
+          "section": "Static Asset Handling > Importing Asset as URL > Importing Asset as String",
+          "lines": "70-79"
+        }
+      ],
+      "answer": "Append the `?raw` suffix to the import, e.g. `import shaderString from './shader.glsl?raw'`.",
+      "note": ""
+    },
+    {
+      "id": "vite-09",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/config/server-options.md",
+          "section": "Server Options > server.allowedHosts",
+          "lines": "32-62"
+        }
+      ],
+      "answer": "`server.allowedHosts` lists the hostnames the dev server may respond to (a leading `.` allows a domain and all subdomains; `true` allows any host but is unsafe due to DNS rebinding); the `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` env variable can add more.",
+      "note": ""
+    },
+    {
+      "id": "vite-10",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/config/ssr-options.md",
+          "section": "SSR Options > ssr.noExternal",
+          "lines": "16-26"
+        },
+        {
+          "file": "docs/guide/ssr.md",
+          "section": "Server-Side Rendering (SSR) > SSR Externals",
+          "lines": "270-281"
+        }
+      ],
+      "answer": "Add the dependency to `ssr.noExternal` (string, RegExp or array), which prevents it from being externalized so it is processed and bundled by Vite.",
+      "note": ""
+    },
+    {
+      "id": "vite-11",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/build.md",
+          "section": "Building for Production > Multi-Page App",
+          "lines": "101-134"
+        }
+      ],
+      "answer": "In dev just navigate to the nested `/nested/` path; for build specify each `.html` file as an entry in `input` (e.g. `input: { main: resolve(import.meta.dirname, 'index.html'), nested: resolve(import.meta.dirname, 'nested/index.html') }`).",
+      "note": ""
+    },
+    {
+      "id": "vite-12",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/build.md",
+          "section": "Building for Production > Load Error Handling",
+          "lines": "73-84"
+        }
+      ],
+      "answer": "Listen for the `vite:preloadError` window event (e.g. reload the page, optionally calling `event.preventDefault()` to suppress the throw) and serve the HTML with `Cache-Control: no-cache` so old assets are not referenced.",
+      "note": ""
+    },
+    {
+      "id": "vite-13",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/api-plugin.md",
+          "section": "Plugin API > Plugin Ordering",
+          "lines": "628-641"
+        }
+      ],
+      "answer": "Set `enforce: 'pre'` on the plugin; user plugins with `enforce: 'pre'` run after Alias but before Vite core plugins.",
+      "note": ""
+    },
+    {
+      "id": "vite-14",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/config/build-options.md",
+          "section": "Build Options > build.target",
+          "lines": "5-18"
+        },
+        {
+          "file": "docs/guide/build.md",
+          "section": "Building for Production > Browser Compatibility",
+          "lines": "7-30"
+        }
+      ],
+      "answer": "`build.target` defaults to `'baseline-widely-available'`, i.e. `['chrome111', 'edge111', 'firefox114', 'safari16.4', 'ios16.4']` (Baseline Widely Available as of 2026-01-01 for this major).",
+      "note": ""
+    },
+    {
+      "id": "vite-15",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/config/index.md",
+          "section": "Configuring Vite > Using Environment Variables in Config",
+          "lines": "102-130"
+        },
+        {
+          "file": "docs/guide/api-javascript.md",
+          "section": "JavaScript API > `loadEnv`",
+          "lines": "360-375"
+        }
+      ],
+      "answer": "`.env*` files are not loaded into `process.env` while the config runs; export the config as a function and call `loadEnv(mode, process.cwd(), '')` (third argument `''` loads all variables regardless of the `VITE_` prefix).",
+      "note": ""
+    },
+    {
+      "id": "vite-16",
+      "answerable": true,
+      "sources": [
+        {
+          "file": "docs/guide/api-javascript.md",
+          "section": "JavaScript API > `createServer`",
+          "lines": "5-71"
+        }
+      ],
+      "answer": "Import `createServer` from 'vite', call `const server = await createServer({ ...inline config })`, then `await server.listen()` (and optionally `server.printUrls()`).",
+      "note": ""
+    },
+    {
+      "id": "vite-17",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe a `server.compressResponses` option.",
+      "absence": [
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e compressResponses -- '*.md'",
+          "result": "empty"
+        },
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e compression -- '*.md'",
+          "result": "2 unrelated hits: docs/config/build-options.md:310 (build.minify: Oxc Minifier '0.5 ~ 2% worse compression') and packages/vite/LICENSE.md:85 ('## @polka/compression' bundled-dependency licence heading); neither describes a server response-compression option"
+        }
+      ],
+      "note": "No server compression option exists in the docs; synonym hits are build-time minification and a bundled licence entry, not a label problem."
+    },
+    {
+      "id": "vite-18",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe deploying a Vite app to Fly.io (docs/guide/static-deploy.md has no Fly.io section).",
+      "absence": [
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e fly.io -- '*.md'",
+          "result": "empty"
+        },
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e flyctl -- '*.md'",
+          "result": "empty"
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "vite-19",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe any Vite usage telemetry or a way to turn it off.",
+      "absence": [
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e telemetry -- '*.md'",
+          "result": "empty"
+        },
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e 'usage data' -- '*.md'",
+          "result": "empty"
+        },
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e analytics -- '*.md'",
+          "result": "empty"
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "vite-20",
+      "answerable": false,
+      "sources": [],
+      "answer": "The documentation does not describe a `vite doctor` command (docs/guide/cli.md lists only `vite`, `vite build`, `vite optimize` and `vite preview`).",
+      "absence": [
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e 'vite doctor' -- '*.md'",
+          "result": "empty"
+        },
+        {
+          "command": "git -C /tmp/claude-1000/-home-hesham-Active-Projects-markdown-memory/3da2a647-189b-4f31-82b1-c4aa93408a9e/scratchpad/i126/repos/vite grep -n -i -e doctor -- '*.md'",
+          "result": "empty"
+        }
+      ],
+      "note": ""
+    }
+  ]
+}
