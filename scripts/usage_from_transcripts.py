@@ -22,7 +22,9 @@ Reported, per Claude session (a subagent's transcript belongs to its parent's se
 * every ``mcp__*markdown*`` call, and the retrieval calls that failed;
 * after each search: a ``Read`` of a file the search itself returned (the *same-file
   fallback*), any other Markdown access, another search, and reformulation *chains*;
-* the estimated size of every result that entered the agent's context, per tool.
+* the estimated size of every result that entered the agent's context, per tool;
+* the output of shell commands that read Markdown, sized on a row of its own and kept out
+  of the per-session total, since it can hold text that is not the Markdown.
 
 Nothing here is a relevance judgement. A read after a search means the agent opened
 something, not that the answer was right; these are behaviours, and the labels come from
@@ -67,13 +69,16 @@ MARKDOWN_TOKEN = re.compile(r"[^\s'\"`;|&<>()]+\.mdx?\b", re.IGNORECASE)
 SCRATCH = tuple(
     sorted({"/tmp", tempfile.gettempdir(), os.path.join(os.path.expanduser("~"), ".claude")})
 )
-ROWS = (*RETRIEVAL_TOOLS, "Read (Markdown)", "Grep (Markdown)")
+SHELL_ROW = "Bash (Markdown)"
+ROWS = (*RETRIEVAL_TOOLS, "Read (Markdown)", "Grep (Markdown)", SHELL_ROW)
 ESTIMATOR = (
     "Sizes are estimates of what entered the agent's context: characters / 4, the "
     "estimate_tokens rule the server and the eval use - not billed tokens, and not a "
     "saving. It under-counts JSON, paths and code; a Read result includes its line "
     "numbers; a client-capped listing measures the cap; non-text and unpaired results are "
-    "left out, not counted as zero; Markdown access through Bash is matched approximately."
+    "left out, not counted as zero; Markdown access through Bash is matched approximately, "
+    "and its output - which can include text that is not the Markdown - is sized on its own "
+    "row and kept out of the per-session total."
 )
 
 
@@ -128,6 +133,7 @@ class Report:
     silent_sessions: int = 0
     retrieval_calls_in_documentation_sessions: int = 0
     documentation_tokens_per_session: list[int] = field(default_factory=list)
+    shell_tokens_per_session: list[int] = field(default_factory=list)
     server_calls: Counter[str] = field(default_factory=Counter)
     failures: int = 0
     searches: int = 0
@@ -155,6 +161,7 @@ class Report:
                 self.retrieval_calls_in_documentation_sessions
             ),
             "documentation_tokens_per_session": _stats(self.documentation_tokens_per_session),
+            "shell_tokens_per_session": _stats(self.shell_tokens_per_session),
             "server_calls": dict(self.server_calls),
             "failures": self.failures,
             "searches": self.searches,
@@ -404,6 +411,8 @@ def _row(call: Call) -> str | None:
         return "Read (Markdown)"
     if call.name == "Grep" and _reads_markdown(call):
         return "Grep (Markdown)"
+    if call.name == "Bash" and _reads_markdown(call):
+        return SHELL_ROW
     return None
 
 
@@ -477,10 +486,14 @@ def summarise(transcripts: Sequence[Transcript]) -> Report:
         if retrieval or by_hand:
             report.documentation_sessions += 1
             report.retrieval_calls_in_documentation_sessions += len(retrieval)
-            # Only the rows' results: a shell command's output is mostly not the Markdown it
-            # happened to name, so Bash reads count towards eligibility but not exposure.
+            # A shell command's output is mostly not the Markdown it happened to name, so
+            # it is sized beside this total, not in it (#129).
+            exposed = retrieval + by_hand
             report.documentation_tokens_per_session.append(
-                _tokens([call for call in retrieval + by_hand if _row(call)])
+                _tokens([call for call in exposed if _row(call) not in (None, SHELL_ROW)])
+            )
+            report.shell_tokens_per_session.append(
+                _tokens([call for call in by_hand if _row(call) == SHELL_ROW])
             )
             if retrieval:
                 report.documentation_sessions_with_a_call += 1
@@ -547,6 +560,11 @@ def print_report(report: Report) -> None:
         )
     exposure = _stats(report.documentation_tokens_per_session)
     print(f"documentation tokens per documentation-seeking session, median {exposure['median']}")
+    shell = _stats(report.shell_tokens_per_session)
+    print(
+        f"  shell output naming Markdown, not in that total: median {shell['median']}"
+        f" p90 {shell['p90']} (approximate)"
+    )
     print("\n" + ESTIMATOR)
     print("\nNone of these is a relevance judgement: a read means the agent opened")
     print("something, not that it was right. Read them before labelling them.")
