@@ -21,6 +21,8 @@ prints, each in isolation. `freeze` records, once and before any change is tuned
 items' whole sections answer - a strict majority of the judges saying "yes" - so the
 denominator does not move with the change being measured. `score` then judges each excerpt
 by the same majority and reports answer retention and expected cost against the gates.
+`latency` times search with excerpts on and off, and exits non-zero when the median or p95
+rises past its ceiling.
 Tune on `dev` only; a held-out set is run once, last.
 """
 
@@ -61,6 +63,8 @@ FLOOR_RETENTION = 0.95
 FLOOR_RETENTION_BOUND = 0.90  # one-sided 95% Wilson lower bound on retention
 CEILING_COST_RATIO = 0.90
 CEILING_COST_BOUND = 0.95  # one-sided 95% bootstrap upper bound, resampling sections
+CEILING_LATENCY_MEDIAN = 0.10  # excerpts on against off
+CEILING_LATENCY_P95 = 0.20
 TARGET_COST_RATIO = 0.80
 TARGET_COST_BOUND = 0.85
 Z_95 = 1.6448536269514722  # one-sided 95%
@@ -452,7 +456,24 @@ def excerpts_off() -> Iterator[None]:
         search_module.select_anchor = original  # type: ignore[attr-defined]
 
 
-def latency(service: MarkdownMemoryService, queries: Mapping[str, Any], rounds: int) -> list[str]:
+def latency_verdict(off: Sequence[float], on: Sequence[float]) -> tuple[list[str], bool]:
+    """The report lines, and whether both ceilings held: excerpts on against off."""
+    median_off, median_on = statistics.median(off), statistics.median(on)
+    p95_off, p95_on = _p95(off), _p95(on)
+    # Ratios, not deltas: 110 / 100 - 1 is 0.10000000000000009, over the +10% it meets.
+    median, p95 = median_on / median_off, p95_on / p95_off
+    lines = [
+        f"off: median {median_off:.1f}ms p95 {p95_off:.1f}ms",
+        f"on:  median {median_on:.1f}ms p95 {p95_on:.1f}ms",
+        f"delta: median {median - 1:+.1%} (ceiling +{CEILING_LATENCY_MEDIAN:.0%}), "
+        f"p95 {p95 - 1:+.1%} (ceiling +{CEILING_LATENCY_P95:.0%})",
+    ]
+    return lines, median <= 1 + CEILING_LATENCY_MEDIAN and p95 <= 1 + CEILING_LATENCY_P95
+
+
+def latency(
+    service: MarkdownMemoryService, queries: Mapping[str, Any], rounds: int
+) -> tuple[list[str], bool]:
     texts = [
         str(case["query"]) for split in ("dev", "held_out") for _, _, case in _cases(queries, split)
     ]
@@ -468,15 +489,8 @@ def latency(service: MarkdownMemoryService, queries: Mapping[str, Any], rounds: 
                     service.search_docs(query, 5)
                     times[mode].append((time.perf_counter() - started) * 1000)
     off, on = times["off"], times["on"]
-    median_off, median_on = statistics.median(off), statistics.median(on)
-    p95_off, p95_on = _p95(off), _p95(on)
-    return [
-        f"n={len(off)} per mode ({rounds} rounds x {len(texts)} queries)",
-        f"off: median {median_off:.1f}ms p95 {p95_off:.1f}ms",
-        f"on:  median {median_on:.1f}ms p95 {p95_on:.1f}ms",
-        f"delta: median {median_on / median_off - 1:+.1%} (ceiling +10%), "
-        f"p95 {p95_on / p95_off - 1:+.1%} (ceiling +20%)",
-    ]
+    lines, passed = latency_verdict(off, on)
+    return [f"n={len(off)} per mode ({rounds} rounds x {len(texts)} queries)", *lines], passed
 
 
 # ---------------------------------------------------------------------- main
@@ -603,7 +617,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             excerpted = sum(item.key["excerpt"] is not None for item in items)
             print(f"{len(items)} items ({excerpted} excerpted) written to {arguments.out}")
         else:
-            print("\n".join(latency(service, queries, arguments.rounds)))
+            lines, passed = latency(service, queries, arguments.rounds)
+            print("\n".join(lines))
+            print("PASS" if passed else "FAIL")
+            return 0 if passed else 1
         return 0
 
     return _with_service(arguments, run)
