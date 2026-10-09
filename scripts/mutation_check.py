@@ -1408,6 +1408,64 @@ MUTATIONS = (
         tests="test_a_judge_sees_one_text_the_section_or_the_excerpt",
     ),
     Mutation(
+        name="excerpt harness: let search slow past the median ceiling",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            "    return lines, median <= 1 + CEILING_LATENCY_MEDIAN"
+            " and p95 <= 1 + CEILING_LATENCY_P95"
+        ),
+        new="    return lines, p95 <= 1 + CEILING_LATENCY_P95",
+        tests="test_latency_fails_when_either_ceiling_is_exceeded",
+    ),
+    Mutation(
+        name="excerpt harness: let search slow past the p95 ceiling",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            "    return lines, median <= 1 + CEILING_LATENCY_MEDIAN"
+            " and p95 <= 1 + CEILING_LATENCY_P95"
+        ),
+        new="    return lines, median <= 1 + CEILING_LATENCY_MEDIAN",
+        tests="test_latency_fails_when_either_ceiling_is_exceeded",
+    ),
+    Mutation(
+        name="excerpt harness: fail a latency exactly at its ceiling",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            "    return lines, median <= 1 + CEILING_LATENCY_MEDIAN"
+            " and p95 <= 1 + CEILING_LATENCY_P95"
+        ),
+        new=(
+            "    return lines, median < 1 + CEILING_LATENCY_MEDIAN"
+            " and p95 < 1 + CEILING_LATENCY_P95"
+        ),
+        tests="test_latency_fails_when_either_ceiling_is_exceeded",
+    ),
+    Mutation(
+        name="excerpt harness: compare a latency delta that float error pushes over its ceiling",
+        module="eval_excerpts.py",
+        area="scripts",
+        old=(
+            "    return lines, median <= 1 + CEILING_LATENCY_MEDIAN"
+            " and p95 <= 1 + CEILING_LATENCY_P95"
+        ),
+        new=(
+            "    return lines, median - 1 <= CEILING_LATENCY_MEDIAN"
+            " and p95 - 1 <= CEILING_LATENCY_P95"
+        ),
+        tests="test_latency_fails_when_either_ceiling_is_exceeded",
+    ),
+    Mutation(
+        name="excerpt harness: report latency past a ceiling and exit 0",
+        module="eval_excerpts.py",
+        area="scripts",
+        old="            return 0 if passed else 1",
+        new="            return 0",
+        tests="test_the_latency_command_exits_non_zero_when_a_ceiling_is_exceeded",
+    ),
+    Mutation(
         name="diagram: print a token count the files stopped matching",
         module="make_diagram.py",
         area="scripts",

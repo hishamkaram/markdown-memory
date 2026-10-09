@@ -1379,6 +1379,36 @@ class TestTheExcerptHarness:
 
         assert '{"id": <id>, "A": "yes|partial|no"}' in eval_excerpts.JUDGE_PROMPT
 
+    def test_latency_fails_when_either_ceiling_is_exceeded(self) -> None:
+        """#86: the ceilings `latency` prints are the ones it holds, each on its own."""
+        import eval_excerpts
+
+        off = [100.0] * 18 + [200.0] * 2  # median 100, p95 (nearest rank) 200
+
+        def holds(fast: float, slow: float) -> bool:
+            return eval_excerpts.latency_verdict(off, [fast] * 18 + [slow] * 2)[1]
+
+        assert holds(109.0, 239.0)
+        assert holds(110.0, 240.0)  # at the ceilings exactly: 110 / 100 - 1 is not 0.1
+        assert not holds(111.0, 200.0)  # the median alone
+        assert not holds(100.0, 241.0)  # p95 alone
+        assert holds(90.0, 150.0)
+        lines = eval_excerpts.latency_verdict(off, [109.0] * 18 + [239.0] * 2)[0]
+        assert lines[-1] == "delta: median +9.0% (ceiling +10%), p95 +19.5% (ceiling +20%)"
+
+    def test_the_latency_command_exits_non_zero_when_a_ceiling_is_exceeded(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import eval_excerpts
+
+        monkeypatch.setattr(
+            eval_excerpts, "_with_service", lambda arguments, work: work(object(), {}, None)
+        )
+        for passed, code, verdict in ((False, 1, "FAIL"), (True, 0, "PASS")):
+            monkeypatch.setattr(eval_excerpts, "latency", lambda *_, ok=passed: (["delta"], ok))
+            assert eval_excerpts.main(["latency"]) == code
+            assert capsys.readouterr().out.splitlines()[-1] == verdict
+
 
 class _ReversedEmbedder(FakeEmbedder):
     """Another model, in the only way the storage layer can tell: different vectors."""
