@@ -161,7 +161,20 @@ class TestClaudeStream:
                 },
                 False,
             ),
-            ({"plugins": [{"name": "caveman"}]}, False),
+            ({"plugins": [{"name": "caveman", "path": "/plugins/caveman"}]}, False),
+            (
+                {
+                    "plugins": [
+                        {
+                            "name": "cc-plugin-agents-md",
+                            "path": "builtin",
+                            "source": "cc-plugin-agents-md@builtin",
+                        }
+                    ]
+                },
+                True,
+            ),
+            ({"plugins": [{"name": "x", "path": "builtin", "source": "x@market"}]}, False),
         ],
     )
     def test_init_must_show_only_our_server_and_no_plugin(

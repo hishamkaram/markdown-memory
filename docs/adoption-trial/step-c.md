@@ -146,6 +146,23 @@ Per agent, pooled over uv and vite, over the kept pairs:
 - **Step B** numbers are set beside B's for reference, with the agent-version drift stated; the
   A/B decides.
 
+## Amendment 1 (2026-10-09, before any trial session)
+
+The four forced probes ran after this protocol was merged. Both Codex probes passed. Both Claude
+probes made a paired `search_docs` call with the right session id and directory, and their `init`
+showed `markdown-memory` connected as the only MCP server, but they failed the availability
+check: `init` lists three plugins, `cc-plugin-agents-md`, `cc-plugin-telemetry` and
+`cc-plugin-plugin-authoring`, each with path `builtin`. These are Claude Code 2.1.294's own
+built-in plugins, not the operator's; they ship with the agent build and load in both arms alike.
+
+| Item | Was | Now |
+| --- | --- | --- |
+| Claude availability | No plugin in `init` | No plugin in `init` other than Claude Code's built-in ones (path `builtin`, source `<name>@builtin`) |
+
+`cc-plugin-agents-md` presumably brings a repository's `AGENTS.md` into Claude's context (uv has
+one, vite does not); like the covariates above, it is the same in both arms and is not
+controlled. Claude's resolved model in the probes was `claude-opus-5-5`.
+
 ## Reporting
 
 Results go to #126 as a comment: per agent, both arms' measures, the sign test, the harm guard
