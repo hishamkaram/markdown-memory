@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/vitejs/vite",
+  "commit": "7a89794331526a67bc9b29047b86957c581c128c",
+  "tasks": [
+    {"id": "vite-01", "answerable": true, "kind": "how-to", "question": "My environment variable is undefined in client code. Which prefix does Vite require, and how do I change it?"},
+    {"id": "vite-02", "answerable": true, "kind": "how-to", "question": "How do I proxy /api requests to my backend while running the Vite dev server?"},
+    {"id": "vite-03", "answerable": true, "kind": "how-to", "question": "How do I build a reusable library with Vite instead of an app?"},
+    {"id": "vite-04", "answerable": true, "kind": "how-to", "question": "How do I deploy a Vite app to GitHub Pages when it is served from a repository sub-path?"},
+    {"id": "vite-05", "answerable": true, "kind": "how-to", "question": "How do I force Vite to re-bundle dependencies when its pre-bundling cache seems stale?"},
+    {"id": "vite-06", "answerable": true, "kind": "how-to", "question": "How do I make a module accept its own hot updates, and why does the code need an import.meta.hot guard?"},
+    {"id": "vite-07", "answerable": true, "kind": "how-to", "question": "The dev server is slow to start in a large app. What do the docs say about barrel files?"},
+    {"id": "vite-08", "answerable": true, "kind": "how-to", "question": "How do I import a file's contents as a raw string?"},
+    {"id": "vite-09", "answerable": true, "kind": "identifier", "question": "Requests to the dev server through a custom hostname are being blocked. Which option allows that host?"},
+    {"id": "vite-10", "answerable": true, "kind": "identifier", "question": "During SSR, how do I stop Vite from externalizing one specific dependency?"},
+    {"id": "vite-11", "answerable": true, "kind": "how-to", "question": "How do I set up a multi-page app with several HTML entry points?"},
+    {"id": "vite-12", "answerable": true, "kind": "how-to", "question": "After a redeploy, users get errors when a dynamically imported chunk fails to load. How do I handle that?"},
+    {"id": "vite-13", "answerable": true, "kind": "how-to", "question": "How do I make my plugin run before Vite's core plugins?"},
+    {"id": "vite-14", "answerable": true, "kind": "identifier", "question": "What browser target does a production build use by default?"},
+    {"id": "vite-15", "answerable": true, "kind": "how-to", "question": "How do I read variables from .env files inside vite.config?"},
+    {"id": "vite-16", "answerable": true, "kind": "how-to", "question": "How do I start a Vite dev server programmatically from Node?"},
+    {"id": "vite-17", "answerable": false, "kind": "identifier", "question": "What does the server.compressResponses option do?"},
+    {"id": "vite-18", "answerable": false, "kind": "how-to", "question": "How do I deploy a Vite app to Fly.io?"},
+    {"id": "vite-19", "answerable": false, "kind": "how-to", "question": "How do I turn off Vite's usage telemetry?"},
+    {"id": "vite-20", "answerable": false, "kind": "identifier", "question": "What does the vite doctor command check?"}
+  ]
+}

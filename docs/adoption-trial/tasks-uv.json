@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/astral-sh/uv",
+  "commit": "f3e56e16e0302e26ea456cb51b676b35958572a0",
+  "tasks": [
+    {"id": "uv-01", "answerable": true, "kind": "how-to", "question": "How do I make uv install one specific package only from our private index, without ever falling back to PyPI for it?"},
+    {"id": "uv-02", "answerable": true, "kind": "identifier", "question": "Which environment variable moves uv's cache directory, and how do I remove only unused cache entries?"},
+    {"id": "uv-03", "answerable": true, "kind": "how-to", "question": "How should I cache uv's downloads between GitHub Actions runs?"},
+    {"id": "uv-04", "answerable": true, "kind": "how-to", "question": "How do I declare dependencies inside a single-file Python script and run it with uv?"},
+    {"id": "uv-05", "answerable": true, "kind": "how-to", "question": "How do I get a CUDA build of PyTorch in a uv project instead of the CPU wheel?"},
+    {"id": "uv-06", "answerable": true, "kind": "comparison", "question": "What is the difference between running a tool with uvx and installing it with uv tool install?"},
+    {"id": "uv-07", "answerable": true, "kind": "how-to", "question": "In CI, how do I fail the job if uv.lock is out of date instead of silently updating it?"},
+    {"id": "uv-08", "answerable": true, "kind": "how-to", "question": "In a uv workspace, how does one member declare a dependency on another member?"},
+    {"id": "uv-09", "answerable": true, "kind": "how-to", "question": "Our corporate proxy uses a custom root certificate. How do I make uv trust the system certificate store?"},
+    {"id": "uv-10", "answerable": true, "kind": "how-to", "question": "How do I make sure an internal package can never be uploaded to PyPI by accident?"},
+    {"id": "uv-11", "answerable": true, "kind": "how-to", "question": "How do I export the uv lockfile to a requirements.txt file?"},
+    {"id": "uv-12", "answerable": true, "kind": "how-to", "question": "How do I authenticate uv against AWS CodeArtifact?"},
+    {"id": "uv-13", "answerable": true, "kind": "how-to", "question": "How do I structure a Dockerfile so uv's dependency install gets its own cached layer?"},
+    {"id": "uv-14", "answerable": true, "kind": "how-to", "question": "Two of my optional extras need incompatible versions of the same library. How do I tell uv they conflict?"},
+    {"id": "uv-15", "answerable": true, "kind": "how-to", "question": "How do I turn on a uv preview feature?"},
+    {"id": "uv-16", "answerable": true, "kind": "how-to", "question": "How do I pin the Python version a uv project uses?"},
+    {"id": "uv-17", "answerable": false, "kind": "identifier", "question": "What does the UV_MAX_PARALLEL_BUILDS_PER_HOST environment variable control?"},
+    {"id": "uv-18", "answerable": false, "kind": "how-to", "question": "How do I configure uv to mirror every downloaded package to an S3 bucket automatically?"},
+    {"id": "uv-19", "answerable": false, "kind": "how-to", "question": "How do I turn off uv's usage telemetry?"},
+    {"id": "uv-20", "answerable": false, "kind": "identifier", "question": "What does the uv doctor command check?"}
+  ]
+}
