@@ -53,8 +53,9 @@ BUDGETS = {
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
     # sent relative to the root, a relative path resolved back under it first, and the
-    # agent told what an excerpt is.
-    "server.py": 531,
+    # agent told what an excerpt is; and from 531 for #126: the instructions open with when
+    # to search.
+    "server.py": 536,
     "trees.py": 70,
 }
 

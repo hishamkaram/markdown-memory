@@ -237,3 +237,29 @@ class TestGitStateIsSpelledOut:
             assert all(f"`{value}`" in described for value in values), name
         assert all(value in SERVER_INSTRUCTIONS for value in values)
         assert "unknown - no run has recorded" in SERVER_INSTRUCTIONS
+
+    async def test_the_first_thing_an_agent_reads_is_when_to_search(self, tmp_path: Path) -> None:
+        """#126: Codex keeps the instructions' first 512 characters for choosing a server, and
+        Claude sees only the instructions and tool names until it loads a tool's schema."""
+        lead = (
+            "Search this project's Markdown documentation before grepping or reading .md files: "
+            "search_docs(query) returns the best-matching section - or an excerpt of the "
+            "passage that matched - with pointers to the next best, and read_section fetches "
+            "any one of them by heading. Use it for every question the documentation might "
+            "answer, with exact identifiers (flags, env vars, config keys) or plain words; for "
+            "an identifier, it also says when no indexed section contains it."
+        )
+        assert len(lead) <= 512
+        assert SERVER_INSTRUCTIONS.startswith(lead + " ")
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "d.db", docs_dir=tmp_path), embedder=FakeEmbedder()
+        )
+        try:
+            tools = {t.name: t for t in await create_server(service=service).list_tools()}
+        finally:
+            service.close()
+        # The SDK sends the docstring with its line breaks and indentation.
+        assert " ".join((tools["search_docs"].description or "").split()).startswith(
+            "Search this project's Markdown documentation for the best-matching section - call "
+            "it first for any question the docs might answer, before grep or reading .md files."
+        )

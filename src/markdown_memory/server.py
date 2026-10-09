@@ -78,6 +78,15 @@ _R = TypeVar("_R")
 
 
 SERVER_INSTRUCTIONS = (
+    # When to reach for the server comes first: Codex keeps the first 512 characters for
+    # deciding how to use a server, and Claude sees only these and the tool names until it
+    # loads a tool's schema (#126).
+    "Search this project's Markdown documentation before grepping or reading .md files: "
+    "search_docs(query) returns the best-matching section - or an excerpt of the passage "
+    "that matched - with pointers to the next best, and read_section fetches any one of them "
+    "by heading. Use it for every question the documentation might answer, with exact "
+    "identifiers (flags, env vars, config keys) or plain words; for an identifier, it also "
+    "says when no indexed section contains it. "
     "Markdown documentation memory. The server keeps its documentation root indexed by "
     "itself (unless started with --no-auto-index); call index_directory only when "
     "index_status says so. Use search_docs to locate relevant sections, or "
@@ -96,8 +105,7 @@ SERVER_INSTRUCTIONS = (
     "come from that worktree's own copy of the docs, and index_status.root names the tree "
     "that answered. index_status.gitignore is applied, off, no_repository, unavailable (git "
     "could not be asked; the message says how to see why) or unknown - no run has recorded "
-    "git's state yet, which is not a failure. Prefer these tools over reading whole Markdown "
-    "files."
+    "git's state yet, which is not a failure."
 )
 
 
@@ -670,8 +678,10 @@ def create_server(
     @server.tool(structured_output=False)
     @anticipated_errors
     def search_docs(query: str, limit: int = 5, cwd: str = "") -> str:
-        """Hybrid search (BM25 keywords + semantic vectors, fused with RRF) over all indexed
-        sections. Works for exact identifiers (flags, env vars) and for conceptual questions.
+        """Search this project's Markdown documentation for the best-matching section - call it
+        first for any question the docs might answer, before grep or reading .md files. Hybrid
+        search (BM25 keywords + semantic vectors, fused with RRF) over all indexed sections.
+        Works for exact identifiers (flags, env vars) and for conceptual questions.
 
         Returns JSON `{"results": [...], "keyword_match": ..., "index_status": {...}}`, at most
         `limit` hits, best first. The first carries the section's full `content`, or - marked
