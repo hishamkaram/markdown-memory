@@ -2384,6 +2384,55 @@ MUTATIONS = (
         tests="test_a_half_written_line_does_not_lose_the_session",
     ),
     Mutation(
+        name="usage: leave shell reads of Markdown unsized",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old='    if call.name == "Bash" and _reads_markdown(call):',
+        new="    if False:",
+        tests="test_shell_output_that_names_markdown_is_its_own_channel",
+    ),
+    Mutation(
+        name="usage: fold shell output into the documentation total",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old=(
+            "                _tokens([call for call in exposed"
+            " if _row(call) not in (None, SHELL_ROW)])"
+        ),
+        new="                _tokens([call for call in exposed if _row(call)])",
+        tests="test_shell_output_that_names_markdown_is_its_own_channel",
+    ),
+    Mutation(
+        name="usage: leave the shell channel out of the JSON report",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old='            "shell_tokens_per_session": _stats(self.shell_tokens_per_session),',
+        new="",
+        tests="test_shell_output_that_names_markdown_is_its_own_channel",
+    ),
+    Mutation(
+        name="usage: count shell exposure only in sessions that had some",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old="            report.shell_tokens_per_session.append(",
+        new=(
+            "            if any(_row(call) == SHELL_ROW for call in by_hand):\n"
+            "                report.shell_tokens_per_session.append("
+        ),
+        tests="test_shell_output_that_names_markdown_is_its_own_channel",
+    ),
+    Mutation(
+        name="usage: print the shell channel without its size",
+        module="usage_from_transcripts.py",
+        area="scripts",
+        old=(
+            '        f"  shell output naming Markdown, not in that total: median'
+            " {shell['median']}\""
+        ),
+        new='        f"  shell output naming Markdown, not in that total"',
+        tests="test_the_shell_channel_is_printed_beside_the_total",
+    ),
+    Mutation(
         name="units: throw away everything past the character limit again",
         module="parser.py",
         old="            for window in _windows(unit.text):",

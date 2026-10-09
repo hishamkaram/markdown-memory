@@ -507,6 +507,32 @@ class TestResultSizes:
         assert miner._stats([7]) == {"n": 1, "total": 7, "median": 7, "p90": 7, "max": 7}
         assert miner._stats(list(range(1, 11)))["p90"] == 9
 
+    def test_shell_output_that_names_markdown_is_its_own_channel(
+        self, miner: Any, tmp_path: Path
+    ) -> None:
+        """#129: shell reads are sized beside the per-session total, which stays as it was."""
+        shell = "y" * 801
+        transcript(
+            tmp_path / "p" / "a.jsonl",
+            ("Read", {"file_path": "/d/a.md"}, text("x" * 401)),
+            ("Bash", {"command": "cat docs/guide.md"}, text(shell)),
+            ("Bash", {"command": "uv run pytest -q"}, text("z" * 400)),
+            ("Bash", {"command": "cat /tmp/scratchpad/notes.md"}, text("w" * 400)),
+        )
+        transcript(tmp_path / "p" / "b.jsonl", ("Read", {"file_path": "/d/b.md"}, text("v" * 41)))
+        report = measure(miner, tmp_path)
+        assert report.rows["Bash (Markdown)"].tokens == [estimate_tokens(shell)]
+        assert report.documentation_tokens_per_session == [
+            estimate_tokens("x" * 401),
+            estimate_tokens("v" * 41),
+        ], "the shell stays out of the total"
+        assert report.shell_tokens_per_session == [estimate_tokens(shell), 0]
+        data = report.as_dict()
+        assert data.get("shell_tokens_per_session", {}).get("total") == estimate_tokens(shell)
+        assert data["result_tokens"].get("Bash (Markdown)", {}).get("total") == estimate_tokens(
+            shell
+        )
+
 
 class TestTheCommandLine:
     def run(self, miner: Any, monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
@@ -522,6 +548,18 @@ class TestTheCommandLine:
         assert "documentation-seeking sessions   1" in out
         assert "read Markdown, never called       1" in out
         assert "not billed" in out
+
+    def test_the_shell_channel_is_printed_beside_the_total(
+        self, miner: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+    ) -> None:
+        transcript(
+            tmp_path / "p" / "a.jsonl",
+            ("Bash", {"command": "cat docs/guide.md"}, text("y" * 801)),
+        )
+        self.run(miner, monkeypatch, "--root", str(tmp_path))
+        out = capsys.readouterr().out
+        assert "shell output naming Markdown, not in that total: median 201" in out
+        assert "kept out of the per-session total" in out
 
     def test_the_json_report_carries_the_estimator_and_failures(
         self, miner: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
