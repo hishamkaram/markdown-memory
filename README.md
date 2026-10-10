@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 20,446
+       alt="One question asked of four documentation files. Reading them whole costs 21,225
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, in a ~608-token call with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 20,446 tokens in all:
+`docs/evaluation-protocol.md`, 21,225 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -33,7 +33,7 @@ search_docs("where does the embedding model get downloaded")
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**A 275-token excerpt in a ~608-token call, instead of 20,446**: the passage that answers and
+**A 275-token excerpt in a ~608-token call, instead of 21,225**: the passage that answers and
 the three after it, verbatim, marked `excerpt: true` - one `read_section` returns
 the whole 407-token section when that is not enough. The other four come back as pointers -
 where each section is, what reading it costs, and the passage that matched - so when the first
@@ -117,6 +117,83 @@ either, so name the documentation root:
 first launch downloads about 250 MB of dependencies before the server can answer, longer
 than Codex waits by default - set `startup_timeout_sec = 60` under
 `[mcp_servers.markdown-memory]` in `~/.codex/config.toml` if you go that way.
+
+### Headless and sandboxed agents
+
+Registering the server gives an agent no permission to call it. An interactive session can ask
+you; a headless one - `claude -p`, `codex exec`, a CI job - has nobody to ask, so the client
+refuses the call and the server never sees it:
+
+```text
+Claude requested permissions to use mcp__markdown-memory__search_docs, but you haven't granted it yet.
+Cannot call mcp__markdown-memory__search_docs while in plan mode.
+MCP tool call requires approval, but approval policy is never
+```
+
+Allow the four retrieval tools - `search_docs`, `read_section`, `get_document_outline` and
+`list_documents` - and leave `index_directory` out: by default the server keeps its own root
+indexed. The four do not edit your Markdown or source files, but they do write markdown-memory's
+own state: `search_docs`, and `list_documents` called without a directory, can start the
+background catch-up index, and on a cold cache `search_docs` downloads the model (~218 MB with the
+default preset). By default the index lives outside the repository; a `MARKDOWN_MEMORY_DB` you set
+puts it wherever that path points, and a relative one is resolved against the project root.
+
+Claude Code takes them on the command line:
+
+```bash
+claude -p --allowedTools "mcp__markdown-memory__search_docs,mcp__markdown-memory__read_section,mcp__markdown-memory__get_document_outline,mcp__markdown-memory__list_documents" "your prompt"
+```
+
+or, for every session, in `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__markdown-memory__search_docs",
+      "mcp__markdown-memory__read_section",
+      "mcp__markdown-memory__get_document_outline",
+      "mcp__markdown-memory__list_documents"
+    ]
+  }
+}
+```
+
+A repository's own `.claude/settings.json` does not work for this: `claude -p` ignores its allow
+rules in a folder that was never trusted
+([Claude Code docs](https://code.claude.com/docs/en/permissions#project-allow-rules-and-workspace-trust)).
+Plan mode (`--permission-mode plan`) refuses these tools even when they are allowed; use the
+default mode, or `--permission-mode dontAsk`, which runs the allowed tools and refuses the rest.
+
+Codex takes them in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.markdown-memory.tools.search_docs]
+approval_mode = "approve"
+
+[mcp_servers.markdown-memory.tools.read_section]
+approval_mode = "approve"
+
+[mcp_servers.markdown-memory.tools.get_document_outline]
+approval_mode = "approve"
+
+[mcp_servers.markdown-memory.tools.list_documents]
+approval_mode = "approve"
+```
+
+or for one run:
+
+```bash
+codex exec \
+  -c 'mcp_servers.markdown-memory.tools.search_docs.approval_mode="approve"' \
+  -c 'mcp_servers.markdown-memory.tools.read_section.approval_mode="approve"' \
+  -c 'mcp_servers.markdown-memory.tools.get_document_outline.approval_mode="approve"' \
+  -c 'mcp_servers.markdown-memory.tools.list_documents.approval_mode="approve"' \
+  "your prompt"
+```
+
+That skips Codex's approval check for those tools, unless strict auto-review is on. Verified with
+Claude Code 2.1.294 and Codex CLI 0.161.0; how clients ask for approval changes between versions.
 
 ### From source
 
