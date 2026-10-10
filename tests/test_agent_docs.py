@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -129,6 +130,57 @@ class TestNavigationRules:
         assert set(tools["search_docs"].input_schema["properties"]) == {"query", "limit", "cwd"}
         # One rule for agents, so every tool takes it (#69).
         assert all("cwd" in tool.input_schema["properties"] for tool in tools.values())
+
+
+class TestHeadlessSetup:
+    """The README's allow-lists are copied verbatim into clients that then call nothing else.
+
+    A renamed tool would leave every copy granting nothing, and the set is written out rather
+    than derived as "every tool but index_directory", so a tool added later that writes is never
+    approved by an edit nobody made (#127).
+    """
+
+    RETRIEVAL = {"search_docs", "read_section", "get_document_outline", "list_documents"}
+
+    @staticmethod
+    def _fences(language: str) -> list[str]:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        heading = r"^### Headless and sandboxed agents\n(.*?)^#{1,3} "
+        section = re.search(heading, readme, re.M | re.S)
+        assert section, "the README has no 'Headless and sandboxed agents' section"
+        return re.findall(rf"^```{language}\n(.*?)^```", section.group(1), re.M | re.S)
+
+    async def test_the_allow_lists_name_exactly_the_retrieval_tools(self, tmp_path: Path) -> None:
+        service = MarkdownMemoryService(
+            ServerConfig(db_path=tmp_path / "d.db", docs_dir=tmp_path), embedder=FakeEmbedder()
+        )
+        try:
+            registered = {t.name for t in await create_server(service=service).list_tools()}
+        finally:
+            service.close()
+        assert self.RETRIEVAL.issubset(registered)
+
+        # Read as a client would: exact strings, so a glob, a wildcard, the bare server name or a
+        # server-wide default fails as surely as a missing tool. Every option is accounted for,
+        # so swapping the allow flag for a deny flag fails too.
+        commands = [shlex.split(fence.replace("\\\n", " ")) for fence in self._fences("bash")]
+        assert [argv[:2] for argv in commands] == [["claude", "-p"], ["codex", "exec"]], commands
+        claude, codex = commands
+        rules = {f"mcp__markdown-memory__{tool}" for tool in self.RETRIEVAL}
+        assert claude[2::2] == ["--allowedTools", "your prompt"] and len(claude) == 5, claude
+        assert sorted(claude[3].split(",")) == sorted(rules)
+        (settings,) = self._fences("json")
+        allow = json.loads(settings)["permissions"]["allow"]
+        assert json.loads(settings) == {"permissions": {"allow": allow}}
+        assert sorted(allow) == sorted(rules)
+
+        approve = {tool: {"approval_mode": "approve"} for tool in self.RETRIEVAL}
+        (toml,) = self._fences("toml")
+        assert tomllib.loads(toml) == {"mcp_servers": {"markdown-memory": {"tools": approve}}}
+        assert codex[2:-1:2] == ["-c"] * len(approve) and codex[-1] == "your prompt", codex
+        assert sorted(codex[3:-1:2]) == sorted(
+            f'mcp_servers.markdown-memory.tools.{tool}.approval_mode="approve"' for tool in approve
+        )
 
 
 class TestDocsMatchTheCode:
