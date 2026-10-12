@@ -314,6 +314,98 @@ class TestFrontMatterKeys:
         )
 
 
+def titled(front_matter: str, body: str = "## 1. Install\n\nrun it\n") -> str:
+    return parse(f"---\n{front_matter}\n---\n\n{body}").title
+
+
+#: Values that name nothing: empty, a YAML core null, a bare block-scalar header (either
+#: indicator order) and a flow collection - each only when unquoted.
+UNUSABLE = [
+    "", '""', "''", "   ", '"  "', "null", "Null", "NULL", "~",
+    "|", ">-", "|2", ">2-", "|+1", "[a, b]", "{a: 1}",
+]  # fmt: skip
+
+
+class TestFrontMatterName:
+    """An agent or skill file names itself with `name:` and often has no H1 (#128)."""
+
+    def test_a_named_file_without_an_h1_is_titled_by_its_name(self) -> None:
+        text = (
+            "---\nname: release-notes\ndescription: Draft the release notes.\n---\n\n"
+            "## 1. Collect the merged PRs\n\nlist them\n\n## 2. Group them\n\nby label\n"
+        )
+        document = parse(text)
+        assert document.title == "release-notes"
+        assert paths(document) == [
+            PREAMBLE_TITLE, "1. Collect the merged PRs", "2. Group them",
+        ]  # fmt: skip
+
+    @pytest.mark.parametrize("keys", ["title: Guide\nname: guide", "name: guide\ntitle: Guide"])
+    def test_title_beats_name_in_either_order(self, keys: str) -> None:
+        assert titled(keys) == "Guide"
+
+    @pytest.mark.parametrize("body", ["# Real\n\ntext\n", "## Step\n\na\n\n# Real\n\nb\n"])
+    def test_a_usable_h1_beats_name(self, body: str) -> None:
+        assert titled("name: guide", body) == "Real"
+
+    def test_an_untitled_h1_does_not_hide_the_name(self) -> None:
+        assert titled("name: guide", "#\n\n## Step\n\ntext\n") == "guide"
+
+    def test_without_headings_the_name_beats_the_fallback(self) -> None:
+        assert titled("name: guide", "just text\n") == "guide"
+        assert titled("name: ~", "just text\n") == "fallback"
+
+    @pytest.mark.parametrize("value", UNUSABLE)
+    def test_an_unusable_title_falls_through_to_the_name(self, value: str) -> None:
+        assert titled(f"title: {value}\nname: guide") == "guide"
+
+    @pytest.mark.parametrize("value", UNUSABLE)
+    def test_an_unusable_name_falls_through_to_the_first_heading(self, value: str) -> None:
+        assert titled(f"name: {value}") == "1. Install"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [('"null"', "null"), ('">"', ">"), ('"[RFC] x"', "[RFC] x"), ("'~'", "~")],
+    )
+    @pytest.mark.parametrize("key", ["title", "name"])
+    def test_a_quoted_value_is_literal(self, key: str, value: str, expected: str) -> None:
+        assert titled(f"{key}: {value}") == expected
+
+    @pytest.mark.parametrize(
+        ("front_matter", "expected"),
+        [
+            ("Name: Guide", "Guide"),
+            ("TITLE: Guide\nname: guide", "Guide"),
+            ("name: C#", "C#"),
+            ("name: x # note", "x # note"),
+        ],
+    )
+    def test_case_and_hashes_are_kept(self, front_matter: str, expected: str) -> None:
+        assert titled(front_matter) == expected
+
+    @pytest.mark.parametrize(
+        "front_matter",
+        ["author:\n  name: Jane", "username: jane", "names: jane", "name:\n  - a\n  - b"],
+    )
+    def test_keys_that_only_look_like_a_name_are_ignored(self, front_matter: str) -> None:
+        assert titled(front_matter) == "1. Install"
+
+    @pytest.mark.parametrize(
+        ("front_matter", "expected"),
+        [
+            ("title:\ntitle: Later", "Later"),
+            ('title: ""\ntitle: Later', "Later"),
+            ("name: A\nname: B", "A"),
+            ("name: ~\nname: real", "real"),
+            ("title: A\ntitle: B", "A"),
+        ],
+    )
+    def test_the_first_usable_occurrence_of_a_key_wins(
+        self, front_matter: str, expected: str
+    ) -> None:
+        assert titled(front_matter) == expected
+
+
 def test_heading_shares_part_one_with_an_over_long_line() -> None:
     text = "## Release Notes\n\n" + "word " * 1500 + "\n"
     document = parse(text)
