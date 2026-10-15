@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -160,6 +161,33 @@ class TestBaselineIsNotRecordedForAFailingRun(TestEvalScript):
         code, recorded = self.run_main(evaluation, tmp_path, monkeypatch, top1=1.0)
         assert code == 0
         assert recorded["held_out/paraphrase"]["top1"] == 1.0
+
+
+# The first 16 hex digits of SHA-256 over every retired corpus_v2 held-out paraphrase and
+# identifier query, casefolded with whitespace collapsed: the 40 #105 retired and the 40 #118
+# retired. Digests, so this file does not republish spent queries; git history keeps them.
+RETIRED_V2_QUERIES = frozenset({
+    "00d0e7ee0f7d3f86", "0283a71a2abdbaec", "03995fb5fa076fec", "05921d092ecac25d",
+    "0a1e6e87c0950744", "0b6eba414f2250af", "10a95447e99fb848", "12bc50b87771db20",
+    "18ec034d5045cc0a", "1aced461ac79e822", "1b4b6b9946de18a8", "1be5b880755212b0",
+    "24539e6a5cc452ed", "26548e59df2118f3", "299daba72ad39b4e", "2d0bb77dcd8d0f75",
+    "2fa2faa5e992f5d3", "2fbc3ad1a0ba528b", "3107ffd60b272373", "31cb265024d9f77f",
+    "342cafefd8b0e94a", "36789ebb0a86a758", "378cb542d2e067ae", "446ce98f657e3ffd",
+    "452c7368351fba60", "45381f51cb352683", "4699213b81951e22", "47db6df6b9cc0bd5",
+    "4a3cdedf7e4b160c", "4a9cabaa8d0eb4c3", "4d5f609d4cadaeed", "4dc0e0d3e2fdc6c0",
+    "4f11050f1db42e0a", "54a9d85c1ef56d43", "561c24c8f7dba834", "584e77743bd800a1",
+    "5925a3eb33b2eb56", "5987d2f6ed673c76", "5a1d752a7e9f90c2", "62adf2dff080107b",
+    "689ebfea535c904b", "69e5765019c2b691", "6c0f5068fcdef8cb", "6c606d929b00b605",
+    "6e7eebd3e43097f5", "76fe53820d6c3a70", "782779019cf1e17e", "83eaf8bc08164465",
+    "860c0259dedd249f", "8e7d6c813f9c1828", "9403d3128e6c040e", "982f46284c71ddb7",
+    "98f3ae1ef67113d8", "a0685c5e3ee2eabf", "a40d96dad908a893", "a43575f4c1b1e352",
+    "a98317cf72c7c0e4", "a9d7fa83e3c647fa", "ac90be3a92aac0c7", "acbe165b6060366b",
+    "aff5ff32d5b5a918", "b1d5226fdc3d7e02", "b2280f1ed7db6af9", "b7f482a754f7b1dd",
+    "be29097cda9a317f", "ce14c7d1738351ef", "ce20653c349aa5d8", "d3482370513f4ac5",
+    "d36ee582b324d4f0", "d674d3a5b407fb68", "dcd69bed70a827d5", "e341bf1afe2bc28d",
+    "e6b27c6a010d2e07", "e8d66141492ee39a", "ed9d373f523b0754", "f0367580ef57aa7e",
+    "f5483e67e12ad418", "f7b4acbd5d129c54", "f9665cec796994f7", "fe1fa570f7cf072c",
+})  # fmt: skip
 
 
 _COST_CORPUS = {
@@ -373,8 +401,8 @@ class TestTheBaselineNamesItsQueries:
     # Sets whose committed baseline was scored on other cases than today's, and why. Each
     # stays here until its baseline is re-recorded.
     STALE = {
-        ("embeddinggemma@v2", "held_out/paraphrase"): "replaced by #105; #80 undecided; #118",
-        ("embeddinggemma@v2", "held_out/identifier"): "replaced by #105; #80 undecided; #118",
+        ("embeddinggemma@v2", "held_out/paraphrase"): "replaced by #105 and #118; #80 undecided",
+        ("embeddinggemma@v2", "held_out/identifier"): "replaced by #105 and #118; #80 undecided",
     }
 
     @pytest.fixture
@@ -583,13 +611,27 @@ class TestTheRealDocsCorpus:
             if "expected" in case
             for label in (case["expected"], *case.get("also_valid", {}))
         }
-        shared = [
-            case["expected"]
+        # An `also_valid` label earns credit too (#118). Counted, never listed: held-out labels
+        # stay out of test output.
+        shared = sum(
+            label in tuned
             for kind in ("paraphrase", "identifier")
             for case in queries["held_out"][kind]
-            if case["expected"] in tuned
-        ]
-        assert not shared, f"{len(shared)} held-out answer(s) are dev answers too"
+            for label in (case["expected"], *case.get("also_valid", {}))
+        )
+        assert shared == 0, f"{shared} held-out answer(s) are dev answers too"
+
+    def test_no_v2_held_out_query_is_a_retired_one(self, evaluation: object) -> None:
+        """#118: a spent stratum is replaced, never reused - not one query of it."""
+        corpus = evaluation.corpora()["v2"]  # type: ignore[attr-defined]
+        queries = json.loads(corpus.queries.read_text(encoding="utf-8"))
+        reused = sum(
+            hashlib.sha256(" ".join(case["query"].casefold().split()).encode()).hexdigest()[:16]
+            in RETIRED_V2_QUERIES
+            for kind in ("paraphrase", "identifier")
+            for case in queries["held_out"][kind]
+        )
+        assert reused == 0, f"{reused} held-out queries were retired"
 
     def test_v2_keeps_its_own_index_and_baseline(self, evaluation: object) -> None:
         import eval_cache
