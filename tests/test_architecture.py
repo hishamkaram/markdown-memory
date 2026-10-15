@@ -39,7 +39,9 @@ BUDGETS = {
     "exceptions.py": 16,
     "freshness.py": 69,
     "headings.py": 155,
-    "indexer.py": 496,
+    # Raised from 496 for #110: a renamed model's name is published with the revocation of
+    # vectors no revision vouches for, and the revocation reads the same whenever it is read.
+    "indexer.py": 504,
     "model_cache.py": 173,
     # Raised from 270 for #69: what a miss says while a fresh tree is still indexing;
     # and from 285 for #76: the top hit's excerpt.

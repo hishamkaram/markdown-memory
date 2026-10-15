@@ -1137,6 +1137,23 @@ class Database:
                     (WEIGHTS_MISMATCH_KEY, message),
                 )
 
+    def publish_model(self, name: str, revocation: str | None) -> None:
+        """Record which model builds this index; with ``revocation``, revoke it in one commit.
+
+        One commit, because either half alone is a state a reader can be left in: the name
+        without the revocation lets a searcher of that name rank another model's vectors
+        no revision vouches for (#110), and the revocation without the name refuses the
+        old model's own searchers with nothing to repair it.
+        """
+        with self.transaction() as conn:
+            if revocation is not None:
+                _revoke_weights(conn, revocation)
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (MODEL_META_KEY, name),
+            )
+
     def revoke_weights(self, message: str) -> None:
         """Withdraw the index's revision before other weights write into it.
 

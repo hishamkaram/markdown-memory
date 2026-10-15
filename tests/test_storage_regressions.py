@@ -2011,3 +2011,20 @@ class TestPerDocumentWeights:
         with pytest.raises(DatabaseError):
             db.settle_weights("b" * 40)
         assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+
+    def test_a_renamed_model_and_its_revocation_are_published_together(self, db: Database) -> None:
+        """The name without the revocation lets a searcher of that name rank the old model's
+
+        vectors (#110); the revocation without the name refuses the old model's own
+        searchers, and no run of it can clear that. Either both land or neither does.
+        """
+        db.set_meta(MODEL_META_KEY, "model-a")
+        db.connection().execute(
+            "CREATE TRIGGER refuse BEFORE INSERT ON meta "
+            "WHEN NEW.key = 'embedding_model' BEGIN SELECT RAISE(ABORT, 'no'); END"
+        )
+        with pytest.raises(DatabaseError):
+            db.publish_model("model-b", "re-embedding")
+        assert db.get_meta(MODEL_META_KEY) == "model-a"
+        assert db.get_meta("embedding_weights_revision") is None
+        assert db.get_meta("embedding_weights_mismatch") is None

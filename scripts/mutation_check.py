@@ -434,13 +434,91 @@ MUTATIONS = (
     Mutation(
         name="weights: discard every root on a rename over documents that hold no vector",
         module="indexer.py",
-        old="            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)\n",
+        old="            self._db.publish_model(self._embedder.model_name, revocation)\n",
         new=(
             "            if previous_model not in {None, self._embedder.model_name}:\n"
             "                self._db.clear()\n"
-            "            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)\n"
+            "            self._db.publish_model(self._embedder.model_name, revocation)\n"
         ),
         tests="test_a_renamed_model_over_an_index_without_vectors_takes_it_over",
+    ),
+    Mutation(
+        name="weights: publish a renamed model without revoking unvouched vectors",
+        module="indexer.py",
+        old="            self._db.publish_model(self._embedder.model_name, revocation)\n",
+        new="            self._db.publish_model(self._embedder.model_name, None)\n",
+        tests=(
+            "test_a_cancelled_rename_over_unvouched_vectors_is_not_ranked_on"
+            " or test_a_rename_is_revoked_before_any_searcher_can_read_its_name"
+            " or test_a_rename_over_another_roots_unvouched_vectors_is_not_ranked_on"
+        ),
+    ),
+    Mutation(
+        name="weights: revoke a rename over vectors a recorded revision vouches for",
+        module="indexer.py",
+        old=(
+            "                previous_model not in {None, self._embedder.model_name}\n"
+            "                and self._db.get_meta(WEIGHTS_META_KEY) is None\n"
+        ),
+        new="                previous_model not in {None, self._embedder.model_name}\n",
+        tests="test_a_rename_over_a_vouched_index_keeps_ranking_while_it_scans",
+    ),
+    Mutation(
+        name="weights: revoke unvouched vectors when the model was not renamed",
+        module="indexer.py",
+        old=(
+            "                previous_model not in {None, self._embedder.model_name}\n"
+            "                and self._db.get_meta(WEIGHTS_META_KEY) is None\n"
+        ),
+        new=(
+            "                previous_model is not None\n"
+            "                and self._db.get_meta(WEIGHTS_META_KEY) is None\n"
+        ),
+        tests="test_the_same_name_naming_its_weights_revokes_nothing_at_the_start",
+    ),
+    Mutation(
+        name="weights: revoke a rename over an index that holds no vector",
+        module="indexer.py",
+        old=(
+            "                and self._db.get_meta(WEIGHTS_META_KEY) is None\n"
+            "                and self._db.has_vectors()\n"
+        ),
+        new="                and self._db.get_meta(WEIGHTS_META_KEY) is None\n",
+        tests="test_a_rename_over_an_index_without_vectors_revokes_nothing",
+    ),
+    Mutation(
+        name="weights: say a run is re-embedding when it may have stopped",
+        module="indexer.py",
+        old="        self._db.revoke_weights(self._revocation())\n",
+        new=(
+            "        self._db.revoke_weights(\n"
+            '            f"{self._embedder.model_name} is re-embedding this index; semantic "\n'
+            '            "ranking resumes when index_directory finishes."\n'
+            "        )\n"
+        ),
+        tests="test_a_repair_stopped_after_its_first_document_says_nothing_of_a_run",
+    ),
+    Mutation(
+        name="storage: publish a model name and its revocation in two transactions",
+        module="db.py",
+        old=(
+            "        with self.transaction() as conn:\n"
+            "            if revocation is not None:\n"
+            "                _revoke_weights(conn, revocation)\n"
+        ),
+        new=(
+            "        if revocation is not None:\n"
+            "            self.revoke_weights(revocation)\n"
+            "        with self.transaction() as conn:\n"
+        ),
+        tests="test_a_renamed_model_and_its_revocation_are_published_together",
+    ),
+    Mutation(
+        name="storage: publish a model name without the revocation it was given",
+        module="db.py",
+        old="                _revoke_weights(conn, revocation)\n",
+        new="                pass\n",
+        tests="test_a_cancelled_rename_over_unvouched_vectors_is_not_ranked_on",
     ),
     Mutation(
         name="weights: record the refusal where no run of the old model can clear it",
@@ -477,8 +555,14 @@ MUTATIONS = (
     Mutation(
         name="weights: refuse a rename over documents that hold no vector",
         module="indexer.py",
-        old="                and self._db.has_vectors()\n",
-        new='                and self._db.count_rows("documents") > 0\n',
+        old=(
+            "                and self._embedder.weights_revision is None\n"
+            "                and self._db.has_vectors()\n"
+        ),
+        new=(
+            "                and self._embedder.weights_revision is None\n"
+            '                and self._db.count_rows("documents") > 0\n'
+        ),
         tests="test_a_renamed_model_over_an_index_without_vectors_takes_it_over",
         fails_with="markdown_memory.exceptions.ForeignWeightsError",
     ),
