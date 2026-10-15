@@ -94,9 +94,10 @@ heading depth and document.
 **Splits.** `dev` and `held_out`, frozen as a committed fixture. Parameters are chosen on
 `dev` only. A number from `held_out` that has influenced a decision is spent, and saying
 so afterwards does not restore it: a spent stratum is retired and replaced by queries written
-in isolation, never reused (#100 replaced corpus_v2's after #80). The cells that may veto a
-change are every shipped preset on every evaluated corpus, unless one is excluded, with its
-reason, before any result is seen - a cell dropped after it failed is selection bias.
+in isolation, never reused (#100 replaced corpus_v2's after #80, and #118 again after #96 and
+#83 ran the replacement as a final cell). The cells that may veto a change are every shipped
+preset on every evaluated corpus, unless one is excluded, with its reason, before any result is
+seen - a cell dropped after it failed is selection bias.
 
 ## Abort thresholds
 

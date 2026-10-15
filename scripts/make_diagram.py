@@ -69,7 +69,7 @@ W, H = 1120, 430
 LEFT_FILES = [
     ("README.md", 12139),
     ("CLAUDE.md", 5645),
-    ("evaluation-protocol.md", 1743),
+    ("evaluation-protocol.md", 1760),
     ("AGENTS.md", 1698),
 ]
 RIGHT_HITS = [
