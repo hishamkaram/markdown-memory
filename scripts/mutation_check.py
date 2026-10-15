@@ -1253,6 +1253,13 @@ MUTATIONS = (
         tests="TestUnitsRound4",
     ),
     Mutation(
+        name="parser: title a document by its first heading when front matter only names it",
+        module="parser.py",
+        old='return index + 1, found.get("title") or found.get("name")',
+        new='return index + 1, found.get("title")',
+        tests="test_a_named_file_without_an_h1_is_titled_by_its_name",
+    ),
+    Mutation(
         name="cache: score a cached index built from a different corpus",
         module="eval_cache.py",
         area="scripts",

@@ -13,7 +13,8 @@ Defences against real-world documentation:
   ``[Overview / Preamble]``.
 * **Front matter** - a leading block that really is YAML is kept out of the AST
   (CommonMark would misread it as a thematic break plus a setext heading) and mined
-  for ``title:``. A leading ``---`` rule followed by prose is left alone.
+  for ``title:`` or, failing that, ``name:``. A leading ``---`` rule followed by prose is
+  left alone.
 * **Unclosed code fences** - CommonMark runs such a fence to EOF, swallowing every
   heading after it. ``_resilient_fence`` replaces markdown-it's own fence rule and ends
   the fence at the next plausible heading instead, in the same pass. A fence that
@@ -66,7 +67,10 @@ logger = logging.getLogger(__name__)
 
 _STOCK_FENCE = make_fence_rule()
 _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+\S")
-_FRONT_MATTER_TITLE = re.compile(r"^title\s*:\s*(.+?)\s*$", re.IGNORECASE)
+_FRONT_MATTER_KEY = re.compile(r"^(title|name)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+# An unquoted value that YAML would not read as text: a null, a block-scalar header (its
+# text is on the lines below), or a flow collection.
+_NOT_A_NAME = re.compile(r"^(?:null|Null|NULL|~|[|>](?:[1-9][+-]?|[+-][1-9]?)?|[\[{].*)$")
 # An unquoted key starts with a letter of any script or "_" (`[^\W\d]`), never a digit.
 _YAML_KEY = re.compile(r"""^(?:"[^"]+"|'[^']+'|[^\W\d][^:#]*?)\s*:(\s|$)""")
 _HTML_TAG_NAME = re.compile(r"^</?([A-Za-z][A-Za-z0-9-]*)")
@@ -473,7 +477,11 @@ def _split_lines(text: str) -> list[str]:
 
 
 def _scan_front_matter(lines: Sequence[str]) -> tuple[int, str | None]:
-    """Return ``(first body line, front-matter title)`` for a leading YAML block."""
+    """Return ``(first body line, front-matter title)`` for a leading YAML block.
+
+    The title is ``title:``, or ``name:`` when there is none: agent and skill files name
+    themselves and often have no H1 (#128). Each key's first usable value counts.
+    """
     if not lines or lines[0].rstrip() != "---":
         return 0, None
     for index in range(1, len(lines)):
@@ -481,14 +489,28 @@ def _scan_front_matter(lines: Sequence[str]) -> tuple[int, str | None]:
             block = lines[1:index]
             if not _looks_like_yaml(block):
                 return 0, None
-            title: str | None = None
+            found: dict[str, str] = {}
             for line in block:
-                match = _FRONT_MATTER_TITLE.match(line)
+                match = _FRONT_MATTER_KEY.match(line)
                 if match:
-                    title = match.group(1).strip("\"'") or None
-                    break
-            return index + 1, title
+                    value = _usable_value(match.group(2))
+                    if value is not None:
+                        found.setdefault(match.group(1).lower(), value)
+            return index + 1, found.get("title") or found.get("name")
     return 0, None
+
+
+def _usable_value(raw: str) -> str | None:
+    """A front-matter value as a title, or ``None`` when it names nothing.
+
+    Not YAML: a quoted value is always literal text; an unquoted one is refused when YAML
+    would read it as something else (`_NOT_A_NAME`).
+    """
+    quoted = len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]
+    if not quoted and _NOT_A_NAME.match(raw):
+        return None
+    text = raw.strip("\"'")
+    return text if text.strip() else None
 
 
 # "Note: read this first" between two rules is a setext heading, not metadata. A lone
