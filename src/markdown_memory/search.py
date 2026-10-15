@@ -823,7 +823,8 @@ class HybridSearcher:
         to write: a cache whose weights changed while no document did leaves indexing a
         clean no-op, and nothing would ever have set that flag. Failing rather than
         returning nothing puts it on the path that already exists for one index being
-        unusable - the other index answers alone, and only losing both is an error.
+        unusable - the other index answers alone, and only losing both is an error. A
+        model allowed to rank withdraws a mismatch it contradicts (#109).
 
         Returns what was recorded, so the caller can tell whether it still is.
         """
@@ -842,6 +843,10 @@ class HybridSearcher:
                 renamed = unnamed_rename(self._db, self._embedder)
                 if renamed is not None:
                     raise SearchError(renamed)
+                # This model ranks here, so a mismatch named weights recorded does not
+                # describe it, and none of its runs could withdraw it (#109). Its query is
+                # already embedded, so "cannot name its weights" is a loaded model's answer.
+                self._db.withdraw_weights_mismatch(self._embedder.model_name)
                 return None
             if not self._db.has_vectors():
                 return None  # nothing to rank

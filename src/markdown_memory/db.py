@@ -1126,6 +1126,7 @@ class Database:
         answer carries an `index_status`, and a fact this serious may not depend on
         which process, or which run, happens to have noticed it. ``replace=False`` keeps a
         message already recorded, in the same statement that would have written this one.
+        A search can also withdraw one: see `withdraw_weights_mismatch`.
         """
         with self.transaction() as conn:
             if message is None:
@@ -1136,6 +1137,28 @@ class Database:
                     + ("DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"),
                     (WEIGHTS_MISMATCH_KEY, message),
                 )
+
+    def withdraw_weights_mismatch(self, model: str) -> None:
+        """Drop the recorded mismatch while nothing names any weights and ``model`` built it.
+
+        Called by a search whose model may rank by vector over vectors no revision vouches
+        for, just before it does (#109). The write re-checks every fact that let it in - no
+        revision, ``model`` stored as the builder, no vector-bearing document stamped with a
+        revision in any root - so a writer that changed one meanwhile keeps the row. Read
+        first: most searches find no row, and need not take the write lock to learn that.
+        """
+        if self.get_meta(WEIGHTS_MISMATCH_KEY) is None:
+            return
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM meta WHERE key = ? "
+                "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ?) "
+                "AND EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM documents AS d "
+                "WHERE d.weights_revision IS NOT NULL AND EXISTS (SELECT 1 FROM sections AS s "
+                "JOIN units AS u ON u.section_id = s.id WHERE s.doc_id = d.id))",
+                (WEIGHTS_MISMATCH_KEY, WEIGHTS_META_KEY, MODEL_META_KEY, model),
+            )
 
     def publish_model(self, name: str, revocation: str | None) -> None:
         """Record which model builds this index; with ``revocation``, revoke it in one commit.
