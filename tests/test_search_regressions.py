@@ -12,7 +12,13 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
-from markdown_memory.db import MODEL_META_KEY, WEIGHTS_META_KEY, WEIGHTS_MISMATCH_KEY, Database
+from markdown_memory.db import (
+    MODEL_META_KEY,
+    WEIGHTS_META_KEY,
+    WEIGHTS_MISMATCH_KEY,
+    WEIGHTS_REVOKED,
+    Database,
+)
 from markdown_memory.discovery import walk_order
 from markdown_memory.exceptions import DatabaseError, SearchError
 from markdown_memory.indexer import Indexer
@@ -328,6 +334,65 @@ class TestSearchRobustness:
         Indexer(db, _RevisedEmbedder("b" * 40)).index_directory(root)
         assert db.get_meta(WEIGHTS_META_KEY) == "b" * 40
 
+    def test_a_mismatch_the_ranking_model_contradicts_is_withdrawn_by_its_search(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """No revision recorded: weights that can name themselves rank by keyword and say so,
+
+        but the model that built the index - unnamed, same name - ranks by vector (#91), and
+        the sentence another process left kept telling it otherwise for good, because none
+        of its runs could withdraw it (#109). Its search does, and the named process says it
+        again on its own next search.
+        """
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# A\n\nbody number one\n")
+        Indexer(db, FakeEmbedder()).index_directory(root)
+        _ranks(db, _RevisedEmbedder("b" * 40))
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+
+        assert _ranks(db, FakeEmbedder())
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+        assert db.index_status(str(root)).verified
+
+        assert not _ranks(db, _RevisedEmbedder("b" * 40))
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+
+    def test_a_mismatch_over_a_recorded_revision_outlives_unnamed_searches(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        """A recorded revision makes the refusal real: weights that cannot name themselves
+
+        never rank against it, so the sentence saying so stays true and stays.
+        """
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "a.md").write_text("# A\n\nbody number one\n")
+        Indexer(db, _RevisedEmbedder("a" * 40)).index_directory(root)
+        for _ in range(2):
+            assert not _ranks(db, FakeEmbedder())
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is not None
+
+    def test_a_renamed_unnamed_model_withdraws_nothing(self, db: Database) -> None:
+        """Another model's name is refused before the withdrawal is reached (#91)."""
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.set_meta(MODEL_META_KEY, "fake")
+        db.record_weights_mismatch("keyword ranking only")
+        assert not _ranks(db, FakeEmbedder(model_name="other"))
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "keyword ranking only"
+
+    def test_named_vectors_in_another_root_keep_the_mismatch(self, db: Database) -> None:
+        """Vectors stamped with a revision are not this unnamed model's, wherever they are,
+
+        so its ranking does not speak for them and the sentence stays.
+        """
+        store(db, FakeEmbedder(), "/d/a.md")
+        _store_stamped(db, "/e/b.md", "c" * 40)
+        db.set_meta(MODEL_META_KEY, "fake")
+        db.record_weights_mismatch("keyword ranking only")
+        _ranks(db, FakeEmbedder())
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "keyword ranking only"
+
     def test_an_index_rebuilt_by_another_model_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -409,6 +474,60 @@ class TestSearchRobustness:
         searcher.close()
         with pytest.raises(SearchError, match="shut down"):
             searcher.search("anything")
+
+
+class TestMismatchWithdrawal:
+    """`Database.withdraw_weights_mismatch` re-checks, in its own write, every fact that let
+    an unnamed model rank (#109): one test per guard, the others held true."""
+
+    @staticmethod
+    def unvouched(db: Database) -> None:
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.set_meta(MODEL_META_KEY, "fake")
+        db.record_weights_mismatch("keyword ranking only")
+
+    def test_it_withdraws_when_nothing_names_any_weights(self, db: Database) -> None:
+        self.unvouched(db)
+        db.withdraw_weights_mismatch("fake")
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
+
+    def test_a_revoked_index_keeps_it(self, db: Database) -> None:
+        self.unvouched(db)
+        db.set_meta(WEIGHTS_META_KEY, WEIGHTS_REVOKED)
+        db.withdraw_weights_mismatch("fake")
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "keyword ranking only"
+
+    def test_another_stored_model_keeps_it(self, db: Database) -> None:
+        self.unvouched(db)
+        db.set_meta(MODEL_META_KEY, "other")
+        db.withdraw_weights_mismatch("fake")
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "keyword ranking only"
+
+    def test_a_stamped_vector_in_another_root_keeps_it(self, db: Database) -> None:
+        self.unvouched(db)
+        _store_stamped(db, "/e/b.md", "c" * 40)
+        db.withdraw_weights_mismatch("fake")
+        assert db.get_meta(WEIGHTS_MISMATCH_KEY) == "keyword ranking only"
+
+
+def _ranks(db: Database, embedder: FakeEmbedder) -> bool:
+    """Whether a search with ``embedder`` ranked any hit by vector."""
+    searcher = HybridSearcher(db, embedder)
+    try:
+        results = searcher.search("body number")
+    finally:
+        searcher.close()
+    assert results, "keyword search answers whatever the vectors are"
+    return any(result.vec_rank is not None for result in results)
+
+
+def _store_stamped(db: Database, file_path: str, revision: str) -> None:
+    sections = [draft("S", "## S\n\nbody number nine")]
+    db.replace_document(
+        file_path=file_path, title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
+        sections=sections, vectors=vectors_for(FakeEmbedder(), sections),
+        weights_revision=revision,
+    )  # fmt: skip
 
 
 class _RevisedEmbedder(FakeEmbedder):

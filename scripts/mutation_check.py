@@ -514,6 +514,40 @@ MUTATIONS = (
         tests="test_a_renamed_model_and_its_revocation_are_published_together",
     ),
     Mutation(
+        name="search: leave a mismatch standing that the ranking model contradicts",
+        module="search.py",
+        old="                self._db.withdraw_weights_mismatch(self._embedder.model_name)\n",
+        new="",
+        tests="test_a_mismatch_the_ranking_model_contradicts_is_withdrawn_by_its_search",
+    ),
+    Mutation(
+        name="storage: withdraw a mismatch over a recorded or revoked revision",
+        module="db.py",
+        old='                "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ?) "\n',
+        new='                "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND 0) "\n',
+        tests="test_a_revoked_index_keeps_it",
+    ),
+    Mutation(
+        name="storage: withdraw a mismatch whatever model built the index",
+        module="db.py",
+        old='                "AND EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = ?) "\n',
+        new='                "AND (? IS NOT NULL OR ? IS NOT NULL) "\n',
+        tests="test_another_stored_model_keeps_it",
+    ),
+    Mutation(
+        name="storage: withdraw a mismatch beside vectors stamped with a revision",
+        module="db.py",
+        old=(
+            '                "WHERE d.weights_revision IS NOT NULL AND EXISTS '
+            '(SELECT 1 FROM sections AS s "\n'
+        ),
+        new='                "WHERE 0 AND EXISTS (SELECT 1 FROM sections AS s "\n',
+        tests=(
+            "test_a_stamped_vector_in_another_root_keeps_it"
+            " or test_named_vectors_in_another_root_keep_the_mismatch"
+        ),
+    ),
+    Mutation(
         name="storage: publish a model name without the revocation it was given",
         module="db.py",
         old="                _revoke_weights(conn, revocation)\n",

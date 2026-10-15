@@ -31,7 +31,9 @@ BUDGETS = {
     "__init__.py": 44,
     "autoindex.py": 130,
     "config.py": 150,
-    "db.py": 1205,  # the outlier, grandfathered
+    # The outlier, grandfathered; raised from 1205 for #109: the withdrawal of a recorded
+    # weights mismatch that the ranking model contradicts, re-checked in its own write.
+    "db.py": 1217,
     # Raised from 210 for #70: the one way git is run (a checkout git calls bare is read as
     # one), and why a path is not in the index, naming the rule that left it out.
     "discovery.py": 310,
