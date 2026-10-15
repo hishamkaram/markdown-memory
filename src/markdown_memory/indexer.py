@@ -293,7 +293,18 @@ class Indexer:
                         "its -wal and -shm files while no markdown-memory process uses it; "
                         "the next run rebuilds it from the Markdown files."
                     )
-            self._db.set_meta(MODEL_META_KEY, self._embedder.model_name)
+            # Over vectors no revision vouches for, the name is all that tells a searcher
+            # whose they are, so it changes only together with the revocation the first
+            # vector would write anyway (#110). A recorded revision already tells every
+            # searcher, and the old weights go on ranking until this run writes.
+            revocation = None
+            if (
+                previous_model not in {None, self._embedder.model_name}
+                and self._db.get_meta(WEIGHTS_META_KEY) is None
+                and self._db.has_vectors()
+            ):
+                revocation = self._revocation()  # named weights: the guard above raised
+            self._db.publish_model(self._embedder.model_name, revocation)
             # Whatever emptied the index (an older vector format) left a notice. They are
             # dismissed only once the report carrying them exists: a run that aborts - the
             # model cannot be loaded - leaves them for the next one.
@@ -580,11 +591,18 @@ class Indexer:
         if weights == recorded:
             self._db.record_weights_mismatch(None)
             return
-        self._db.revoke_weights(
-            f"{self._embedder.model_name} is re-embedding this index with other weights "
-            f"({short_weights(weights)}). Only keyword ranking is used until every "
-            "document has been re-embedded; semantic ranking resumes when index_directory "
-            "finishes."
+        self._db.revoke_weights(self._revocation())
+
+    def _revocation(self) -> str:
+        """Why the index is revoked, in words that stay true once this run has stopped.
+
+        It is read whenever a search or a status asks, which may be long after the run
+        that wrote it was cancelled or killed, so it names no run in progress.
+        """
+        return (
+            f"{self._embedder.model_name} ({short_weights(self._embedder.weights_revision)}) "
+            "has started re-embedding this index with other weights. Only keyword ranking is "
+            "used until index_directory has re-embedded every document with them."
         )
 
     def _claim_empty_index(self) -> None:

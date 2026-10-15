@@ -21,7 +21,12 @@ from helpers import draft
 
 from markdown_memory.db import WEIGHTS_REVOKED, Database
 from markdown_memory.embedders import EmbeddingGemmaEmbedder, FastEmbedEmbedder
-from markdown_memory.exceptions import DatabaseError, IndexingError, ModelLoadError
+from markdown_memory.exceptions import (
+    DatabaseError,
+    IndexCancelled,
+    IndexingError,
+    ModelLoadError,
+)
 from markdown_memory.indexer import Indexer
 from markdown_memory.model_cache import BGE_SMALL_MODEL_NAME
 from markdown_memory.models import SectionVectors
@@ -1641,3 +1646,190 @@ def test_a_stale_document_no_walk_reaches_is_named_until_its_directory_is_indexe
     Indexer(db, _PinnedWeights("b" * 40)).index_directory(hidden)
     assert db.get_meta("embedding_weights_revision") == "b" * 40
     assert db.get_meta("embedding_weights_mismatch") is None
+
+
+# A model renamed over vectors no revision vouches for (#110). The name alone tells an
+# unnamed searcher which model built them, so it must never name the new model while those
+# vectors are still the old one's - unless the weights are revoked in the same commit.
+_NAMED_B = "b" * 40
+
+
+def _unvouched_index(db: Database, root: Path, body: str = "hello") -> None:
+    root.mkdir()
+    (root / "README.md").write_text(f"# Readme\n\n{body}\n")
+    Indexer(db, FakeEmbedder(model_name="model-a")).index_directory(root)
+    assert db.get_meta("embedding_weights_revision") is None
+
+
+def _cancelled(db: Database, embedder: FakeEmbedder, root: Path) -> None:
+    with pytest.raises(IndexCancelled):
+        Indexer(db, embedder).index_directory(root, should_stop=lambda: True)
+
+
+def test_a_cancelled_rename_over_unvouched_vectors_is_not_ranked_on(
+    db: Database, tmp_path: Path
+) -> None:
+    """The new name was published at the start of a run and the revocation only at its
+
+    first stored vector, so a run stopped in between - a server closing mid-run - left the
+    old model's vectors under the new name until the next run, and a searcher of that name
+    that cannot name its weights ranked them as its own.
+    """
+    root = tmp_path / "docs"
+    _unvouched_index(db, root)
+    renamed = FakeEmbedder(model_name="model-b", weights=_NAMED_B)
+
+    _cancelled(db, renamed, root)
+
+    assert not _ranks_by_vector(db, FakeEmbedder(model_name="model-b"))
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+    status = db.index_status(str(root))
+    assert status.verified is False
+    assert status.weights_mismatch == Indexer(db, renamed)._revocation()
+
+
+class _SearchesWhileEmbedding(FakeEmbedder):
+    """Named weights whose first embedding lets an unnamed searcher of the same name in."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(model_name="model-b", weights=_NAMED_B)
+        self._path = path
+        self.ranked: bool | None = None
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if self.ranked is None:
+            with Database(self._path) as other:  # another process's connection
+                self.ranked = _ranks_by_vector(other, FakeEmbedder(model_name="model-b"))
+        return super().embed_documents(texts)
+
+
+def test_a_rename_is_revoked_before_any_searcher_can_read_its_name(
+    db: Database, tmp_path: Path
+) -> None:
+    """While the first document embeds, the run has published the new name and stored no
+
+    vector yet: the window the issue describes, timed here from inside the embedding.
+    """
+    _unvouched_index(db, tmp_path / "docs")
+    embedder = _SearchesWhileEmbedding(db.path)
+
+    Indexer(db, embedder, workers=1).index_directory(tmp_path / "docs")
+
+    assert embedder.ranked is False
+
+
+def test_a_rename_over_another_roots_unvouched_vectors_is_not_ranked_on(
+    db: Database, tmp_path: Path
+) -> None:
+    """A root with no vector of its own never reaches the first-vector revocation, and the
+
+    old vectors in another root of the same database stayed rankable under the new name.
+    """
+    _unvouched_index(db, tmp_path / "vectors")
+    toc = tmp_path / "toc"
+    toc.mkdir()
+    (toc / "TOC.md").write_text("# One\n\n## Two\n")
+
+    Indexer(db, FakeEmbedder(model_name="model-b", weights=_NAMED_B)).index_directory(toc)
+
+    assert not _ranks_by_vector(db, FakeEmbedder(model_name="model-b"))
+    assert db.get_meta("embedding_weights_revision") == WEIGHTS_REVOKED
+
+
+def test_a_rename_over_a_vouched_index_keeps_ranking_while_it_scans(
+    db: Database, tmp_path: Path
+) -> None:
+    """A recorded revision tells every searcher whose vectors these are, so a rename has
+
+    nothing to revoke until it writes one: the old weights go on ranking meanwhile.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "README.md").write_text("# Readme\n\nhello\n")
+    old = FakeEmbedder(model_name="model-a", weights="a" * 40)
+    Indexer(db, old).index_directory(root)
+
+    _cancelled(db, FakeEmbedder(model_name="model-b", weights=_NAMED_B), root)
+
+    assert db.get_meta("embedding_weights_revision") == "a" * 40
+    assert _ranks_by_vector(db, old)
+
+
+def test_the_same_name_naming_its_weights_revokes_nothing_at_the_start(
+    db: Database, tmp_path: Path
+) -> None:
+    """Not a rename: the name already describes the stored vectors, and searchers of it
+
+    may go on ranking until the run's first vector says otherwise.
+    """
+    root = tmp_path / "docs"
+    _unvouched_index(db, root)
+
+    _cancelled(db, FakeEmbedder(model_name="model-a", weights="a" * 40), root)
+
+    assert db.get_meta("embedding_weights_revision") is None
+
+
+def test_a_rename_over_an_index_without_vectors_revokes_nothing(
+    db: Database, tmp_path: Path
+) -> None:
+    """No vector, nothing to mistake: a completed run would drop the revocation again, so
+
+    only a stopped one shows whether it was written.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "TOC.md").write_text("# One\n\n## Two\n")
+    Indexer(db, FakeEmbedder(model_name="model-a")).index_directory(root)
+
+    _cancelled(db, FakeEmbedder(model_name="model-b", weights=_NAMED_B), root)
+
+    assert db.get_meta("embedding_weights_revision") is None
+    assert db.get_meta("embedding_weights_mismatch") is None
+
+
+def test_a_cancelled_rename_is_repaired_by_the_next_full_run(tmp_path: Path) -> None:
+    """The revocation a stopped run leaves is the ordinary one: the next run, in a new
+
+    process, re-embeds every document with the new weights and vouches for them.
+    """
+    root = tmp_path / "docs"
+    path = tmp_path / "index.db"
+    renamed = FakeEmbedder(model_name="model-b", weights=_NAMED_B)
+    with Database(path) as db:
+        _unvouched_index(db, root)
+        _cancelled(db, renamed, root)
+
+    with Database(path) as db:
+        Indexer(db, renamed).index_directory(root)
+        assert db.get_meta("embedding_weights_revision") == _NAMED_B
+        assert db.get_meta("embedding_weights_mismatch") is None
+        assert _ranks_by_vector(db, renamed)
+
+
+def test_a_repair_stopped_after_its_first_document_says_nothing_of_a_run(
+    db: Database, tmp_path: Path
+) -> None:
+    """The first stored vector revokes the index; if the run stops there, the sentence it
+
+    left is read long after, so it may not say a run is going on or about to finish.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in ("a", "b"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+    Indexer(db, FakeEmbedder(model_name="model-a", weights="a" * 40)).index_directory(root)
+    renamed = FakeEmbedder(model_name="model-b", weights=_NAMED_B)
+
+    def one_stored() -> bool:
+        stamps = [known[3] for known in db.document_hashes(str(root)).values()]
+        return _NAMED_B in stamps
+
+    with pytest.raises(IndexCancelled):
+        Indexer(db, renamed, workers=1).index_directory(root, should_stop=one_stored)
+
+    stamps = [known[3] for known in db.document_hashes(str(root)).values()]
+    assert stamps.count(_NAMED_B) == 1
+    message = db.get_meta("embedding_weights_mismatch")
+    assert message == Indexer(db, renamed)._revocation()
+    assert "is re-embedding" not in message and "finishes" not in message
