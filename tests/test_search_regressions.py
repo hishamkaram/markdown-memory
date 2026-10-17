@@ -6,6 +6,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -2443,3 +2444,56 @@ class TestTheVectorTieAtTheCap:
         finally:
             db.connection().set_trace_callback(None)
         assert len([sql for sql in statements if "MATCH" in sql]) == 2
+
+    @pytest.mark.parametrize("stored_first", [True, False], ids=["nan-first", "nan-last"])
+    def test_a_nan_distance_does_not_take_a_tied_rows_slot(
+        self, db: Database, stored_first: bool
+    ) -> None:
+        # Components that are not zero as Python floats but are as float32: the stored vector
+        # is zero, its cosine distance NaN, and sqlite-vec still spends a slot of `k` on it.
+        # Two of them: with `limit` 2, `k` 3 can read them both and keep one row, too few to
+        # show where the cut falls.
+        tiny = [1e-300] * DEFAULT_EMBEDDING_DIM
+        nan = ["/d/y.md", "/d/z.md"]
+        tied = ["/d/a.md", "/d/b.md", "/d/c.md"]
+        for file_path in [*nan, *tied] if stored_first else [*tied, *nan]:
+            vector = tiny if file_path in nan else self.EDGE
+            _put(db, file_path, ["x"], vector, [vector])
+        assert sorted(_files(db, [sid for sid, _ in db.vec_search(self.QUERY, 2)])) == tied
+        assert len(db.unit_search(self.QUERY, 2)) == 3
+
+    def test_the_scan_at_the_cap_reads_the_snapshot_its_edge_came_from(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        for n in range(4):
+            _put(db, f"/d/b{n}.md", ["b"], self.EDGE, [self.EDGE])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        far = _axis(0, 1)
+
+        def re_index() -> None:  # another connection, as a concurrent indexing run would be
+            for n in range(4):
+                _put(db, f"/d/b{n}.md", ["b"], far, [far])
+
+        moved: list[bool] = []
+
+        def between(sql: str) -> None:
+            if "vec_distance_cosine" in sql and not moved:
+                moved.append(True)
+                writer = threading.Thread(target=re_index)
+                writer.start()
+                writer.join()
+
+        db.connection().set_trace_callback(between)
+        try:
+            found = db.vec_search(self.QUERY, 2)
+        finally:
+            db.connection().set_trace_callback(None)
+        assert moved, "the scan ran"
+        assert len(found) == 5, "the tie the first read found, not what replaced it"
+
+    def test_a_limit_below_one_returns_nothing(self, db: Database) -> None:
+        _put(db, "/d/a.md", ["alpha"], self.QUERY, [self.QUERY])
+        assert db.fts_search('"alpha"', 0) == []
+        assert db.vec_search(self.QUERY, 0) == []
+        assert db.unit_search(self.QUERY, 0) == []

@@ -1318,6 +1318,8 @@ class Database:
         page afterwards would return fewer rows than asked for whenever a neighbouring
         documentation root in the same database ranks higher.
         """
+        if limit < 1:
+            return []
         sql = "SELECT rowid, rank FROM sections_fts WHERE sections_fts MATCH ? ORDER BY rank"
         arguments: tuple[str, ...] = (match_query,)
         if scope is not None:
@@ -1356,6 +1358,8 @@ class Database:
         cap is read by scanning for every distance up to its own, with the function the KNN
         itself computes distances with, so the values compare exactly.
         """
+        if limit < 1:
+            return []
         table, column = nearest.split(".")
         query = serialize_embedding(embedding)
         knn = (
@@ -1370,20 +1374,29 @@ class Database:
         )
         with self._reading() as conn:
 
-            def ask(sql: str, value: object) -> list[_Row]:
-                cursor = conn.execute(sql, {"query": query, "value": value})
-                return [shape(*row) for row in cursor if row[1] is not None]
+            def ask(sql: str, value: object) -> tuple[int, list[_Row]]:
+                """How many rows the source read, and the rows with a distance."""
+                read = conn.execute(sql, {"query": query, "value": value}).fetchall()
+                return len(read), [shape(*row) for row in read if row[1] is not None]
 
             if limit >= VEC_K_MAX:
-                return ask(knn, limit)
-            k = limit + 1
-            found = ask(knn, k)
-            while len(found) == k and found[-1][1] == found[limit - 1][1]:
-                if k == VEC_K_MAX:
-                    found = ask(scan, found[limit - 1][1])
-                    break
-                k = min(2 * k, VEC_K_MAX)
-                found = ask(knn, k)
+                return ask(knn, limit)[1]
+            # One snapshot: the edge a later statement reads by is the one an earlier one found.
+            conn.execute("BEGIN")
+            try:
+                k = limit + 1
+                read, found = ask(knn, k)
+                # A NaN distance fills a slot and is dropped, so a full read that kept too few
+                # rows to show the edge is widened as a tie would be.
+                while read == k and (len(found) <= limit or found[-1][1] == found[limit - 1][1]):
+                    if k == VEC_K_MAX:
+                        if len(found) > limit:
+                            found = ask(scan, found[limit - 1][1])[1]
+                        break
+                    k = min(2 * k, VEC_K_MAX)
+                    read, found = ask(knn, k)
+            finally:
+                conn.execute("COMMIT")
         return _through_tie(found, limit)
 
     def vec_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float]]:

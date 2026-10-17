@@ -3602,8 +3602,11 @@ MUTATIONS = (
     Mutation(
         name="ties: stop sqlite-vec's k one row past the limit, inside a tie",
         module="db.py",
-        old="            while len(found) == k and found[-1][1] == found[limit - 1][1]:\n",
-        new="            while False:\n",
+        old=(
+            "                while read == k and "
+            "(len(found) <= limit or found[-1][1] == found[limit - 1][1]):\n"
+        ),
+        new="                while False:\n",
         tests=(
             "test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance"
             " or test_the_passage_cut_keeps_the_walk_first_of_a_tie_and_its_first_passage"
@@ -3612,9 +3615,66 @@ MUTATIONS = (
     Mutation(
         name="ties: keep what sqlite-vec's cap let through of a tie",
         module="db.py",
-        old="                    found = ask(scan, found[limit - 1][1])\n",
-        new="                    pass\n",
+        old="                            found = ask(scan, found[limit - 1][1])[1]\n",
+        new="                            pass\n",
         tests="test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance",
+    ),
+    Mutation(
+        name="ties: let a NaN distance's slot count as no row read",
+        module="db.py",
+        old=(
+            "                return len(read), "
+            "[shape(*row) for row in read if row[1] is not None]\n"
+        ),
+        new=(
+            "                kept = [shape(*row) for row in read if row[1] is not None]\n"
+            "                return len(kept), kept\n"
+        ),
+        tests="test_a_nan_distance_does_not_take_a_tied_rows_slot",
+    ),
+    Mutation(
+        name="ties: read a tie's edge from a read that NaN slots left too short to show it",
+        module="db.py",
+        old="(len(found) <= limit or found[-1][1] == found[limit - 1][1])",
+        new="(found[-1][1] == found[limit - 1][1])",
+        tests="test_a_nan_distance_does_not_take_a_tied_rows_slot",
+        fails_with="IndexError",
+    ),
+    Mutation(
+        name="ties: let each widening read see another snapshot than the edge came from",
+        module="db.py",
+        old=(
+            "                read = conn.execute("
+            'sql, {"query": query, "value": value}).fetchall()\n'
+        ),
+        new=(
+            '                conn.execute("COMMIT")\n'
+            '                conn.execute("BEGIN")\n'
+            "                read = conn.execute("
+            'sql, {"query": query, "value": value}).fetchall()\n'
+        ),
+        tests="test_the_scan_at_the_cap_reads_the_snapshot_its_edge_came_from",
+    ),
+    Mutation(
+        name="ties: read sqlite-vec with a limit below one",
+        module="db.py",
+        old=(
+            "        if limit < 1:\n            return []\n"
+            '        table, column = nearest.split(".")\n'
+        ),
+        new='        table, column = nearest.split(".")\n',
+        tests="test_a_limit_below_one_returns_nothing",
+    ),
+    Mutation(
+        name="ties: read the keyword cursor with a limit below one",
+        module="db.py",
+        old=(
+            "        if limit < 1:\n            return []\n"
+            '        sql = "SELECT rowid, rank FROM sections_fts'
+        ),
+        new='        sql = "SELECT rowid, rank FROM sections_fts',
+        tests="test_a_limit_below_one_returns_nothing",
+        fails_with="IndexError",
     ),
     Mutation(
         name="ties: cut the section vectors in sqlite-vec's order again",

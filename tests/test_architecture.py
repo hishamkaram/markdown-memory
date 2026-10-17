@@ -34,8 +34,9 @@ BUDGETS = {
     # The outlier, grandfathered; raised from 1205 for #109: the withdrawal of a recorded
     # weights mismatch that the ranking model contradicts, re-checked in its own write;
     # and from 1217 for #107: each ranked source hands back the whole tie at its cut, with
-    # sqlite-vec's `k` widened through it and an exact scan where the tie outruns its cap.
-    "db.py": 1257,
+    # sqlite-vec's `k` widened through it, in one snapshot, past slots a NaN distance fills,
+    # and an exact scan where the tie outruns its cap.
+    "db.py": 1266,
     # Raised from 210 for #70: the one way git is run (a checkout git calls bare is read as
     # one), and why a path is not in the index, naming the rule that left it out.
     "discovery.py": 310,
