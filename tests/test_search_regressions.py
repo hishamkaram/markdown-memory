@@ -5,6 +5,7 @@ One test per defect found in code review; each fails when its fix is reverted.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -12,12 +13,15 @@ import pytest
 from fakes import FakeEmbedder, vectors_for
 from helpers import draft, store
 
+from markdown_memory import db as db_module
 from markdown_memory.db import (
+    DEFAULT_EMBEDDING_DIM,
     MODEL_META_KEY,
     WEIGHTS_META_KEY,
     WEIGHTS_MISMATCH_KEY,
     WEIGHTS_REVOKED,
     Database,
+    serialize_embedding,
 )
 from markdown_memory.discovery import walk_order
 from markdown_memory.exceptions import DatabaseError, SearchError
@@ -27,6 +31,7 @@ from markdown_memory.models import (
     SearchResult,
     Section,
     SectionDraft,
+    SectionVectors,
 )
 from markdown_memory.search import (
     HybridSearcher,
@@ -107,7 +112,7 @@ class TestSearchRobustness:
     ) -> None:
         store(db, fake_embedder, "/d/a.md")
 
-        def broken(*_arguments: object) -> list[int]:
+        def broken(*_arguments: object) -> list[tuple[int, float]]:
             raise RuntimeError("not a domain error")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -151,7 +156,7 @@ class TestSearchRobustness:
         store(db, embedder, "/d/a.md")
         db.set_meta(WEIGHTS_META_KEY, "a" * 40)
 
-        def broken(*_arguments: object) -> list[int]:
+        def broken(*_arguments: object) -> list[tuple[int, float]]:
             raise RuntimeError("not a domain error")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -724,12 +729,12 @@ class TestRankingIsActuallyTested:
             for row in db.connection().execute("SELECT id, heading_title FROM sections")
         }
         expected = [ids["Compaction"], ids["Storage"], ids["Alpha Note"]]
-        hits = db.fts_search('"compaction"', 10)
+        hits = [sid for sid, _ in db.fts_search('"compaction"', 10)]
         assert hits[0] != min(hits)  # not simply the first row that matched
         assert hits == expected
         # A scoped search is a second query with its own ORDER BY: it ranks the same way
         # or a project-scoped server silently gets row order.
-        assert db.fts_search('"compaction"', 10, "/d") == expected
+        assert [sid for sid, _ in db.fts_search('"compaction"', 10, "/d")] == expected
 
     def test_a_match_in_the_heading_outranks_one_buried_in_a_body(
         self, db: Database, fake_embedder: FakeEmbedder
@@ -745,7 +750,7 @@ class TestRankingIsActuallyTested:
             file_path="/d/a.md", title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
             sections=sections, vectors=vectors_for(fake_embedder, sections),
         )  # fmt: skip
-        first = db.fts_search('"vacuuming"', 10)[0]
+        first = db.fts_search('"vacuuming"', 10)[0][0]
         heading_match = db.connection().execute(
             "SELECT heading_title FROM sections WHERE id = ?", (first,)
         ).fetchone()  # fmt: skip
@@ -1388,7 +1393,9 @@ class TestPlainCalls:
         searched: list[str] = []
         fts_search = db.fts_search
 
-        def recording(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+        def recording(
+            match_query: str, limit: int, scope: str | None = None
+        ) -> list[tuple[int, float]]:
             searched.append(match_query)
             return fts_search(match_query, limit, scope)
 
@@ -1559,7 +1566,9 @@ class TestPlainCalls:
     ) -> None:
         searcher = self.corpus(db, fake_embedder, tmp_path / "docs")
 
-        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+        def broken(
+            match_query: str, limit: int, scope: str | None = None
+        ) -> list[tuple[int, float]]:
             raise DatabaseError("fts index unavailable")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -2267,3 +2276,170 @@ class TestExactTiesFollowTheWalk:
         assert len(places) > 50
         assert places == sorted(places)
         assert len(set(places)) == len(places), "two sections at one place: a tie left open"
+
+
+_STORED_IN_EITHER_ORDER = pytest.mark.parametrize(
+    "stored", [("/d/a.md", "/d/b.md"), ("/d/b.md", "/d/a.md")], ids=["walk-order", "reversed"]
+)
+
+
+def _axis(*weights: float) -> list[float]:
+    """A unit vector over the first axes: `_axis(1)` and `_axis(0, 1)` are cosine distance 1."""
+    vector = [0.0] * DEFAULT_EMBEDDING_DIM
+    vector[: len(weights)] = weights
+    norm = math.sqrt(sum(weight * weight for weight in weights))
+    return [value / norm for value in vector]
+
+
+def _put(
+    db: Database,
+    file_path: str,
+    passages: Sequence[str],
+    section: Sequence[float],
+    units: Sequence[Sequence[float]],
+) -> None:
+    """One document of one section, with exactly these vectors."""
+    drafts = [
+        SectionDraft(
+            heading_title="S", heading_level=2, heading_path="Doc > S", base_path="Doc > S",
+            content="## S\n\n" + "\n\n".join(passages), start_line=1, end_line=1,
+            units=tuple(passages),
+        )
+    ]  # fmt: skip
+    db.replace_document(
+        file_path=file_path, title="Doc", content_hash="h", last_modified=1, mtime_ns=1,
+        sections=drafts, vectors=[SectionVectors(section=section, units=tuple(units))],
+    )  # fmt: skip
+
+
+def _files(db: Database, section_ids: Sequence[int]) -> list[str]:
+    positions = db.section_positions(list(section_ids))
+    return [positions[sid][0] for sid in section_ids]
+
+
+class TestTheSourcesCutTiesByTheWalk:
+    """#107: which tied rows a source hands back, and in what order, follows the walk.
+
+    FTS5 returns equal ranks in rowid order and sqlite-vec keeps the later storage slot on an
+    equal distance; both follow the history of the index, not the documentation. Each test
+    stores the same two documents in both orders and expects one answer.
+    """
+
+    FAR = _axis(0, 1)
+
+    @_STORED_IN_EITHER_ORDER
+    def test_equal_bm25_ranks_follow_the_walk(self, db: Database, stored: tuple[str, str]) -> None:
+        for file_path in stored:
+            _put(db, file_path, ["alpha"], self.FAR, [self.FAR])
+        searcher = HybridSearcher(db, FakeEmbedder())
+        try:
+            ranking, _ = searcher._keyword_ranking("alpha", 5)
+        finally:
+            searcher.close()
+        assert _files(db, ranking) == ["/d/a.md", "/d/b.md"]
+
+    @_STORED_IN_EITHER_ORDER
+    def test_the_keyword_cut_keeps_the_walk_first_of_a_tie(
+        self, db: Database, stored: tuple[str, str]
+    ) -> None:
+        for file_path in stored:
+            _put(db, file_path, ["alpha"], self.FAR, [self.FAR])
+        searcher = HybridSearcher(db, FakeEmbedder())
+        try:
+            ranking, _ = searcher._keyword_ranking("alpha", 1)
+        finally:
+            searcher.close()
+        assert _files(db, ranking) == ["/d/a.md"]
+
+    @pytest.mark.parametrize("scope", [None, "/d"])
+    def test_fts_returns_the_whole_tie_at_its_limit_and_no_more(
+        self, db: Database, scope: str | None
+    ) -> None:
+        _put(db, "/d/a.md", ["alpha"], self.FAR, [self.FAR])
+        _put(db, "/d/b.md", ["alpha"], self.FAR, [self.FAR])
+        _put(db, "/d/c.md", ["alpha beta gamma delta"], self.FAR, [self.FAR])
+        rows = db.fts_search('"alpha"', 1, scope)
+        assert sorted(_files(db, [sid for sid, _ in rows])) == ["/d/a.md", "/d/b.md"]
+        assert rows[0][1] == rows[1][1], "the rank that ties is the rank returned"
+        assert len(db.fts_search('"alpha"', 3, scope)) == 3
+
+    @_STORED_IN_EITHER_ORDER
+    def test_the_section_vector_cut_keeps_the_walk_first_of_a_tie(
+        self, db: Database, stored: tuple[str, str]
+    ) -> None:
+        # Passages far from the query: the passage lane cannot hand back a section the
+        # section lane left out.
+        for file_path in stored:
+            _put(db, file_path, ["zeta"], _axis(1), [self.FAR])
+        searcher = HybridSearcher(db, FakeEmbedder())
+        try:
+            best, _ = searcher._nearest(_axis(1), 1)
+        finally:
+            searcher.close()
+        by_file = dict(zip(_files(db, list(best)), best.values(), strict=True))
+        assert by_file["/d/a.md"] < by_file["/d/b.md"]
+
+    @_STORED_IN_EITHER_ORDER
+    def test_the_passage_cut_keeps_the_walk_first_of_a_tie_and_its_first_passage(
+        self, db: Database, stored: tuple[str, str]
+    ) -> None:
+        # Twelve passages tie with the query, two of them in the target, a.md; the passage
+        # lane takes ten. The section lane's one slot goes to z.md, so only the passage lane
+        # can let the target in.
+        match, other = _axis(1), _axis(0, 0, 1)
+        documents = {
+            "/d/a.md": (["p", "q", "p"], [match, other, match]),
+            "/d/b.md": (["p"], [match]),
+            **{f"/d/c{n:02}.md": (["p"], [match]) for n in range(9)},
+        }
+        _put(db, "/d/z.md", ["z"], match, [self.FAR])
+        for file_path in (stored[0], *sorted(set(documents) - set(stored)), stored[1]):
+            passages, units = documents[file_path]
+            _put(db, file_path, passages, self.FAR, units)
+        searcher = HybridSearcher(db, FakeEmbedder())
+        try:
+            best, passages = searcher._nearest(match, 1)
+            first = searcher._in_order(best)[0]
+        finally:
+            searcher.close()
+        assert _files(db, [first]) == ["/d/a.md"]
+        assert passages[first] == (0, "p"), "the first of its equally close passages"
+
+
+class TestTheVectorTieAtTheCap:
+    """sqlite-vec refuses `k` above 4096 (#107): a tie that runs past it is read exactly."""
+
+    QUERY = _axis(1)
+    EDGE = _axis(1, 2)  # cosine distance 1 - 1/sqrt(5): a value that rounds, unlike 0 or 1
+
+    def test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        for n in range(4):
+            _put(db, f"/d/b{n}.md", ["b"], self.EDGE, [self.EDGE])
+        knn = {
+            int(sid): float(distance)
+            for sid, distance in db.connection().execute(
+                "SELECT section_id, distance FROM sections_vec WHERE embedding MATCH ? AND k = 10",
+                (serialize_embedding(self.QUERY),),
+            )
+        }
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        sections = dict(db.vec_search(self.QUERY, 2))
+        units = db.unit_search(self.QUERY, 2)
+        assert sections == knn, "every tied row, at the distance the KNN gives it"
+        assert len(units) == 5
+        assert {distance for _, distance, _, _ in units} == set(knn.values())
+
+    def test_a_cut_with_no_tie_asks_once(self, db: Database) -> None:
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        _put(db, "/d/b.md", ["b"], self.EDGE, [self.EDGE])
+        statements: list[str] = []
+        db.connection().set_trace_callback(statements.append)
+        try:
+            assert len(db.vec_search(self.QUERY, 1)) == 1
+            assert len(db.unit_search(self.QUERY, 1)) == 1
+        finally:
+            db.connection().set_trace_callback(None)
+        assert len([sql for sql in statements if "MATCH" in sql]) == 2

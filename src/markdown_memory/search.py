@@ -70,6 +70,8 @@ LITERAL_CANDIDATES = 200
 BLOCKS_BEFORE = 1
 BLOCKS_AFTER = 3
 _PASSAGES_PER_CANDIDATE = 10  # passage neighbours fetched per wanted section
+# What `_in_order` ranks: a section id, or a passage as `(section id, ordinal)`.
+_K = TypeVar("_K", int, tuple[int, int])
 
 
 # Function words carry no topical signal, yet OR-ing them into the MATCH expression makes
@@ -568,8 +570,9 @@ class HybridSearcher:
             results[0] = dataclasses.replace(results[0], excerpt=excerpt)
         return SearchPage(tuple(results), keyword_match), stale or keyword.stale
 
-    def _in_order(self, values: Mapping[int, float]) -> list[int]:
-        """Section ids by ascending value; an exact tie goes to the one the walk reaches first.
+    def _in_order(self, values: Mapping[_K, float]) -> list[_K]:
+        """Keys by ascending value; an exact tie goes to the one the walk reaches first, and
+        between two passages of one section to the lower ordinal.
 
         Not to the lower id (#103): ids follow the walk only on a fresh build. An edited
         document is stored again under new ids and would lose every tie it was in, so the
@@ -578,16 +581,21 @@ class HybridSearcher:
         was taken goes after its tie group; fetching the page then finds it gone and
         ranks again.
         """
+
+        def where(item: _K) -> tuple[int, int]:
+            return (item, 0) if isinstance(item, int) else item
+
         shared = Counter(values.values())
-        tied = [sid for sid, value in values.items() if shared[value] > 1]
+        tied = sorted({where(item)[0] for item, value in values.items() if shared[value] > 1})
         positions = self._db.section_positions(tied) if tied else {}
 
-        def key(sid: int) -> tuple[float, tuple[object, ...]]:
+        def key(item: _K) -> tuple[float, tuple[object, ...]]:
+            sid, ordinal = where(item)
             position = positions.get(sid)
             if position is None:
-                return values[sid], (1,)
+                return values[item], (1, ordinal)
             file_path, start_line, part_index = position
-            return values[sid], (0, walk_order(file_path), start_line, part_index)
+            return values[item], (0, walk_order(file_path), start_line, part_index, ordinal)
 
         return sorted(values, key=key)
 
@@ -742,7 +750,9 @@ class HybridSearcher:
         raw = self._db.fts_search(" OR ".join(terms), limit, self._scope)
         if not raw:
             return [], "no_match"
-        hits = self._gate(terms, raw)
+        # SQLite returns equal ranks, and which of them reach the limit, in storage order; it
+        # hands back the whole tie at the limit, and the walk decides (#107).
+        hits = self._gate(terms, self._in_order(dict(raw))[:limit])
         if not hits:
             return [], "filtered"
         # Heading-only sections are signposts: their children carry the same breadcrumb
@@ -905,17 +915,27 @@ class HybridSearcher:
         ceiling = max(self._db.count_rows("sections"), limit)
         fetch = limit if self._scope is None else min(limit * _SCOPED_OVERFETCH, ceiling)
         while True:
-            best: dict[int, float] = dict(self._db.vec_search(embedding, fetch))
+            # Each source hands back the whole tie at its cut, and the walk decides which of
+            # it is kept (#107): sqlite-vec keeps whichever its storage reaches last.
+            nearest = dict(self._db.vec_search(embedding, fetch))
+            best = {sid: nearest[sid] for sid in self._in_order(nearest)[:fetch]}
             # Nothing came back at all, so there is nothing a wider net can catch: the
             # root is mid-rebuild, or its vectors were discarded and not yet replaced.
             # Without this, each empty pass quadruples the fetch and asks again, all the
             # way up to the size of the corpus, on every scoped query.
             if not best:
                 return {}, {}
+            wanted = fetch * _PASSAGES_PER_CANDIDATE
+            units = {
+                (section_id, ordinal): (distance, passage)
+                for section_id, distance, passage, ordinal in self._db.unit_search(
+                    embedding, wanted
+                )
+            }
+            closest = self._in_order({unit: distance for unit, (distance, _) in units.items()})
             passages: dict[int, tuple[int, str]] = {}
-            for section_id, distance, passage, ordinal in self._db.unit_search(
-                embedding, fetch * _PASSAGES_PER_CANDIDATE
-            ):
+            for section_id, ordinal in closest[:wanted]:
+                distance, passage = units[section_id, ordinal]
                 passages.setdefault(section_id, (ordinal, passage))  # closest first: the best
                 if distance < best.get(section_id, math.inf):
                     best[section_id] = distance

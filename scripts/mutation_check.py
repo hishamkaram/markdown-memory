@@ -194,11 +194,11 @@ MUTATIONS = (
         module="db.py",
         old=(
             '"WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "\n'
-            '                    "ORDER BY rank LIMIT ?"'
+            '                "ORDER BY rank"'
         ),
         new=(
             '"WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "\n'
-            '                    "ORDER BY f.rowid LIMIT ?"'
+            '                "ORDER BY f.rowid"'
         ),
         tests="TestRankingIsActuallyTested",
     ),
@@ -3548,30 +3548,97 @@ MUTATIONS = (
     Mutation(
         name="ties: forget where in its document a tied section is",
         module="search.py",
-        old="            return values[sid], (0, walk_order(file_path), start_line, part_index)\n",
-        new="            return values[sid], (0, walk_order(file_path))\n",
+        old=(
+            "            return values[item], "
+            "(0, walk_order(file_path), start_line, part_index, ordinal)\n"
+        ),
+        new="            return values[item], (0, walk_order(file_path), ordinal)\n",
         tests="test_a_tie_inside_one_document_goes_to_the_earlier_section",
     ),
     Mutation(
         name="ties: forget which part of a cut line a tied section is",
         module="search.py",
-        old="            return values[sid], (0, walk_order(file_path), start_line, part_index)\n",
-        new="            return values[sid], (0, walk_order(file_path), start_line)\n",
+        old=(
+            "            return values[item], "
+            "(0, walk_order(file_path), start_line, part_index, ordinal)\n"
+        ),
+        new="            return values[item], (0, walk_order(file_path), start_line, ordinal)\n",
         tests="test_a_tie_between_parts_of_one_line_goes_to_the_earlier_part",
     ),
     Mutation(
         name="ties: let a section gone since the ranking win its tie on its id",
         module="search.py",
-        old="                return values[sid], (1,)\n",
-        new="                return values[sid], (0, (), sid, 0)\n",
+        old="                return values[item], (1, ordinal)\n",
+        new="                return values[item], (0, (), sid, 0, ordinal)\n",
         tests="test_a_section_gone_since_the_ranking_goes_after_its_tie",
     ),
     Mutation(
         name="ties: read every candidate's position, tied or not",
         module="search.py",
         old="        positions = self._db.section_positions(tied) if tied else {}\n",
-        new="        positions = self._db.section_positions(list(values))\n",
+        new=(
+            "        positions = self._db.section_positions("
+            "sorted({where(item)[0] for item in values}))\n"
+        ),
         tests="test_positions_are_read_only_when_something_ties",
+    ),
+    Mutation(
+        name="ties: keep equal BM25 ranks, and the keyword cut, in storage order again",
+        module="search.py",
+        old="        hits = self._gate(terms, self._in_order(dict(raw))[:limit])\n",
+        new="        hits = self._gate(terms, [sid for sid, _ in raw][:limit])\n",
+        tests=(
+            "test_equal_bm25_ranks_follow_the_walk"
+            " or test_the_keyword_cut_keeps_the_walk_first_of_a_tie"
+        ),
+    ),
+    Mutation(
+        name="ties: stop the keyword cursor at the limit, inside a tie",
+        module="db.py",
+        old="                if len(rows) >= limit and rank != rows[limit - 1][1]:\n",
+        new="                if len(rows) >= limit:\n",
+        tests="test_fts_returns_the_whole_tie_at_its_limit_and_no_more",
+    ),
+    Mutation(
+        name="ties: stop sqlite-vec's k one row past the limit, inside a tie",
+        module="db.py",
+        old="            while len(found) == k and found[-1][1] == found[limit - 1][1]:\n",
+        new="            while False:\n",
+        tests=(
+            "test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance"
+            " or test_the_passage_cut_keeps_the_walk_first_of_a_tie_and_its_first_passage"
+        ),
+    ),
+    Mutation(
+        name="ties: keep what sqlite-vec's cap let through of a tie",
+        module="db.py",
+        old="                    found = ask(scan, found[limit - 1][1])\n",
+        new="                    pass\n",
+        tests="test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance",
+    ),
+    Mutation(
+        name="ties: cut the section vectors in sqlite-vec's order again",
+        module="search.py",
+        old="            best = {sid: nearest[sid] for sid in self._in_order(nearest)[:fetch]}\n",
+        new="            best = dict(list(nearest.items())[:fetch])\n",
+        tests="test_the_section_vector_cut_keeps_the_walk_first_of_a_tie",
+    ),
+    Mutation(
+        name="ties: cut the passage vectors in sqlite-vec's order again",
+        module="search.py",
+        old="            for section_id, ordinal in closest[:wanted]:\n",
+        new="            for section_id, ordinal in list(units)[:wanted]:\n",
+        tests="test_the_passage_cut_keeps_the_walk_first_of_a_tie_and_its_first_passage",
+    ),
+    Mutation(
+        name="ties: let a section's equally close passages follow sqlite-vec's order",
+        module="search.py",
+        old=(
+            "            return values[item], "
+            "(0, walk_order(file_path), start_line, part_index, ordinal)\n"
+        ),
+        new="            return values[item], (0, walk_order(file_path), start_line, part_index)\n",
+        tests="test_the_passage_cut_keeps_the_walk_first_of_a_tie_and_its_first_passage",
     ),
     Mutation(
         name="ties: put a directory's sub-directories before its own files",
