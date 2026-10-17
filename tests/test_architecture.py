@@ -32,8 +32,11 @@ BUDGETS = {
     "autoindex.py": 130,
     "config.py": 150,
     # The outlier, grandfathered; raised from 1205 for #109: the withdrawal of a recorded
-    # weights mismatch that the ranking model contradicts, re-checked in its own write.
-    "db.py": 1217,
+    # weights mismatch that the ranking model contradicts, re-checked in its own write;
+    # and from 1217 for #107: each ranked source hands back the whole tie at its cut, with
+    # sqlite-vec's `k` widened through it, in one snapshot, past slots a NaN distance fills,
+    # and an exact scan where the tie outruns its cap.
+    "db.py": 1266,
     # Raised from 210 for #70: the one way git is run (a checkout git calls bare is read as
     # one), and why a path is not in the index, naming the rule that left it out.
     "discovery.py": 310,
@@ -52,8 +55,9 @@ BUDGETS = {
     # Raised from 399 for #75: an identifier lookup ranks the sections that name it;
     # and from 460 for #76: the top hit as its matched passage and neighbours (a list
     # counted as one block), and every check that decides when the whole section is sent;
-    # and from 568 for #79: a plain call (`rate()`) is an identifier, and never a stopword.
-    "search.py": 624,
+    # and from 568 for #79: a plain call (`rate()`) is an identifier, and never a stopword;
+    # and from 624 for #107: the keyword, section and passage sources cut their ties by the walk.
+    "search.py": 634,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
     # sent relative to the root, a relative path resolved back under it first, and the

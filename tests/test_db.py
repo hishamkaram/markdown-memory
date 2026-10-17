@@ -299,8 +299,8 @@ class TestRepository:
     def test_fts_and_vector_primitives(self, db: Database, fake_embedder: FakeEmbedder) -> None:
         document = store(db, fake_embedder, "/docs/a.md", SECTIONS)
         ids = {s.heading_title: s.id for s in db.get_sections(document.id)}
-        assert db.fts_search('"ORBIT_MAX_RETRIES"', 10) == [ids["Retries"]]
-        assert db.fts_search('"sigterm"', 10) == [ids["Shutdown"]]
+        assert [sid for sid, _ in db.fts_search('"ORBIT_MAX_RETRIES"', 10)] == [ids["Retries"]]
+        assert [sid for sid, _ in db.fts_search('"sigterm"', 10)] == [ids["Shutdown"]]
         nearest = db.vec_search(fake_embedder.embed_query("drains connections on SIGTERM"), 3)
         assert nearest[0][0] == ids["Shutdown"]
         distances = [distance for _, distance in nearest]

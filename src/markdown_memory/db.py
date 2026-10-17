@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Self, TypeVar
 
 import sqlite_vec
 
@@ -79,6 +79,9 @@ _BUSY_TIMEOUT_MS = 10_000
 _WAL_ATTEMPTS = 40
 _WAL_RETRY_SECONDS = 0.05
 _SQL_VARIABLE_BATCH = 500
+# sqlite-vec 0.1.9 refuses a larger `k` (SQLITE_VEC_VEC0_K_MAX in sqlite-vec.c).
+VEC_K_MAX = 4096
+_Row = TypeVar("_Row", bound=tuple[object, ...])
 
 _SECTION_COLUMNS = (
     "id, doc_id, heading_title, heading_level, heading_path, content, "
@@ -276,6 +279,16 @@ def _revoke_weights(conn: sqlite3.Connection, message: str) -> None:
 
 def _directory_prefix(directory: str) -> str:
     return directory if directory.endswith(os.sep) else directory + os.sep
+
+
+def _through_tie(rows: list[_Row], limit: int) -> list[_Row]:
+    """The first ``limit`` rows, and every later row whose value - its second field - equals
+    the last of them: which rows of a tie a source hands back follows its storage, not the
+    documentation, so the caller is handed all of them and cuts by the walk (#107)."""
+    if len(rows) <= limit:
+        return rows
+    edge = rows[limit - 1][1]
+    return rows[:limit] + [row for row in rows[limit:] if row[1] == edge]
 
 
 class Database:
@@ -1294,46 +1307,110 @@ class Database:
 
     # ------------------------------------------------------------------ search primitives
 
-    def fts_search(self, match_query: str, limit: int, scope: str | None = None) -> list[int]:
-        """Section ids matching an FTS5 query, best BM25 rank first.
+    def fts_search(
+        self, match_query: str, limit: int, scope: str | None = None
+    ) -> list[tuple[int, float]]:
+        """``(section_id, rank)`` matching an FTS5 query, best BM25 rank first: the first
+        ``limit``, and every later one tied with the last of them (#107).
 
         ``scope`` restricts the search to documents under one directory. The predicate
         joins inside the query so the limit applies to what survives it: filtering a
         page afterwards would return fewer rows than asked for whenever a neighbouring
         documentation root in the same database ranks higher.
         """
+        if limit < 1:
+            return []
+        sql = "SELECT rowid, rank FROM sections_fts WHERE sections_fts MATCH ? ORDER BY rank"
+        arguments: tuple[str, ...] = (match_query,)
+        if scope is not None:
+            prefix = _directory_prefix(scope)
+            sql = (
+                "SELECT f.rowid, f.rank FROM sections_fts f "
+                "JOIN sections s ON s.id = f.rowid JOIN documents d ON d.id = s.doc_id "
+                "WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "
+                "ORDER BY rank"
+            )
+            arguments = (match_query, prefix, prefix)
+        rows: list[tuple[int, float]] = []
         with self._reading() as conn:
-            if scope is None:
-                rows = conn.execute(
-                    "SELECT rowid FROM sections_fts WHERE sections_fts MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (match_query, limit),
-                ).fetchall()
-            else:
-                prefix = _directory_prefix(scope)
-                rows = conn.execute(
-                    "SELECT f.rowid FROM sections_fts f "
-                    "JOIN sections s ON s.id = f.rowid JOIN documents d ON d.id = s.doc_id "
-                    "WHERE sections_fts MATCH ? AND substr(d.file_path, 1, length(?)) = ? "
-                    "ORDER BY rank LIMIT ?",
-                    (match_query, prefix, prefix, limit),
-                ).fetchall()
-        return [int(row[0]) for row in rows]
+            # No LIMIT: FTS5 sorts every match either way, and the cursor is left at the
+            # first row past the limit that does not tie the last one kept.
+            for rowid, rank in conn.execute(sql, arguments):
+                if len(rows) >= limit and rank != rows[limit - 1][1]:
+                    break
+                rows.append((int(rowid), float(rank)))
+        return rows
+
+    def _nearest_rows(
+        self,
+        nearest: str,
+        rows: str,
+        shape: Callable[..., _Row],
+        embedding: Sequence[float],
+        limit: int,
+    ) -> list[_Row]:
+        """Rows of the vec0 ``table.id_column`` named by ``nearest``, closest first: the first
+        ``limit`` and every later one tied with the last (#107). ``rows`` selects from a CTE
+        ``nearest`` of ``(id, distance)``; ``shape`` builds a row whose second field is the
+        distance. NaN distances surface as NULL and are dropped.
+
+        `k` is widened while the row past the cut still ties. A tie that runs to sqlite-vec's
+        cap is read by scanning for every distance up to its own, with the function the KNN
+        itself computes distances with, so the values compare exactly.
+        """
+        if limit < 1:
+            return []
+        table, column = nearest.split(".")
+        query = serialize_embedding(embedding)
+        knn = (
+            f"WITH nearest AS (SELECT {column} AS id, distance FROM {table} "
+            f"WHERE embedding MATCH :query AND k = :value) {rows}"
+        )
+        # `distance` in a vec0 WHERE is the table's own KNN column, so the bound is spelled out.
+        scan = (
+            f"WITH nearest AS (SELECT {column} AS id, vec_distance_cosine(embedding, :query) "
+            f"AS distance FROM {table} WHERE vec_distance_cosine(embedding, :query) <= :value) "
+            f"{rows}"
+        )
+        with self._reading() as conn:
+
+            def ask(sql: str, value: object) -> tuple[int, list[_Row]]:
+                """How many rows the source read, and the rows with a distance."""
+                read = conn.execute(sql, {"query": query, "value": value}).fetchall()
+                return len(read), [shape(*row) for row in read if row[1] is not None]
+
+            if limit >= VEC_K_MAX:
+                return ask(knn, limit)[1]
+            # One snapshot: the edge a later statement reads by is the one an earlier one found.
+            conn.execute("BEGIN")
+            try:
+                k = limit + 1
+                read, found = ask(knn, k)
+                # A NaN distance fills a slot and is dropped, so a full read that kept too few
+                # rows to show the edge is widened as a tie would be.
+                while read == k and (len(found) <= limit or found[-1][1] == found[limit - 1][1]):
+                    if k == VEC_K_MAX:
+                        # Kept too few to show an edge: every finite distance may be in it.
+                        edge = found[limit - 1][1] if len(found) > limit else math.inf
+                        found = ask(scan, edge)[1]
+                        break
+                    k = min(2 * k, VEC_K_MAX)
+                    read, found = ask(knn, k)
+            finally:
+                conn.execute("COMMIT")
+        return _through_tie(found, limit)
 
     def vec_search(self, embedding: Sequence[float], limit: int) -> list[tuple[int, float]]:
-        """``(section_id, cosine_distance)`` for the nearest section vectors, closest first."""
+        """``(section_id, cosine_distance)`` for the nearest section vectors, closest first:
+        the first ``limit``, and every later one tied with the last of them (#107)."""
         self._check_vector(embedding, "Query embedding")
-        with self._reading() as conn:
-            rows = conn.execute(
-                "SELECT section_id, distance FROM sections_vec "
-                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (serialize_embedding(embedding), limit),
-            ).fetchall()
-        return [
-            (int(section_id), float(distance))
-            for section_id, distance in rows
-            if distance is not None  # defensive: NaN distances surface as NULL
-        ]
+        return self._nearest_rows(
+            "sections_vec.section_id",
+            "SELECT id, distance FROM nearest ORDER BY distance",
+            lambda section_id, distance: (int(section_id), float(distance)),
+            embedding,
+            limit,
+        )
 
     def unit_search(
         self, embedding: Sequence[float], limit: int
@@ -1345,19 +1422,19 @@ class Database:
         can carry the same text, so the text alone cannot say where it sits.
         """
         self._check_vector(embedding, "Query embedding")
-        with self._reading() as conn:
-            rows = conn.execute(
-                "WITH nearest AS (SELECT unit_id, distance FROM units_vec "
-                "WHERE embedding MATCH ? AND k = ?) "
-                "SELECT u.section_id, nearest.distance, u.content, u.ordinal FROM nearest "
-                "JOIN units u ON u.id = nearest.unit_id ORDER BY nearest.distance",
-                (serialize_embedding(embedding), limit),
-            ).fetchall()
-        return [
-            (int(section_id), float(distance), str(content), int(ordinal))
-            for section_id, distance, content, ordinal in rows
-            if distance is not None
-        ]
+        return self._nearest_rows(
+            "units_vec.unit_id",
+            "SELECT u.section_id, nearest.distance, u.content, u.ordinal FROM nearest "
+            "JOIN units u ON u.id = nearest.id ORDER BY nearest.distance",
+            lambda section_id, distance, content, ordinal: (
+                int(section_id),
+                float(distance),
+                str(content),
+                int(ordinal),
+            ),
+            embedding,
+            limit,
+        )
 
     def units_of(self, section_id: int) -> list[str]:
         """A section's stored passages, in their order: what its vectors were embedded from."""

@@ -322,7 +322,8 @@ class TestKeywordGate:
     ) -> None:
         # only "deploy" occurs in the corpus; "undo" and "bad" carry most of the IDF mass
         assert fts_terms("how do I undo a bad deploy") == ['"undo"', '"bad"', '"deploy"']
-        assert titles(db, db.fts_search('"undo" OR "bad" OR "deploy"', 20)) == ["Kubernetes"]
+        hits = [sid for sid, _ in db.fts_search('"undo" OR "bad" OR "deploy"', 20)]
+        assert titles(db, hits) == ["Kubernetes"]
         # BM25 found a candidate and the gate refused it: `filtered`, never `no_match`.
         assert searcher._keyword_ranking("how do I undo a bad deploy", 20) == ([], "filtered")
 

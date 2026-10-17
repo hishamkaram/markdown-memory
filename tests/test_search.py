@@ -224,7 +224,7 @@ class TestHybridSearch:
     def test_keyword_failure_degrades_to_vector_only(
         self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def broken(match_query: str, limit: int) -> list[int]:
+        def broken(match_query: str, limit: int) -> list[tuple[int, float]]:
             raise DatabaseError("fts index unavailable")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -322,7 +322,9 @@ class TestKeywordMatch:
     def test_a_failed_keyword_index_is_unavailable_while_vectors_answer(
         self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+        def broken(
+            match_query: str, limit: int, scope: str | None = None
+        ) -> list[tuple[int, float]]:
             raise DatabaseError("fts index unavailable")
 
         monkeypatch.setattr(db, "fts_search", broken)
@@ -448,7 +450,9 @@ class TestAbstention:
     def test_a_failed_keyword_index_never_abstains(
         self, db: Database, fake_searcher: HybridSearcher, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def broken(match_query: str, limit: int, scope: str | None = None) -> list[int]:
+        def broken(
+            match_query: str, limit: int, scope: str | None = None
+        ) -> list[tuple[int, float]]:
             raise DatabaseError("fts index unavailable")
 
         monkeypatch.setattr(db, "fts_search", broken)
