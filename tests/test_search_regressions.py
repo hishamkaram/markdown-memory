@@ -2462,6 +2462,17 @@ class TestTheVectorTieAtTheCap:
         assert sorted(_files(db, [sid for sid, _ in db.vec_search(self.QUERY, 2)])) == tied
         assert len(db.unit_search(self.QUERY, 2)) == 3
 
+    def test_nan_slots_that_fill_the_cap_leave_the_scan_every_finite_row(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tiny = [1e-300] * DEFAULT_EMBEDDING_DIM
+        tied = ["/d/a.md", "/d/b.md", "/d/c.md"]
+        for file_path in ["/d/y.md", "/d/z.md", *tied]:
+            vector = tiny if file_path in ("/d/y.md", "/d/z.md") else self.EDGE
+            _put(db, file_path, ["x"], vector, [vector])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)  # one read of k = 3: two NaN, one row
+        assert sorted(_files(db, [sid for sid, _ in db.vec_search(self.QUERY, 2)])) == tied
+
     def test_the_scan_at_the_cap_reads_the_snapshot_its_edge_came_from(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2471,11 +2482,13 @@ class TestTheVectorTieAtTheCap:
         monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
         far = _axis(0, 1)
 
+        moved: list[bool] = []
+        written: list[bool] = []
+
         def re_index() -> None:  # another connection, as a concurrent indexing run would be
             for n in range(4):
                 _put(db, f"/d/b{n}.md", ["b"], far, [far])
-
-        moved: list[bool] = []
+            written.append(True)
 
         def between(sql: str) -> None:
             if "vec_distance_cosine" in sql and not moved:
@@ -2490,6 +2503,7 @@ class TestTheVectorTieAtTheCap:
         finally:
             db.connection().set_trace_callback(None)
         assert moved, "the scan ran"
+        assert written, "the re-index committed before the scan read"
         assert len(found) == 5, "the tie the first read found, not what replaced it"
 
     def test_a_limit_below_one_returns_nothing(self, db: Database) -> None:

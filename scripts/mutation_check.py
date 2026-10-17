@@ -3615,9 +3615,16 @@ MUTATIONS = (
     Mutation(
         name="ties: keep what sqlite-vec's cap let through of a tie",
         module="db.py",
-        old="                            found = ask(scan, found[limit - 1][1])[1]\n",
-        new="                            pass\n",
+        old="                        found = ask(scan, edge)[1]\n",
+        new="                        pass\n",
         tests="test_a_tie_wider_than_the_cap_comes_back_whole_at_the_knn_distance",
+    ),
+    Mutation(
+        name="ties: scan nothing when NaN slots at the cap left no edge",
+        module="db.py",
+        old="if len(found) > limit else math.inf\n",
+        new="if len(found) > limit else -math.inf\n",
+        tests="test_nan_slots_that_fill_the_cap_leave_the_scan_every_finite_row",
     ),
     Mutation(
         name="ties: let a NaN distance's slot count as no row read",

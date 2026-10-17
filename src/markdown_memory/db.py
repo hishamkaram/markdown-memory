@@ -1390,8 +1390,9 @@ class Database:
                 # rows to show the edge is widened as a tie would be.
                 while read == k and (len(found) <= limit or found[-1][1] == found[limit - 1][1]):
                     if k == VEC_K_MAX:
-                        if len(found) > limit:
-                            found = ask(scan, found[limit - 1][1])[1]
+                        # Kept too few to show an edge: every finite distance may be in it.
+                        edge = found[limit - 1][1] if len(found) > limit else math.inf
+                        found = ask(scan, edge)[1]
                         break
                     k = min(2 * k, VEC_K_MAX)
                     read, found = ask(knn, k)
