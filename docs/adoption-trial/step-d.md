@@ -209,3 +209,53 @@ Results go to #134 as a comment:
 - the setup record and all four checks;
 - grader agreement and every disagreement;
 - Step C's corrected Codex finding, that no arm-B record holds its treatment.
+
+## Amendment 1 (2026-10-25, before any trial session)
+
+Made after the four checks and before the first trial session. Nothing here was chosen from a
+trial result: none exists yet.
+
+**Agent versions.** Both agents moved between the freeze and the checks. They are frozen at:
+
+| Agent | Frozen above | Frozen now |
+| --- | --- | --- |
+| Codex CLI | 0.163.0 | 0.164.0 |
+| Claude Code | 2.1.301 | 2.1.310 |
+
+The reason for checking isolation by construction still holds at 0.164.0: rust-v0.164.0
+`codex-rs/rollout/src/policy.rs` still lists `HookStarted` and `HookCompleted` among the events it
+does not persist.
+
+**Codex's effort.** A session started in the trial home without an effort override writes
+`turn_context` records with no `effort` field. The delivery check fails such a session, as it
+should, since the field is the evidence. The effort is therefore pinned with `--codex-effort low`.
+`low` is `gpt-6.1-sol`'s `default_reasoning_level` in the trial home's `models_cache.json`, so the
+pin keeps the default effort and makes Codex record it. This was found with one session in an
+empty git repository outside the clones, not with the first inventory probe as frozen above. All
+four inventory probes then ran with the pin and passed the delivery check.
+
+**Codex's default features.** With the overrides, `codex features list` reports `apps`, `plugins`,
+`hooks` and `memories` false, and `multi_agent` true. `multi_agent` is left at its default. It adds
+two developer messages (`<multi_agent_role>`, `<multi_agent_mode>`) to every session's startup.
+That is the same in both arms.
+
+**Resolved models.** Codex: `gpt-6.1-sol`, effort `low`. Claude: `claude-opus-5-5`, its provider
+default, as every forced Claude probe's `init` reports it.
+
+**Evidence kept** in the trial's data directory, with SHA-256 sums: `codex features list` with and
+without the overrides, and the effort-discovery session's rollout and its startup summary.
+
+**Check results.**
+1. Trial home: `auth.json` and Codex's own state (`sessions/`, `log/`, `tmp/`, SQLite state,
+   `models_cache.json`, `installation_id`, `shell_snapshots/`), with only `.system` in `skills/`.
+   There is no `config.toml`, `AGENTS.md*`, `hooks.json` or `plugins/`.
+2. Features: `apps`, `plugins` and `hooks` false (each defaults to true without the overrides).
+3. Inventory: all four probes passed and list the same 18 tools: 13 native and the server's five.
+   There is no `codex_apps` tool and no other server.
+4. Forced probes: 8/8 made one successful `search_docs` call in their arm's clone. The four Codex
+   probes passed the delivery check.
+
+**Drift.** The setup record (agent binaries and versions, both resolved models, Codex's effort, the server commit
+and `uv.lock`, the model files, the four clones' HEAD and the four databases, all by SHA-256) is
+taken again before and after each repository's run. Any difference aborts the run. The harness
+does not check this itself.
