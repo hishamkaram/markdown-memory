@@ -13,14 +13,14 @@ matched and its neighbours - quoted verbatim, with pointers to the next few.
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-dark.svg">
   <source srcset="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.svg">
   <img src="https://raw.githubusercontent.com/hishamkaram/markdown-memory/main/docs/assets/how-it-works-light.png" width="100%"
-       alt="One question asked of four documentation files. Reading them whole costs 21,242
+       alt="One question asked of four documentation files. Reading them whole costs 21,511
             tokens. markdown-memory splits them at every heading, ranks by keywords and by
             vectors, fuses the two, and returns the passage that answers, 275 tokens of a
             407-token section, in a ~608-token call with four pointers to the rest.">
 </picture>
 
 Measured on this repository's own documentation - `README.md`, `CLAUDE.md`, `AGENTS.md` and
-`docs/evaluation-protocol.md`, 21,242 tokens in all:
+`docs/evaluation-protocol.md`, 21,511 tokens in all:
 
 ```
 search_docs("where does the embedding model get downloaded")
@@ -33,7 +33,7 @@ search_docs("where does the embedding model get downloaded")
   119 tok  README.md  markdown-memory > Install > Get it
 ```
 
-**A 275-token excerpt in a ~608-token call, instead of 21,242**: the passage that answers and
+**A 275-token excerpt in a ~608-token call, instead of 21,511**: the passage that answers and
 the three after it, verbatim, marked `excerpt: true` - one `read_section` returns
 the whole 407-token section when that is not enough. The other four come back as pointers -
 where each section is, what reading it costs, and the passage that matched - so when the first
@@ -117,6 +117,24 @@ either, so name the documentation root:
 first launch downloads about 250 MB of dependencies before the server can answer, longer
 than Codex waits by default - set `startup_timeout_sec = 60` under
 `[mcp_servers.markdown-memory]` in `~/.codex/config.toml` if you go that way.
+
+### Tell Codex to use it
+
+Registered, the server is one of Codex's tools, but a default Codex may never look for it. In code
+mode the model finds MCP tools by searching its tool list, and it searches for what its
+instructions name. Add this line to the repository's `AGENTS.md` (create the file if there is
+none):
+
+```markdown
+- For questions about this repository's documentation, call the `search_docs` tool (markdown-memory MCP server) before grepping or reading Markdown files; use `read_section` only when the text it returns is not enough.
+```
+
+Measured in a paired A/B trial on 40 documentation questions over uv and vite
+([#134](https://github.com/hishamkaram/markdown-memory/issues/134), protocol in
+[`docs/adoption-trial/step-d.md`](docs/adoption-trial/step-d.md)). A default Codex (CLI 0.164.0,
+`gpt-6.1-sol`) called the server in 0/40 sessions without the line and in 40/40 with it (95%
+interval 91-100%). Answer accuracy did not drop by the trial's harm guard. Those were authored
+tasks, not real use. Claude Code already called it in every session either way.
 
 ### Headless and sandboxed agents
 

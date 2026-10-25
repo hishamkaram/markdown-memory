@@ -1042,3 +1042,9 @@ class TestStepDWiring:
         assert trial.protocol_of(out) is trial.STEP_D
         claude = [c for c in calls if c["argv"][0] == "claude"]
         assert all(c["env"]["DISABLE_AUTOUPDATER"] == "1" for c in claude)
+
+
+def test_the_readme_recommends_the_rule_step_d_measured(trial: Any) -> None:
+    # A reworded README line is not the rule the trial measured (#134).
+    readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    assert trial.RULE in readme
