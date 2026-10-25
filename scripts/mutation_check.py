@@ -2561,9 +2561,162 @@ MUTATIONS = (
         name="trial: test each agent at 0.05 again, ignoring that two are tested",
         module="adoption_trial.py",
         area="scripts",
-        old="ALPHA = Fraction(1, 40)",
-        new="ALPHA = Fraction(1, 20)",
+        old="        return FAMILY_ALPHA / len(self.effect_agents)",
+        new="        return FAMILY_ALPHA",
         tests="test_the_sign_test_holds_at_alpha_0_025_exactly_where_the_protocol_says",
+    ),
+    Mutation(
+        name="trial: count a failed or unanswered retrieval call as Step D adoption",
+        module="adoption_trial.py",
+        area="scripts",
+        old="call.tool in RETRIEVAL_TOOLS and (not successful_only or (call.paired and not call.failed))",  # noqa: E501
+        new="call.tool in RETRIEVAL_TOOLS",
+        tests="test_adoption_under_step_d_needs_an_answered_call_that_did_not_fail",
+    ),
+    Mutation(
+        name="trial: accept a later turn on another model or effort",
+        module="adoption_trial.py",
+        area="scripts",
+        old='"effort" not in c or (c.get("model"), c.get("effort")) != pinned for c in contexts',
+        new='"effort" not in c or (c.get("model"), c.get("effort")) != pinned for c in contexts[:1]',  # noqa: E501
+        tests="test_a_later_turn_on_another_model_fails",
+    ),
+    Mutation(
+        name="trial: take a turn that does not report its effort as the default effort",
+        module="adoption_trial.py",
+        area="scripts",
+        old='        "effort" not in c or (c.get("model"), c.get("effort")) != pinned for c in contexts',  # noqa: E501
+        new='        (c.get("model"), c.get("effort")) != pinned for c in contexts',
+        tests="test_a_turn_without_its_effort_fails",
+    ),
+    Mutation(
+        name="trial: accept a rollout that holds the brief twice",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    if len(briefs) != 1:",
+        new="    if not briefs:",
+        tests="test_the_brief_given_twice_fails",
+    ),
+    Mutation(
+        name="trial: read the whole rollout, not only what came before the brief",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    startup = [text for _, text in messages[: briefs[0]]]",
+        new="    startup = [text for _, text in messages]",
+        tests="test_what_the_session_read_after_the_brief_does_not_count",
+    ),
+    Mutation(
+        name="trial: let the operator's own instructions reach a Step D session",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    if any(word in text for text in startup for word in FOREIGN):",
+        new="    if any(word in text for text in startup[:0] for word in FOREIGN):",
+        tests="test_the_operator_s_instructions_at_startup_fail",
+    ),
+    Mutation(
+        name="trial: accept the rule in arm A",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    if expect.ruled != any(RULE in text for text in instructions):",
+        new="    if expect.ruled and not any(RULE in text for text in instructions):",
+        tests="test_the_rule_in_arm_a_fails",
+    ),
+    Mutation(
+        name="trial: trust a skill root's name without resolving its links",
+        module="adoption_trial.py",
+        area="scripts",
+        old='            root = Path(os.path.realpath(os.path.expanduser(match["path"])))',
+        new='            root = Path(os.path.expanduser(match["path"]))',
+        tests="test_a_skill_root_that_links_out_of_the_clone_fails",
+    ),
+    Mutation(
+        name="trial: take any listing of the tools as the inventory",
+        module="adoption_trial.py",
+        area="scripts",
+        old='        and str(item.get("input", "")).strip() == INVENTORY',
+        new='        and "ALL_TOOLS" in str(item.get("input", ""))',
+        tests="test_another_script_is_not_evidence",
+    ),
+    Mutation(
+        name="trial: give Codex its own home by changing ours",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    env = dict(os.environ)",
+        new="    env = os.environ",
+        tests="test_codex_gets_its_own_home_and_os_environ_is_untouched",
+    ),
+    Mutation(
+        name="trial: run Step D's Codex with apps, plugins and hooks on",
+        module="adoption_trial.py",
+        area="scripts",
+        old='        overrides += [part for line in (*ISOLATION, *pinned) for part in ("-c", line)]',  # noqa: E501
+        new='        overrides += [part for line in pinned for part in ("-c", line)]',
+        tests="test_codex_runs_without_apps_plugins_or_hooks_on_the_pinned_model",
+    ),
+    Mutation(
+        name="trial: start Codex with our own environment, not its home",
+        module="adoption_trial.py",
+        area="scripts",
+        old="            env=child_env(agent, setup),\n",
+        new="",
+        tests="test_a_codex_session_runs_in_its_own_home_and_is_vouched_for_by_its_rollout",
+    ),
+    Mutation(
+        name="trial: vouch for a Step D Codex session without reading its rollout",
+        module="adoption_trial.py",
+        area="scripts",
+        old="codex_ok(lines, arm, docs, text, setup)",
+        new="True",
+        tests="test_a_codex_session_runs_in_its_own_home_and_is_vouched_for_by_its_rollout",
+    ),
+    Mutation(
+        name="trial: accept an inventory whose native tools changed between probes",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    return baseline is None or sorted(names) == sorted(baseline)",
+        new="    return True",
+        tests="test_any_other_tool_set_fails",
+    ),
+    Mutation(
+        name="trial: accept a rollout without its base instructions",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    if not isinstance(base_text, str) or not base_text:",
+        new="    if not isinstance(base_text, str):",
+        tests="test_missing_base_instructions_fail",
+    ),
+    Mutation(
+        name="trial: let an undecodable rollout stop the run instead of failing its session",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    except (OSError, UnicodeDecodeError):",
+        new="    except OSError:",
+        tests="test_a_rollout_that_is_not_text_is_no_evidence",
+        fails_with="UnicodeDecodeError",
+    ),
+    Mutation(
+        name="trial: divide every session's calls by the adopters again",
+        module="adoption_trial.py",
+        area="scripts",
+        old="            counted = [read[t, arm] for t in mine if used[t, arm] or not protocol.successful_only]",  # noqa: E501
+        new="            counted = transcripts",
+        tests="test_calls_per_adopting_session_count_only_the_adopters",
+    ),
+    Mutation(
+        name="trial: check harm only for the agents Step D tests",
+        module="adoption_trial.py",
+        area="scripts",
+        old="        harms[agent] = harm(grades, answerable)  # every agent, whatever the protocol tests",  # noqa: E501
+        new="        harms[agent] = agent in protocol.effect_agents and harm(grades, answerable)",
+        tests="test_claude_s_harm_vetoes_a_significant_codex_effect",
+    ),
+    Mutation(
+        name="trial: report runs of two protocols under the first one's rules",
+        module="adoption_trial.py",
+        area="scripts",
+        old="    if protocol is None or any(other != protocol for other in found):",
+        new="    if protocol is None:",
+        tests="test_runs_of_two_protocols_are_refused",
     ),
     Mutation(
         name="trial: let a drop of exactly 15 points in correct answers pass",
@@ -4929,6 +5082,9 @@ def main() -> int:
             shutil.copytree(ROOT / "src", workspace / "src")
             if mutation.area == "scripts":
                 shutil.copytree(ROOT / "scripts", workspace / "scripts", ignore=_ignore_caches)
+                # The trial harness reads its frozen task files beside itself (#134).
+                trial = Path("docs") / "adoption-trial"
+                shutil.copytree(ROOT / trial, workspace / trial)
             outcome = Outcome(problem=apply(mutation, workspace))
             if not outcome.problem:
                 outcome = run_tests(workspace, mutation)
