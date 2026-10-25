@@ -236,7 +236,14 @@ four inventory probes then ran with the pin and passed the delivery check.
 
 **Codex's default features.** With the overrides, `codex features list` reports `apps`, `plugins`,
 `hooks` and `memories` false, and `multi_agent` true. `multi_agent` is left at its default. It adds
-two developer messages to every session's startup. That is the same in both arms.
+two developer messages (`<multi_agent_role>`, `<multi_agent_mode>`) to every session's startup.
+That is the same in both arms.
+
+**Resolved models.** Codex: `gpt-6.1-sol`, effort `low`. Claude: `claude-opus-5-5`, its provider
+default, as every forced Claude probe's `init` reports it.
+
+**Evidence kept** in the trial's data directory, with SHA-256 sums: `codex features list` with and
+without the overrides, and the effort-discovery session's rollout and its startup summary.
 
 **Check results.**
 1. Trial home: `auth.json` and Codex's own state (`sessions/`, `log/`, `tmp/`, SQLite state,
@@ -248,7 +255,7 @@ two developer messages to every session's startup. That is the same in both arms
 4. Forced probes: 8/8 made one successful `search_docs` call in their arm's clone. The four Codex
    probes passed the delivery check.
 
-**Drift.** The setup record (agent binaries and versions, the model and effort, the server commit
+**Drift.** The setup record (agent binaries and versions, both resolved models, Codex's effort, the server commit
 and `uv.lock`, the model files, the four clones' HEAD and the four databases, all by SHA-256) is
 taken again before and after each repository's run. Any difference aborts the run. The harness
 does not check this itself.
