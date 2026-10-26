@@ -960,8 +960,15 @@ def unnamed_rename(db: Database, embedder: Embedder) -> str | None:
     built: no revision can tell the two apart, so the stored model name is all there is
     (#91). Indexing refuses to write in that state, so it lasts until the person acts, and
     this is computed rather than stored so that it ends exactly when they do.
+
+    Only when neither side names weights. A recorded revision says whose the vectors are,
+    whatever name was published since: a rename cancelled before its first vector leaves
+    the new name over the old revision and the old vectors, and a model that has not loaded
+    yet cannot name its weights either (#141). The price is a model that cannot name them
+    even once loaded, under another name: nothing is said before it searches, and its first
+    search refuses the vectors and records why.
     """
-    if embedder.weights_revision is not None:
+    if embedder.weights_revision is not None or db.get_meta(WEIGHTS_META_KEY) is not None:
         return None
     previous = db.get_meta(MODEL_META_KEY)
     if previous in {None, embedder.model_name} or not db.has_vectors():

@@ -3249,6 +3249,18 @@ MUTATIONS = (
         tests="test_a_renamed_model_that_cannot_name_its_weights_is_reported_while_it_lasts",
     ),
     Mutation(
+        name="status: let a stored name decide over a recorded weights revision",
+        module="search.py",
+        old=(
+            "    if embedder.weights_revision is not None"
+            " or db.get_meta(WEIGHTS_META_KEY) is not None:\n"
+        ),
+        new="    if embedder.weights_revision is not None:\n",
+        tests="test_a_recorded_revision_leaves_the_name_nothing_to_decide "
+        "or test_the_model_that_built_it_is_not_told_another_did "
+        "or test_a_rename_cancelled_by_another_process_starts_no_run",
+    ),
+    Mutation(
         name="status: derive the rename for the root only, not for a directory",
         module="server.py",
         old=(
