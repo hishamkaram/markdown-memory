@@ -448,6 +448,21 @@ class TestSearchRobustness:
             assert results and any(r.vec_rank is not None for r in results) is ranked
         assert db.get_meta(WEIGHTS_MISMATCH_KEY) is None
 
+    @pytest.mark.parametrize("recorded", ["a" * 40, WEIGHTS_REVOKED])
+    def test_a_recorded_revision_leaves_the_name_nothing_to_decide(
+        self, db: Database, recorded: str
+    ) -> None:
+        """Names decide only when neither side names its weights (#91), for the status as for
+
+        search. A rename cancelled before its first vector leaves the new name over the old
+        revision and the old vectors, and a model that has not loaded yet was told the
+        index was the new name's (#141).
+        """
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.set_meta(MODEL_META_KEY, "model-b")
+        db.set_meta(WEIGHTS_META_KEY, recorded)
+        assert unnamed_rename(db, FakeEmbedder(model_name="model-a")) is None
+
     def test_a_model_renamed_mid_search_is_not_ranked_on(
         self, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:

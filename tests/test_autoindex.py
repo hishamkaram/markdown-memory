@@ -8,11 +8,12 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeEmbedder, LoadsOnFirstUse
 
 import markdown_memory.server as server_module
 from markdown_memory.autoindex import AutoIndexer
 from markdown_memory.config import ServerConfig, resolve_config
+from markdown_memory.db import MODEL_META_KEY
 from markdown_memory.exceptions import IndexBusyError, IndexCancelled, ModelLoadError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import FileFailure, IndexReport, IndexStatus
@@ -473,6 +474,36 @@ class TestTheService:
             assert service.list_documents(), "the refused run changed the index"
         finally:
             service.close()
+
+
+def test_a_rename_cancelled_by_another_process_starts_no_run(tmp_path: Path) -> None:
+    """The status it measures named a mismatch that was not there (#141), and a mismatch the
+    runner has not seen is repaired at once: a needless run, loading the model to do it."""
+    root = _tree(tmp_path / "docs", ("a",))
+    config = ServerConfig(db_path=tmp_path / "index.db", docs_dir=root)
+    built = MarkdownMemoryService(
+        config, embedder=FakeEmbedder(model_name="model-a", weights="a" * 40)
+    )
+    try:
+        built.index_directory()
+    finally:
+        built.close()
+    # A server that has not searched yet, so its model has not loaded.
+    service = MarkdownMemoryService(config, embedder=LoadsOnFirstUse("model-a", "a" * 40))
+    runs: list[int] = []
+    try:
+        runner = AutoIndexer(lambda _stop: runs.append(1) or _report(), service.index_status)
+        runner.request()  # the baseline: a run that has just finished, over a sound index
+        _wait(runner)
+        with pytest.raises(IndexCancelled):  # another process, renaming
+            Indexer(
+                service.db, FakeEmbedder(model_name="model-b", weights="b" * 40)
+            ).index_directory(root, should_stop=lambda: True)
+        assert service.db.get_meta(MODEL_META_KEY) == "model-b"
+        assert not runner.consider(service.index_status())
+        assert runs == [1]
+    finally:
+        service.close()
 
 
 def _wait(runner: AutoIndexer) -> None:

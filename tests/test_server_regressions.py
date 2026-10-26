@@ -13,7 +13,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeEmbedder, LoadsOnFirstUse
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
@@ -22,15 +22,17 @@ import markdown_memory.config as config_module
 import markdown_memory.freshness as freshness_module
 import markdown_memory.server as server_module
 from markdown_memory.config import ServerConfig
-from markdown_memory.db import Database
+from markdown_memory.db import MODEL_META_KEY, WEIGHTS_META_KEY, Database
 from markdown_memory.exceptions import (
     ConfigurationError,
     DatabaseError,
     DocumentNotFoundError,
+    IndexCancelled,
     IndexingError,
     ModelLoadError,
     SearchError,
 )
+from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
     OutlineNode,
 )
@@ -1572,3 +1574,60 @@ class TestAReturnedPathReadsBackTheSameDocument:
         assert [f["file_path"] for f in shown["failures"]] == ["a/b.md", "/elsewhere/c.md"]
         assert shown["root"] == "/srv/docs"
         assert _relative_failures(status, None) == status
+
+
+class TestAStatusAfterACancelledRename:
+    """A rename cancelled before its first vector leaves the new name over the old revision
+    and the old vectors (#141). Only the revision can say whose they are."""
+
+    @staticmethod
+    def built_then_renamed(tmp_path: Path) -> ServerConfig:
+        root = tmp_path / "docs"
+        (root / "sub").mkdir(parents=True)
+        (root / "a.md").write_text("# a\n\nhello from a\n")
+        (root / "sub" / "b.md").write_text("# b\n\nhello from b\n")
+        config = ServerConfig(db_path=tmp_path / "index.db", docs_dir=root)
+        built = MarkdownMemoryService(config, FakeEmbedder(model_name="model-a", weights="a" * 40))
+        try:
+            built.index_directory()
+            with pytest.raises(IndexCancelled):
+                Indexer(
+                    built.db, FakeEmbedder(model_name="model-b", weights="b" * 40)
+                ).index_directory(root, should_stop=lambda: True)
+            assert built.db.get_meta(MODEL_META_KEY) == "model-b"
+            assert built.db.get_meta(WEIGHTS_META_KEY) == "a" * 40
+        finally:
+            built.close()
+        return config
+
+    def test_the_model_that_built_it_is_not_told_another_did(self, tmp_path: Path) -> None:
+        """Before its first query it has not loaded, so it cannot name its weights yet, and
+        the stored name used to decide: "built by model-b, configure model-b again"."""
+        config = self.built_then_renamed(tmp_path)
+        service = MarkdownMemoryService(config, LoadsOnFirstUse("model-a", "a" * 40))
+        try:
+            for status in (service.index_status(), service.index_status("sub")):
+                assert status.weights_mismatch is None
+                assert status.verified
+            results = service.search_docs("hello")
+            assert results and any(r.vec_rank is not None for r in results)
+        finally:
+            service.close()
+
+    def test_a_model_that_never_names_its_weights_is_refused_by_its_first_search(
+        self, tmp_path: Path
+    ) -> None:
+        """The price of letting the revision decide: a model that cannot name its weights even
+        once loaded, under another name, is not flagged before it searches. Its first search
+        refuses the vectors and records why, and the status says so from then on."""
+        config = self.built_then_renamed(tmp_path)
+        service = MarkdownMemoryService(config, FakeEmbedder(model_name="model-c"))
+        try:
+            assert "built by" not in (service.index_status().message() or "")
+            results = service.search_docs("hello")
+            assert results and all(r.vec_rank is None for r in results)
+            status = service.index_status()
+            assert not status.verified
+            assert "no readable revision" in (status.weights_mismatch or "")
+        finally:
+            service.close()

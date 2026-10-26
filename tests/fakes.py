@@ -67,6 +67,31 @@ class FakeEmbedder:
         return [value / norm for value in vector]
 
 
+class LoadsOnFirstUse(FakeEmbedder):
+    """An embedder that names its weights only once loaded, as fastembed's does: by
+    `warm_up` or by its first embedding."""
+
+    def __init__(self, model_name: str, weights: str) -> None:
+        super().__init__(model_name=model_name, weights=weights)
+        self.loaded = False
+
+    @property
+    def weights_revision(self) -> str | None:
+        return self._weights if self.loaded else None
+
+    def warm_up(self) -> None:
+        self.loaded = True
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if texts:  # fastembed returns an empty batch without loading anything
+            self.loaded = True
+        return super().embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        self.loaded = True
+        return super().embed_query(text)
+
+
 def vectors_for(embedder: FakeEmbedder, sections: Sequence[SectionDraft]) -> list[SectionVectors]:
     """Section + passage vectors exactly as the indexer would produce them."""
     return [
