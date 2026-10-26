@@ -35,8 +35,9 @@ BUDGETS = {
     # weights mismatch that the ranking model contradicts, re-checked in its own write;
     # and from 1217 for #107: each ranked source hands back the whole tie at its cut, with
     # sqlite-vec's `k` widened through it, in one snapshot, past slots a NaN distance fills,
-    # and an exact scan where the tie outruns its cap.
-    "db.py": 1266,
+    # and an exact scan where the tie outruns its cap. To 1290 for #146: a limit past that
+    # cap reads the KNN in pages, each from the last one's final distance on.
+    "db.py": 1290,
     # Raised from 210 for #70: the one way git is run (a checkout git calls bare is read as
     # one), and why a path is not in the index, naming the rule that left it out.
     "discovery.py": 310,
