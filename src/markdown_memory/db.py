@@ -81,7 +81,7 @@ _WAL_RETRY_SECONDS = 0.05
 _SQL_VARIABLE_BATCH = 500
 # sqlite-vec 0.1.9 refuses a larger `k` (SQLITE_VEC_VEC0_K_MAX in sqlite-vec.c).
 VEC_K_MAX = 4096
-_Row = TypeVar("_Row", bound=tuple[object, ...])
+_Row = TypeVar("_Row", bound=tuple[object, float, *tuple[object, ...]])
 
 _SECTION_COLUMNS = (
     "id, doc_id, heading_title, heading_level, heading_path, content, "
@@ -1357,6 +1357,14 @@ class Database:
         `k` is widened while the row past the cut still ties. A tie that runs to sqlite-vec's
         cap is read by scanning for every distance up to its own, with the function the KNN
         itself computes distances with, so the values compare exactly.
+
+        A limit whose first read would already pass the cap, which the KNN would refuse
+        (#146), reads it in pages of the cap: each from the last page's final distance on,
+        inclusive, keeping only what lies before that distance - every row of the table in
+        that range, since the page holds the closest - so the pages are disjoint and the tie
+        at a page's end is read whole by the next. A page that cannot get past its own first
+        distance, a tie as wide as the cap, falls back to the scan up to the limit-th finite
+        distance of the whole table.
         """
         if limit < 1:
             return []
@@ -1372,6 +1380,15 @@ class Database:
             f"AS distance FROM {table} WHERE vec_distance_cosine(embedding, :query) <= :value) "
             f"{rows}"
         )
+        # A bound on `distance` is applied before the top `k` is taken, so NaN takes no slot.
+        page = (
+            f"WITH nearest AS (SELECT {column} AS id, distance FROM {table} "
+            f"WHERE embedding MATCH :query AND k = {VEC_K_MAX} AND distance >= :value) {rows}"
+        )
+        edge_of = (
+            f"SELECT distance FROM (SELECT vec_distance_cosine(embedding, :query) AS distance "
+            f"FROM {table}) WHERE distance IS NOT NULL ORDER BY distance LIMIT 1 OFFSET :value"
+        )
         with self._reading() as conn:
 
             def ask(sql: str, value: object) -> tuple[int, list[_Row]]:
@@ -1379,11 +1396,29 @@ class Database:
                 read = conn.execute(sql, {"query": query, "value": value}).fetchall()
                 return len(read), [shape(*row) for row in read if row[1] is not None]
 
-            if limit >= VEC_K_MAX:
-                return ask(knn, limit)[1]
+            def paged() -> list[_Row]:
+                """Every row up to the limit-th distance and its tie, read page by page."""
+                found: list[_Row] = []
+                start = -1.0  # below every cosine distance
+                while True:
+                    read, got = ask(page, start)
+                    if read < VEC_K_MAX:
+                        return found + got
+                    end = got[-1][1]
+                    if end == start:
+                        bound = {"query": query, "value": limit - 1}
+                        row = conn.execute(edge_of, bound).fetchone()
+                        return ask(scan, math.inf if row is None else row[0])[1]
+                    found += [row for row in got if row[1] < end]
+                    if len(found) >= limit:
+                        return found
+                    start = end
+
             # One snapshot: the edge a later statement reads by is the one an earlier one found.
             conn.execute("BEGIN")
             try:
+                if limit >= VEC_K_MAX:
+                    return _through_tie(paged(), limit)
                 k = limit + 1
                 read, found = ask(knn, k)
                 # A NaN distance fills a slot and is dropped, so a full read that kept too few

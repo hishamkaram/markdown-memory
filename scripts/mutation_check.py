@@ -3778,6 +3778,103 @@ MUTATIONS = (
         ),
     ),
     Mutation(
+        name="cap: ask sqlite-vec for a k past its cap again",
+        module="db.py",
+        old="                if limit >= VEC_K_MAX:\n",
+        new="                if False:\n",
+        tests="test_a_limit_past_sqlite_vecs_own_cap_reads_every_row_exactly",
+        fails_with="markdown_memory.exceptions.DatabaseError",
+    ),
+    Mutation(
+        name="cap: let a limit of exactly the cap probe one past it",
+        module="db.py",
+        old="                if limit >= VEC_K_MAX:\n",
+        new="                if limit > VEC_K_MAX:\n",
+        tests="test_a_limit_of_exactly_the_cap_reads_every_row",
+        fails_with="markdown_memory.exceptions.DatabaseError",
+    ),
+    Mutation(
+        name="cap: start a page past the tie the last one ended on",
+        module="db.py",
+        old="AND k = {VEC_K_MAX} AND distance >= :value",
+        new="AND k = {VEC_K_MAX} AND distance > :value",
+        tests="test_a_limit_past_the_cap_pages_through_the_knn",
+    ),
+    Mutation(
+        name="cap: keep a page's last distance, which the next page reads again",
+        module="db.py",
+        old="found += [row for row in got if row[1] < end]",
+        new="found += [row for row in got if row[1] <= end]",
+        tests="test_a_limit_past_the_cap_pages_through_the_knn",
+    ),
+    Mutation(
+        name="cap: stop paging before the limit is reached",
+        module="db.py",
+        old="                    if len(found) >= limit:\n",
+        new="                    if found:\n",
+        tests="test_a_limit_past_the_cap_pages_through_the_knn",
+    ),
+    Mutation(
+        name="cap: keep a page stuck on a tie as wide as the cap",
+        module="db.py",
+        old="return ask(scan, math.inf if row is None else row[0])[1]",
+        new="return found + got",
+        tests="test_a_tie_as_wide_as_the_cap_falls_back_to_the_scan",
+    ),
+    Mutation(
+        name="cap: keep one passage per section across pages",
+        module="db.py",
+        old="found += [row for row in got if row[1] < end]",
+        new=(
+            "found += [row for row in got if row[1] < end"
+            " and row[0] not in {kept[0] for kept in found}]"
+        ),
+        tests="test_a_limit_past_the_cap_pages_through_the_knn",
+    ),
+    Mutation(
+        name="cap: take the fallback's edge a row short of the limit",
+        module="db.py",
+        old='bound = {"query": query, "value": limit - 1}',
+        new='bound = {"query": query, "value": limit - 2}',
+        tests="test_the_fallback_reads_up_to_the_limit_th_distance_past_the_stuck_tie",
+    ),
+    Mutation(
+        name="cap: let NaN distances count toward the fallback's edge",
+        module="db.py",
+        old="FROM {table}) WHERE distance IS NOT NULL ORDER BY distance LIMIT 1 OFFSET :value",
+        new="FROM {table}) ORDER BY distance LIMIT 1 OFFSET :value",
+        tests="test_a_tie_as_wide_as_the_cap_falls_back_to_the_scan",
+    ),
+    Mutation(
+        name="cap: scan nothing when fewer finite rows than the limit left no edge",
+        module="db.py",
+        old="math.inf if row is None else row[0]",
+        new="0.0 if row is None else row[0]",
+        tests="test_a_tie_as_wide_as_the_cap_falls_back_to_the_scan",
+    ),
+    Mutation(
+        name="cap: read each page in a snapshot of its own",
+        module="db.py",
+        old="                    start = end\n",
+        new=(
+            '                    conn.execute("COMMIT")\n'
+            '                    conn.execute("BEGIN")\n'
+            "                    start = end\n"
+        ),
+        tests="test_the_pages_past_the_cap_read_one_snapshot",
+    ),
+    Mutation(
+        name="cap: read the fallback's edge and its scan in two snapshots",
+        module="db.py",
+        old="                        row = conn.execute(edge_of, bound).fetchone()\n",
+        new=(
+            "                        row = conn.execute(edge_of, bound).fetchone()\n"
+            '                        conn.execute("COMMIT")\n'
+            '                        conn.execute("BEGIN")\n'
+        ),
+        tests="test_the_scan_past_the_cap_reads_the_snapshot_its_edge_came_from",
+    ),
+    Mutation(
         name="ties: keep what sqlite-vec's cap let through of a tie",
         module="db.py",
         old="                        found = ask(scan, edge)[1]\n",

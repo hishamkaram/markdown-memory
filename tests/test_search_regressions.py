@@ -2422,6 +2422,18 @@ class TestTheSourcesCutTiesByTheWalk:
         assert passages[first] == (0, "p"), "the first of its equally close passages"
 
 
+class _AlwaysEmbeds(FakeEmbedder):
+    """Every query is this one vector, so a test can place documents relative to it."""
+
+    def __init__(self, vector: list[float]) -> None:
+        super().__init__()
+        self._vector = vector
+
+    def embed_query(self, text: str) -> list[float]:
+        self.query_calls.append(text)
+        return self._vector
+
+
 class TestTheVectorTieAtTheCap:
     """sqlite-vec refuses `k` above 4096 (#107): a tie that runs past it is read exactly."""
 
@@ -2520,6 +2532,231 @@ class TestTheVectorTieAtTheCap:
         assert moved, "the scan ran"
         assert written, "the re-index committed before the scan read"
         assert len(found) == 5, "the tie the first read found, not what replaced it"
+
+    def test_a_limit_past_sqlite_vecs_own_cap_reads_every_row_exactly(self, db: Database) -> None:
+        # sqlite-vec refuses k > 4096 whatever the table holds (#146): a tiny table is enough.
+        for n in range(5):
+            _put(db, f"/d/{n}.md", ["x"], _axis(1, n), [_axis(1, n)])
+        knn = [
+            (int(sid), float(distance))
+            for sid, distance in db.connection().execute(
+                "SELECT section_id, distance FROM sections_vec WHERE embedding MATCH ? AND k = 10",
+                (serialize_embedding(self.QUERY),),
+            )
+        ]
+        assert db.vec_search(self.QUERY, 4097) == knn
+        units = db.unit_search(self.QUERY, 4097)
+        assert [(sid, distance) for sid, distance, _, _ in units] == knn
+
+    def test_a_limit_of_exactly_the_cap_reads_every_row(self, db: Database) -> None:
+        for n in range(3):
+            _put(db, f"/d/{n}.md", ["x"], _axis(1, n), [_axis(1, n)])
+        assert len(db.vec_search(self.QUERY, 4096)) == 3
+        assert len(db.unit_search(self.QUERY, 4096)) == 3
+
+    def test_a_tie_at_a_limit_of_the_cap_comes_back_whole(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        for n in range(4):
+            _put(db, f"/d/b{n}.md", ["b"], self.EDGE, [self.EDGE])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        assert len(db.vec_search(self.QUERY, 3)) == 5, "the first three and the whole tie"
+        assert len(db.unit_search(self.QUERY, 3)) == 5
+
+    @pytest.mark.parametrize("order", [0, 1, 2], ids=["nan-first", "nan-last", "interleaved"])
+    def test_nan_takes_no_slot_of_a_limit_at_the_cap(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch, order: int
+    ) -> None:
+        tiny = [1e-300] * DEFAULT_EMBEDDING_DIM  # zero as float32: a NaN distance
+        finite = {  # closest first; d.md is the one past the limit
+            "/d/a.md": _axis(1),
+            "/d/b.md": _axis(1, 1),
+            "/d/c.md": _axis(1, 2),
+            "/d/d.md": _axis(1, 3),
+        }
+        nan = ["/d/y.md", "/d/z.md"]
+        stored = [
+            [*nan, "/d/d.md", "/d/c.md", "/d/b.md", "/d/a.md"],
+            ["/d/d.md", "/d/b.md", "/d/c.md", "/d/a.md", *nan],
+            ["/d/c.md", nan[0], "/d/a.md", "/d/d.md", nan[1], "/d/b.md"],
+        ][order]
+        for file_path in stored:
+            vector = tiny if file_path in nan else finite[file_path]
+            _put(db, file_path, [file_path], vector, [vector])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        first = ["/d/a.md", "/d/b.md", "/d/c.md"]
+        assert _files(db, [sid for sid, _ in db.vec_search(self.QUERY, 3)]) == first
+        assert [passage for _, _, passage, _ in db.unit_search(self.QUERY, 3)] == first
+        # Fewer finite rows than the limit: all of them.
+        assert _files(db, [sid for sid, _ in db.vec_search(self.QUERY, 9)]) == list(finite)
+
+    def test_a_limit_past_the_cap_pages_through_the_knn(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pages of the cap, each from the last one's final distance on: a tie across a page
+        boundary comes back once and whole, a section's second passage keeps its own slot,
+        and no row is read through the exact scan."""
+        stored = {  # section vector, passage vectors: distances 0 < 1 < 2 = 2 < 3 < 4 < 5 < 6
+            "/d/f.md": (_axis(1, 6), [_axis(1, 6)]),
+            "/d/d.md": (_axis(1, 2), [_axis(1, 2)]),
+            "/d/a.md": (_axis(1), [_axis(1), _axis(1, 4)]),
+            "/d/e.md": (_axis(1, 3), [_axis(1, 3), _axis(1, 5)]),
+            "/d/c.md": (_axis(1, 2), [_axis(1, 2)]),
+            "/d/b.md": (_axis(1, 1), [_axis(1, 1)]),
+        }
+        for file_path, (section, units) in stored.items():
+            _put(db, file_path, [f"{file_path}#{n}" for n in range(len(units))], section, units)
+        sections, passages = db.vec_search(self.QUERY, 4), db.unit_search(self.QUERY, 5)
+        deeper = db.unit_search(self.QUERY, 6)
+
+        statements: list[str] = []
+        db.connection().set_trace_callback(statements.append)
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        try:
+            paged_sections = db.vec_search(self.QUERY, 4)
+            paged_passages = db.unit_search(self.QUERY, 5)
+            paged_deeper = db.unit_search(self.QUERY, 6)
+        finally:
+            db.connection().set_trace_callback(None)
+        assert sorted(paged_sections) == sorted(sections)
+        assert sorted(_files(db, [sid for sid, _ in paged_sections])) == [
+            "/d/a.md", "/d/b.md", "/d/c.md", "/d/d.md"
+        ]  # fmt: skip
+        assert sorted(paged_passages) == sorted(passages)
+        assert sorted(p for _, _, p, _ in paged_passages) == [
+            "/d/a.md#0", "/d/b.md#0", "/d/c.md#0", "/d/d.md#0", "/d/e.md#0"
+        ]  # fmt: skip
+        # A section's second passage keeps a slot of its own.
+        assert sorted(paged_deeper) == sorted(deeper)
+        assert "/d/a.md#1" in [p for _, _, p, _ in paged_deeper]
+        pages = [sql for sql in statements if "distance >=" in sql]
+        assert len(pages) == 2 + 3 + 3, "two pages of sections, three each of passages"
+        assert not [sql for sql in statements if "vec_distance_cosine" in sql]
+
+    @pytest.mark.parametrize("limit", [3, 9])
+    def test_a_tie_as_wide_as_the_cap_falls_back_to_the_scan(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch, limit: int
+    ) -> None:
+        tiny = [1e-300] * DEFAULT_EMBEDDING_DIM  # zero as float32: a NaN distance
+        for file_path in ["/d/y.md", "/d/z.md"]:
+            _put(db, file_path, ["nan"], tiny, [tiny])
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        for n in range(4):
+            _put(db, f"/d/b{n}.md", ["b"], self.EDGE, [self.EDGE])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        want = ["/d/a.md", "/d/b0.md", "/d/b1.md", "/d/b2.md", "/d/b3.md"]
+        assert sorted(_files(db, [sid for sid, _ in db.vec_search(self.QUERY, limit)])) == want
+        assert len(db.unit_search(self.QUERY, limit)) == len(want)
+
+    def test_the_fallback_reads_up_to_the_limit_th_distance_past_the_stuck_tie(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Distances 0, 1, 1, 1, 2, 3 under a cap of three: the second page is the tie at 1,
+        and the fifth row, at 2, lies past it."""
+        weights = {"a": 0.0, "b0": 1.0, "b1": 1.0, "b2": 1.0, "c": 2.0, "d": 3.0}
+        for name, weight in weights.items():
+            _put(db, f"/d/{name}.md", [name], _axis(1, weight), [_axis(1, weight)])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        want = ["/d/a.md", "/d/b0.md", "/d/b1.md", "/d/b2.md", "/d/c.md"]
+        assert sorted(_files(db, [sid for sid, _ in db.vec_search(self.QUERY, 5)])) == want
+        assert sorted(p for _, _, p, _ in db.unit_search(self.QUERY, 5)) == [
+            "a", "b0", "b1", "b2", "c"
+        ]  # fmt: skip
+
+    def test_the_pages_past_the_cap_read_one_snapshot(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for n, name in enumerate("abcde"):
+            _put(db, f"/d/{name}.md", [name], _axis(1, n), [_axis(1, n)])
+        before = db.vec_search(self.QUERY, 4)
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        far = _axis(0, 1)
+        pages: list[str] = []
+        written: list[bool] = []
+
+        def re_index() -> None:  # another connection, as a concurrent indexing run would be
+            for name in "cd":
+                _put(db, f"/d/{name}.md", [name], far, [far])
+            written.append(True)
+
+        def before_the_second_page(sql: str) -> None:
+            if "distance >=" in sql:
+                pages.append(sql)
+                if len(pages) == 2:
+                    writer = threading.Thread(target=re_index)
+                    writer.start()
+                    writer.join()
+
+        db.connection().set_trace_callback(before_the_second_page)
+        try:
+            found = db.vec_search(self.QUERY, 4)
+        finally:
+            db.connection().set_trace_callback(None)
+        assert len(pages) == 2, "a second page was read"
+        assert written, "the re-index committed before it"
+        assert found == before, "the first page's snapshot, not what replaced it"
+
+    def test_an_empty_table_at_the_cap_returns_nothing(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        assert db.vec_search(self.QUERY, 3) == []
+        assert db.unit_search(self.QUERY, 3) == []
+
+    def test_a_scope_crowded_out_by_another_root_keeps_its_vector_lane(self, db: Database) -> None:
+        """The issue's repro: another root of a shared database holds every nearer vector, so
+        the scoped search widens until its passage request is past the cap, and sqlite-vec's
+        refusal used to leave it ranking by keyword alone."""
+        for n in range(500):
+            _put(db, f"/e/{n:03}.md", ["near"], self.QUERY, [self.QUERY])
+        ours = ["/d/a.md", "/d/b.md", "/d/c.md"]
+        for file_path in ours:
+            _put(db, file_path, ["mine"], self.EDGE, [self.EDGE])
+        searcher = HybridSearcher(db, _AlwaysEmbeds(self.QUERY), scope="/d")
+        try:
+            results = searcher.search("mine")
+            assert sorted(r.file_path for r in results) == ours
+            assert all(r.vec_rank is not None for r in results), "ranked by keyword alone"
+            best, passages = searcher._nearest(self.QUERY, 20)
+        finally:
+            searcher.close()
+        assert sorted(_files(db, list(best))) == ours
+        assert set(passages) == set(best)
+
+    def test_the_scan_past_the_cap_reads_the_snapshot_its_edge_came_from(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _put(db, "/d/a.md", ["a"], self.QUERY, [self.QUERY])
+        for n in range(4):
+            _put(db, f"/d/b{n}.md", ["b"], self.EDGE, [self.EDGE])
+        monkeypatch.setattr(db_module, "VEC_K_MAX", 3)
+        far = _axis(0, 1)
+
+        moved: list[bool] = []
+        written: list[bool] = []
+
+        def re_index() -> None:  # another connection, as a concurrent indexing run would be
+            for n in range(4):
+                _put(db, f"/d/b{n}.md", ["b"], far, [far])
+            written.append(True)
+
+        def before_the_scan(sql: str) -> None:
+            # The scan bounds its distances with `<=`; the edge statement before it does not.
+            if "vec_distance_cosine" in sql and "<=" in sql and not moved:
+                moved.append(True)
+                writer = threading.Thread(target=re_index)
+                writer.start()
+                writer.join()
+
+        db.connection().set_trace_callback(before_the_scan)
+        try:
+            found = db.vec_search(self.QUERY, 3)
+        finally:
+            db.connection().set_trace_callback(None)
+        assert moved, "the scan ran"
+        assert written, "the re-index committed before the scan read"
+        assert len(found) == 5, "the edge's tie, not what replaced it"
 
     def test_a_limit_below_one_returns_nothing(self, db: Database) -> None:
         _put(db, "/d/a.md", ["alpha"], self.QUERY, [self.QUERY])
