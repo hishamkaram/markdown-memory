@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -140,7 +141,11 @@ class TestWorkTree:
         self, repo: Path, worktree: Path
     ) -> None:
         shutil.rmtree(repo / ".git" / "worktrees" / "w")
-        with pytest.raises(WorkTreeError, match="not a git repository"):
+        # Git's own words for this changed in 2.56 ("not a git repository" became "gitfile
+        # does not point to a valid repository"), so only ours, and that git's follow, are held.
+        with pytest.raises(
+            WorkTreeError, match=re.escape(f"which work tree holds {worktree}: fatal: ")
+        ):
             work_tree(worktree)
 
     def test_no_git_on_path_means_no_work_tree(
@@ -304,7 +309,7 @@ class TestRouting:
         assert "absolute path of an existing directory" in missing
         assert "absolute path of an existing directory" in relative
         assert "has no docs directory" in no_docs and "Call without `cwd`" in no_docs
-        assert "not a git repository" in broken
+        assert f"which work tree holds {worktree}: fatal: " in broken
 
     async def test_one_server_answers_for_a_bounded_number_of_trees(
         self, primary: MarkdownMemoryService, repo: Path, monkeypatch: pytest.MonkeyPatch
