@@ -27,7 +27,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import pairwise
 from typing import NamedTuple, NoReturn, TypeVar
 
-from markdown_memory.db import MODEL_META_KEY, WEIGHTS_META_KEY, WEIGHTS_REVOKED, Database
+from markdown_memory.db import (
+    MODEL_META_KEY,
+    WEIGHTS_META_KEY,
+    WEIGHTS_MISMATCH_KEY,
+    WEIGHTS_REVOKED,
+    Database,
+)
 from markdown_memory.discovery import walk_order
 from markdown_memory.embedders import Embedder, short_weights
 from markdown_memory.exceptions import MarkdownMemoryError, SearchError
@@ -70,6 +76,12 @@ LITERAL_CANDIDATES = 200
 BLOCKS_BEFORE = 1
 BLOCKS_AFTER = 3
 _PASSAGES_PER_CANDIDATE = 10  # passage neighbours fetched per wanted section
+# A revoked index with no reason to read: another process certified or cleared it between
+# the two reads, or none was given, so this says only what this search saw.
+_REFUSED_WITHOUT_REASON = (
+    "Vector ranking was refused for this search: the index was observed as revoked, and no "
+    "reason was available."
+)
 # What `_in_order` ranks: a section id, or a passage as `(section id, ordinal)`.
 _K = TypeVar("_K", int, tuple[int, int])
 
@@ -874,13 +886,10 @@ class HybridSearcher:
             # repair is pending. That run withdraws it once the whole index agrees.
             return recorded
         if recorded == WEIGHTS_REVOKED:
-            # An indexing run is replacing the vectors, and has said so where
-            # `index_status` reads it; until it finishes, no weights - old or new - have
-            # a whole index to rank against.
-            raise SearchError(
-                "This index is being re-embedded with other weights, so only keyword "
-                "ranking is used until index_directory finishes."
-            )
+            # No weights - old or new - have a whole index to rank against. Why is said in
+            # the words of whoever revoked it, written with the revocation and kept true
+            # once that run has stopped; this search has no account of its own (#152).
+            raise SearchError(self._db.get_meta(WEIGHTS_MISMATCH_KEY) or _REFUSED_WITHOUT_REASON)
         message = (
             f"This index was built by weights {short_weights(recorded)} and the model "
             f"answering now reports {short_weights(weights)}: the distance "

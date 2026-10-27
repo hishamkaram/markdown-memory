@@ -1158,6 +1158,37 @@ MUTATIONS = (
         tests="test_certifying_writes_the_revision_and_clears_the_reason_together",
     ),
     Mutation(
+        name="search: describe a revoked index in a sentence of its own again",
+        module="search.py",
+        old="raise SearchError(self._db.get_meta(WEIGHTS_MISMATCH_KEY) or _REFUSED_WITHOUT_REASON)",
+        new=(
+            'raise SearchError("This index is being re-embedded with other weights, so only "'
+            ' "keyword ranking is used until index_directory finishes.")'
+        ),
+        tests=(
+            "test_a_revoked_index_keeps_the_reason_the_indexer_gave"
+            " or test_a_stopped_repair_over_an_old_versions_reason_is_told_in_its_own_words"
+            " or test_a_finished_run_that_left_another_directory_stale_names_it"
+        ),
+    ),
+    Mutation(
+        name="search: report a revoked index's reason withdrawn between the reads as None",
+        module="search.py",
+        old="raise SearchError(self._db.get_meta(WEIGHTS_MISMATCH_KEY) or _REFUSED_WITHOUT_REASON)",
+        new="raise SearchError(str(self._db.get_meta(WEIGHTS_MISMATCH_KEY)))",
+        tests="test_a_reason_withdrawn_between_the_two_reads_is_not_reported_as_none",
+    ),
+    Mutation(
+        name="search: log an empty reason for a revoked index as an empty refusal",
+        module="search.py",
+        old="raise SearchError(self._db.get_meta(WEIGHTS_MISMATCH_KEY) or _REFUSED_WITHOUT_REASON)",
+        new=(
+            "raise SearchError(_REFUSED_WITHOUT_REASON if (reason := self._db.get_meta("
+            "WEIGHTS_MISMATCH_KEY)) is None else reason)"
+        ),
+        tests="test_an_empty_reason_is_not_logged_as_an_empty_refusal",
+    ),
+    Mutation(
         name="search: describe an index being re-embedded as one built by other weights",
         module="search.py",
         old="        if recorded == WEIGHTS_REVOKED:\n",

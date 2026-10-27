@@ -25,7 +25,7 @@ from markdown_memory.db import (
     serialize_embedding,
 )
 from markdown_memory.discovery import walk_order
-from markdown_memory.exceptions import DatabaseError, SearchError
+from markdown_memory.exceptions import DatabaseError, IndexCancelled, SearchError
 from markdown_memory.indexer import Indexer
 from markdown_memory.models import (
     Document,
@@ -773,6 +773,28 @@ class TestRankingIsActuallyTested:
         assert heading_match[0] == "Vacuuming"  # bm25(5.0, 3.0, 1.0) weights the heading
 
 
+_REFUSAL = "vector search failed; using the other index only: "
+_NO_REASON = (
+    "Vector ranking was refused for this search: the index was observed as revoked, and no "
+    "reason was available."
+)
+
+
+def _refusal_logged(
+    db: Database, embedder: FakeEmbedder, caplog: pytest.LogCaptureFixture, query: str = "hello"
+) -> str:
+    """What a search with ``embedder`` logged for refusing the vectors; it ranked none."""
+    caplog.clear()
+    searcher = HybridSearcher(db, embedder)
+    try:
+        results = searcher.search(query)
+    finally:
+        searcher.close()
+    assert results and all(result.vec_rank is None for result in results)
+    [refusal] = [message for message in caplog.messages if message.startswith(_REFUSAL)]
+    return refusal.removeprefix(_REFUSAL)
+
+
 def test_a_revoked_index_keeps_the_reason_the_indexer_gave(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -791,7 +813,89 @@ def test_a_revoked_index_keeps_the_reason_the_indexer_gave(
             searcher.close()
         assert results and all(result.vec_rank is None for result in results)
         assert db.get_meta("embedding_weights_mismatch") == "re-embedding under /d"
-    assert "being re-embedded" in caplog.text
+    # In the indexer's own words, not a guess that a run is still going (#152).
+    assert _REFUSAL + "re-embedding under /d" in caplog.messages
+
+
+class TestTheRevokedIndexRefusal:
+    """#152: a search refusing a revoked index says what the revoking run recorded, which
+    stays true once that run has stopped, rather than claiming one is still going."""
+
+    def test_a_stopped_repair_over_an_old_versions_reason_is_told_in_its_own_words(
+        self, db: Database, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        for name in ("a", "b"):
+            (root / f"{name}.md").write_text(f"# {name}\n\nhello {name}\n")
+        Indexer(db, FakeEmbedder(model_name="model-a", weights="a" * 40)).index_directory(root)
+        # The reason versions up to 0.7.9 recorded, which no migration rewrites.
+        db.revoke_weights(
+            "model-b is re-embedding this index with other weights (bbbbbbbbbbbb). Only "
+            "keyword ranking is used until every document has been re-embedded; semantic "
+            "ranking resumes when index_directory finishes."
+        )
+        renamed = FakeEmbedder(model_name="model-b", weights="b" * 40)
+
+        def one_stored() -> bool:
+            return "b" * 40 in [known[3] for known in db.document_hashes(str(root)).values()]
+
+        with pytest.raises(IndexCancelled):
+            Indexer(db, renamed, workers=1).index_directory(root, should_stop=one_stored)
+
+        assert db.get_meta(WEIGHTS_META_KEY) == WEIGHTS_REVOKED
+        refusal = _refusal_logged(db, renamed, caplog)
+        assert refusal == Indexer(db, renamed)._revocation()
+        assert refusal == db.index_status(str(root)).weights_mismatch
+        assert "finishes" not in refusal
+
+    def test_a_finished_run_that_left_another_directory_stale_names_it(
+        self, db: Database, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        old, new = tmp_path / "old", tmp_path / "new"
+        for root in (old, new):
+            root.mkdir()
+            (root / "a.md").write_text("# a\n\nhello a\n")
+        Indexer(db, FakeEmbedder(model_name="model", weights="a" * 40)).index_directory(old)
+        weights_b = FakeEmbedder(model_name="model", weights="b" * 40)
+        Indexer(db, weights_b).index_directory(new)
+
+        assert db.get_meta(WEIGHTS_META_KEY) == WEIGHTS_REVOKED
+        refusal = _refusal_logged(db, weights_b, caplog)
+        assert refusal == db.index_status(str(new)).weights_mismatch
+        assert str(old) in refusal
+
+    def test_a_reason_withdrawn_between_the_two_reads_is_not_reported_as_none(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Another process certifies the index after search found it revoked and before it
+        read why: the refusal says only what this search saw, not that the index is still
+        revoked."""
+        _store_stamped(db, "/d/a.md", "c" * 40)
+        db.revoke_weights("re-embedding under /d")
+        read = db.get_meta
+        certified: list[bool] = []
+
+        def certified_first(key: str) -> str | None:
+            if key == WEIGHTS_MISMATCH_KEY and not certified:
+                certified.append(True)
+                db.settle_weights("c" * 40)  # the run in the other process finishing
+            return read(key)
+
+        monkeypatch.setattr(db, "get_meta", certified_first)
+        assert _refusal_logged(db, FakeEmbedder(weights="b" * 40), caplog, "body number") == (
+            _NO_REASON
+        )
+        assert read(WEIGHTS_META_KEY) == "c" * 40 and read(WEIGHTS_MISMATCH_KEY) is None
+
+    def test_an_empty_reason_is_not_logged_as_an_empty_refusal(
+        self, db: Database, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store(db, FakeEmbedder(), "/d/a.md")
+        db.revoke_weights("")
+        assert _refusal_logged(db, FakeEmbedder(weights="b" * 40), caplog, "body number") == (
+            _NO_REASON
+        )
 
 
 class TestIdentifierLookups:

@@ -57,8 +57,9 @@ BUDGETS = {
     # and from 460 for #76: the top hit as its matched passage and neighbours (a list
     # counted as one block), and every check that decides when the whole section is sent;
     # and from 568 for #79: a plain call (`rate()`) is an identifier, and never a stopword;
-    # and from 624 for #107: the keyword, section and passage sources cut their ties by the walk.
-    "search.py": 634,
+    # and from 624 for #107: the keyword, section and passage sources cut their ties by the walk;
+    # and from 634 for #152: a revoked index is refused with the reason its revoker recorded.
+    "search.py": 641,
     # Raised from 355 for #69: one service per work tree a call names, routed by path or cwd;
     # and for #73: every result sent once, as compact JSON text; and from 510 for #76: paths
     # sent relative to the root, a relative path resolved back under it first, and the
